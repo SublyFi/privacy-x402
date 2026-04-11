@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alchemy Agentic Gateway"
+  short_description: "Use Alchemy's gateway with API key, x402, or MPP"
+  default_prompt: "Use the Alchemy gateway flow for this blockchain task and guide me through the right auth and payment path."

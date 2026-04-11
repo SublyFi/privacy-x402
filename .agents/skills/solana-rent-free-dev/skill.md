@@ -1,0 +1,304 @@
+---
+name: solana-rent-free-dev
+description: >
+  Skill for Solana development using rent-free primitives from Light Protocol.
+  Covers client development (TypeScript, Rust) and program development (Rust)
+  across Anchor, native Rust, and Pinocchio. Focus areas include DeFi and
+  Payments (Light Token, Light-PDA). Other use cases include airdrops and token
+  distribution (Compressed Token), and user/app state plus nullifiers for
+  payments and ZK applications (Compressed PDA).
+compatibility: |
+  Requires ZK Compression CLI, Solana CLI, Anchor CLI, and Node.js.
+metadata:
+  mintlify-proj: lightprotocol
+  openclaw:
+    requires:
+      env: []
+      bins: ["node", "solana", "anchor", "cargo", "light"]
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Task
+  - WebFetch(https://zkcompression.com/*)
+  - WebFetch(https://github.com/Lightprotocol/*)
+  - WebSearch
+  - mcp__zkcompression__SearchLightProtocol
+  - mcp__deepwiki__ask_question
+---
+
+## Capabilities
+
+ZK Compression is a framework on Solana for stablecoin payment rails, consumer apps and defi. The Light SDK and API's let you create mint, token and PDA accounts >99% cheaper with familiar Solana developer experience.
+
+### Primitives
+
+| Primitive        | Use case                                                                                                                                                                                               | Constraints                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| Light Token      | Most token use cases (launchpads, DeFi, payments). Rent-free mint and token accounts. \~200x cheaper than SPL and more compute-unit efficient on the hot path.                                         |                  |
+| Light-PDA        | DeFi program state such as AMM pools and vaults. \~98% cheaper than PDAs and can be implemented with minimal code changes.                                                                             |                  |
+| Compressed Token | Only for Airdrops and token distribution. Prefer Light Token for other purposes. Used by Light Token under the hood for rent-free storage of inactive Light Tokens. Supported by Phantom and Backpack. | Do not use for general-purpose token features. Use Light Token instead.        |
+| Compressed PDA   | User state and app state, nullifiers (payments and ZK applications), DePIN nodes, and stake accounts. Similar to program-derived addresses without a rent-exempt balance.                              | Not for shared state, pool accounts, or config accounts. Use Light-PDA instead |
+
+View a complete API comparison to SPL and Solana: https://www.zkcompression.com/api-reference/solana-to-light-comparison.
+
+### Creation cost and Compute Unit Consumption
+
+| Metric | Light | Standard Solana |
+| ------------------------------------- | -----------------: | --------------: |
+| **Mint Account** | **~0.00001 SOL** | ~0.0015 SOL |
+| **Token Account** | **~0.00001 SOL** | ~0.0029 SOL |
+| **PDA (100-byte)** | **~0.0000115 SOL** | ~0.0016 SOL |
+| **Associated token account creation** | **4,348 CU** | 14,194 CU |
+| **Transfer** | **312 CU** | 4,645 CU |
+| **Transfer** (rent-free) | **1,885 CU** | 4,645 CU |
+
+### Install
+
+```bash theme={null}
+npx skills add Lightprotocol/skills
+```
+
+## Workflow
+
+1. **Clarify intent**
+   - Recommend plan mode, if it's not activated
+   - Use `AskUserQuestion` to resolve blind spots
+   - All questions must be resolved before execution
+2. **Identify references and skills**
+   - Match task to available [skills](#defi) below
+   - Locate relevant [documentation and examples](#documentation-and-examples)
+3. **Write plan file** (YAML task format)
+   - Use `AskUserQuestion` for anything unclear — never guess or assume
+   - Identify blockers: permissions, dependencies, unknowns
+   - Plan must be complete before execution begins
+4. **Execute**
+   - Use `Task` tool with subagents for parallel research
+   - Subagents load skills via `Skill` tool
+   - Track progress with `TodoWrite`
+5. **When stuck**: spawn subagent with `Read`, `Glob`, `Grep`, DeepWiki MCP access and load `skills/ask-mcp`
+
+## Skills
+
+| Use case | Skill |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Skill for payment flows using Light Token APIs for sponsored rent-exemption. | [payments](https://github.com/Lightprotocol/skills/tree/main/skills/payments) |
+| For Solana program development with tokens and PDAs, Light is 200x cheaper than SPL/ Solana and has minimal code differences | [light-sdk](https://github.com/Lightprotocol/skills/tree/main/skills/light-sdk) |
+| For client development with tokens on Solana, Light Token is 200x cheaper than SPL and has minimal changes | [light-token-client](https://github.com/Lightprotocol/skills/tree/main/skills/light-token-client) |
+| For data pipelines, aggregators, or indexers, real-time account state streaming on Solana with light account hot/cold lifecycle tracking | [data-streaming](https://github.com/Lightprotocol/skills/tree/main/skills/data-streaming) |
+| For token distribution on Solana 5000x cheaper than SPL (rewards, airdrops, depins, ...) | [token-distribution](https://github.com/Lightprotocol/skills/tree/main/skills/token-distribution) |
+| For custom ZK Solana programs and privacy-preserving applications to prevent double spending | [zk-nullifier](https://github.com/Lightprotocol/skills/tree/main/skills/zk-nullifier) |
+| For program development on Solana with infrequently accessed state, such as per-user state, DePIN registrations, ... | [solana-compression](https://github.com/Lightprotocol/skills/tree/main/skills/solana-compression) |
+| For testing with Light Protocol programs and clients on localnet, devnet, and mainnet validation | [testing](https://github.com/Lightprotocol/skills/tree/main/skills/testing) |
+| For questions about compressed accounts, Light SDK, Solana development, Claude Code features, or agent skills | [ask-mcp](https://github.com/Lightprotocol/skills/tree/main/skills/ask-mcp) |
+
+### Install to Any Agent
+
+```
+npx skills add Lightprotocol/skills
+```
+
+## Context
+
+- SPL to Light reference: https://zkcompression.com/api-reference/solana-to-light-comparison
+
+### light-token
+
+A token standard functionally equivalent to SPL that stores mint and token accounts more efficiently.
+
+**Mint accounts** represent a unique mint and optionally store token-metadata. Functionally equivalent to SPL mints.
+
+**Token accounts** hold balances from any light, SPL, or Token-2022 mint, without paying rent-exemption.
+
+The token program pays rent-exemption cost for you. When an account has no remaining sponsored rent, the account is automatically compressed. Your tokens are cryptographically preserved as a compressed token account (rent-free). The account is loaded into hot account state in-flight when someone interacts with it again.
+
+Use for: Stablecoin Orchestration, Cards, Agent Commerce, Defi, ... .
+
+### light-PDA
+
+The Light-SDK pays rent-exemption for your PDAs, token accounts, and mints (98% cost savings). Your program logic stays the same.
+
+After extended inactivity (multiple epochs without writes), accounts auto-compress to cold state. Your program only interacts with hot accounts. Clients load cold accounts back on-chain via `create_load_instructions`.
+
+| Area            | Change                                                          |
+| --------------- | --------------------------------------------------------------- |
+| State struct    | Derive `LightAccount`, add `compression_info: CompressionInfo`  |
+| Accounts struct | Derive `LightAccounts`, add `#[light_account]` on init accounts |
+| Program module  | Add `#[light_program]` above `#[program]`                       |
+| Instructions    | No changes                                                      |
+
+Use for: DeFi program state, AMM pools, vaults.
+
+### Compressed token (only use for token distribution)
+
+Compressed token accounts store token balance, owner, and other information of tokens like SPL and light-tokens. Compressed token accounts are rent-free. Any light-token or SPL token can be compressed/decompressed at will. Supported by Phantom and Backpack.
+
+Only use for: airdrops, token distribution without paying upfront rent per recipient.
+
+### Compressed PDA
+
+Compressed PDAs are derived using a specific program address and seed, like regular PDAs. Custom programs invoke the Light System program to create and update accounts, instead of the System program.
+
+Persistent unique identification. Program ownership. CPI between compressed and regular PDAs.
+
+Use rent-free PDAs for: user state, app state, nullifiers for payments, DePIN node accounts, stake accounts, nullifiers for zk applications. Not for shared state, pool, and config accounts.
+
+### Guidelines
+
+- **light-token ≠ compressed token.** light-token is a Solana account in hot state. Compressed token is a compressed account, always compressed, rent-free.
+- **light-PDA ≠ compressed PDA.** light-PDA is a Solana PDA that transitions to compressed state when inactive. Compressed PDA is always compressed, derived like a PDA and requires a validity proof.
+- **light-token accounts hold SPL and Token-2022 balances**, not just light-mint balances.
+- When sponsored rent on a light-token or light-PDA runs out, the account compresses. It decompresses on next interaction.
+
+## Payment Flows
+
+| Name | Description | Docs | Examples |
+|------|-------------|------|----------|
+| Overview | Learn how the Light Token APIs reduce account creation cost for stablecoin payment infrastructure by 99% with similar developer experience to SPL / Token 2022. | [overview](https://zkcompression.com/light-token/payments/overview) | |
+| Basic payment | Send a single token transfer with Light Token APIs for stablecoin payments with comparison to SPL. | [basic-payment](https://zkcompression.com/light-token/payments/basic-payment) | [basic-send-action](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/send/basic-send-action.ts) \| [basic-send-instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/send/basic-send-instruction.ts) |
+| Batch payments | Send payments to multiple recipients in a single transaction or sequentially. | [batch-payments](https://zkcompression.com/light-token/payments/batch-payments) | [batch-send](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/send/batch-send.ts) |
+| Payment with memo | Attach invoice IDs, payment references, or notes to Light Token transfers using Solana's memo program. The memo is recorded in the transaction logs for reconciliation. | [payment-with-memo](https://zkcompression.com/light-token/payments/payment-with-memo) | [payment-with-memo](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/send/payment-with-memo.ts) |
+| Receive payments | Prepare to receive token payments by loading cold accounts and sharing your associated token account address. | [receive-payments](https://zkcompression.com/light-token/payments/receive-payments) | [receive](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/receive/receive.ts) |
+| Verify payments | Query token balances and transaction history to verify incoming payments. | [verify-payments](https://zkcompression.com/light-token/payments/verify-payments) | [get-balance](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/verify/get-balance.ts) \| [get-history](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/verify/get-history.ts) |
+| Verify address | Verify recipient addresses before sending payments. Address validation prevents sending tokens to invalid or unexpected account types. | [verify-recipient-address](https://zkcompression.com/light-token/payments/verify-recipient-address) | [verify-address](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/verify/verify-address.ts) |
+| Wrap and unwrap | Move tokens between SPL / Token 2022 and Light Token accounts for interoperability with applications that don't support Light Token yet. | [wrap-unwrap](https://zkcompression.com/light-token/payments/wrap-unwrap) | [wrap](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/interop/wrap.ts) \| [unwrap](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/interop/unwrap.ts) |
+| Spend permissions | Delegate token spending to a third party with an amount cap. The delegate can transfer tokens on behalf of the owner up to the approved amount, without the owner signing each transaction. | [spend-permissions](https://zkcompression.com/light-token/payments/spend-permissions) | [delegate-approve](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/spend-permissions/delegate-approve.ts) \| [delegate-transfer](https://github.com/Lightprotocol/examples-light-token/blob/main/toolkits/payments/spend-permissions/delegate-transfer.ts) |
+| Nullifier PDAs | Create rent-free nullifier PDAs to prevent duplicate actions. | [nullifier-pda](https://zkcompression.com/pda/compressed-pdas/nullifier-pda) | |
+| Production readiness | Non-exhaustive checklist for deploying Light Token payment flows to production, including RPC infrastructure, error handling, and security. | [production-readiness](https://zkcompression.com/light-token/payments/production-readiness) | |
+| Wallet integration | Guide for Wallet Applications to add Light-token support. | [wallets/overview](https://zkcompression.com/light-token/wallets/overview) | |
+| Sign with Privy | Integrate light-token with Privy embedded wallets for rent-free token accounts and transfers. | [privy](https://zkcompression.com/light-token/wallets/privy) | [sign-with-privy](https://github.com/Lightprotocol/examples-light-token/tree/main/toolkits/sign-with-privy) |
+| Sign with Wallet Adapter | Integrate light-token with Solana Wallet Adapter for rent-free token accounts and transfers. | [wallet-adapter](https://zkcompression.com/light-token/wallets/wallet-adapter) | [sign-with-wallet-adapter](https://github.com/Lightprotocol/examples-light-token/tree/main/toolkits/sign-with-wallet-adapter) |
+| Gasless transactions | Abstract SOL fees so users never hold SOL. Sponsor top-ups and transaction fees by setting your application as the fee payer. | [gasless-transactions](https://zkcompression.com/light-token/wallets/gasless-transactions) | [gasless-transactions](https://github.com/Lightprotocol/examples-light-token/tree/main/toolkits/gasless-transactions) |
+| Smart wallets | Send Light Tokens from PDA-based smart wallets. Covers off-curve associated token account creation, instruction-level transfers, and sync and async execution with Squads. | [smart-wallets](https://zkcompression.com/light-token/wallets/smart-wallets) | |
+
+## Examples
+
+### TypeScript client (`@lightprotocol/compressed-token`)
+
+| Operation             | Docs guide                                                                              | GitHub example                                                                                                                                                                                                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createMintInterface` | [create-mint](https://zkcompression.com/light-token/cookbook/create-mint)               | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-mint.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-mint.ts)               |
+| `createAtaInterface`  | [create-ata](https://zkcompression.com/light-token/cookbook/create-ata)                 | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-ata.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-ata.ts)                 |
+| `mintToInterface`     | [mint-to](https://zkcompression.com/light-token/cookbook/mint-to)                       | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/mint-to.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/mint-to.ts)                       |
+| `transferInterface`   | [transfer-interface](https://zkcompression.com/light-token/cookbook/transfer-interface) | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/transfer-interface.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/transfer-interface.ts) |
+| `approve`             | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)         | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/delegate-approve.ts)                                                                                                                                          |
+| `revoke`              | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)         | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/delegate-revoke.ts)                                                                                                                                           |
+| `delegateTransfer`    | [transfer-delegated](https://zkcompression.com/light-token/cookbook/transfer-delegated) | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/delegate-transfer.ts)                                                                                                                                         |
+| `wrap`                | [wrap-unwrap](https://zkcompression.com/light-token/cookbook/wrap-unwrap)               | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/wrap.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/wrap.ts)                             |
+| `unwrap`              | [wrap-unwrap](https://zkcompression.com/light-token/cookbook/wrap-unwrap)               | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/unwrap.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/unwrap.ts)                         |
+| `loadAta`             | [load-ata](https://zkcompression.com/light-token/cookbook/load-ata)                     | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/load-ata.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/load-ata.ts)                     |
+| `createAtaExplicitRentSponsor` | —                                                                               | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-ata-explicit-rent-sponsor.ts)                                                                                                                          |
+| `createSplInterface`  | —                                                                                       | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-spl-interface.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-spl-interface.ts) |
+| `createSplMint`       | —                                                                                       | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-spl-mint.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-spl-mint.ts)         |
+| `createT22Mint`       | —                                                                                       | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/actions/create-t22-mint.ts) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-t22-mint.ts)         |
+| `createTokenPool`     | —                                                                                       | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/typescript-client/instructions/create-token-pool.ts)                                                                                                                                |
+
+### Rust client (`light-token-client`)
+
+| Operation            | Docs guide                                                                                  | GitHub example                                                                                                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CreateMint`         | [create-mint](https://zkcompression.com/light-token/cookbook/create-mint)                   | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/create_mint.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/create_mint.rs)                                         |
+| `CreateAta`          | [create-ata](https://zkcompression.com/light-token/cookbook/create-ata)                     | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/create_associated_token_account.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/create_associated_token_account.rs) |
+| `CreateTokenAccount` | [create-token-account](https://zkcompression.com/light-token/cookbook/create-token-account) | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/create_token_account.rs)                                                                                                                                                |
+| `MintTo`             | [mint-to](https://zkcompression.com/light-token/cookbook/mint-to)                           | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/mint_to.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/mint_to.rs)                                                 |
+| `TransferInterface`  | [transfer-interface](https://zkcompression.com/light-token/cookbook/transfer-interface)     | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/transfer_interface.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/transfer_interface.rs)                           |
+| `TransferChecked`    | [transfer-checked](https://zkcompression.com/light-token/cookbook/transfer-checked)         | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/transfer_checked.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/transfer_checked.rs)                               |
+| `Approve`            | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)             | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/approve.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/approve.rs)                                                 |
+| `Revoke`             | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)             | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/revoke.rs) \| [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/revoke.rs)                                                   |
+| `Burn`               | [burn](https://zkcompression.com/light-token/cookbook/burn)                                 | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/burn.rs)                                                                                                                                                                |
+| `BurnChecked`        | [burn](https://zkcompression.com/light-token/cookbook/burn)                                 | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/burn_checked.rs)                                                                                                                                                        |
+| `Freeze`             | [freeze-thaw](https://zkcompression.com/light-token/cookbook/freeze-thaw)                   | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/freeze.rs)                                                                                                                                                              |
+| `Thaw`               | [freeze-thaw](https://zkcompression.com/light-token/cookbook/freeze-thaw)                   | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/thaw.rs)                                                                                                                                                                |
+| `Close`              | [close-token-account](https://zkcompression.com/light-token/cookbook/close-token-account)   | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/close.rs)                                                                                                                                                               |
+| `Wrap`               | [wrap-unwrap](https://zkcompression.com/light-token/cookbook/wrap-unwrap)                   | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/wrap.rs)                                                                                                                                                                          |
+| `Unwrap`             | [wrap-unwrap](https://zkcompression.com/light-token/cookbook/wrap-unwrap)                   | [action](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/actions/unwrap.rs)                                                                                                                                                                        |
+| `MintToChecked`      | [mint-to](https://zkcompression.com/light-token/cookbook/mint-to)                           | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/mint_to_checked.rs)                                                                                                                                                     |
+| `SplToLightTransfer` | —                                                                                           | [instruction](https://github.com/Lightprotocol/examples-light-token/blob/main/rust-client/instructions/spl_to_light_transfer.rs)                                                                                                                                               |
+
+### Program examples (`light_token`)
+
+
+|  | Description |
+|---------|-------------|
+| [escrow](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/escrow) | Peer-to-peer light-token swap with offer/accept flow |
+| [fundraiser](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/fundraiser) | Token fundraiser with target, deadline, and refunds |
+| [light-token-minter](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/light-token-minter) | Create light-mints with metadata, mint tokens |
+| [token-swap](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/token-swap) | AMM with liquidity pools and swaps (Anchor) |
+| [cp-swap-reference](https://github.com/Lightprotocol/cp-swap-reference) | Fork of Raydium AMM that creates markets without paying rent-exemption |
+| [pinocchio-swap](https://github.com/Lightprotocol/examples-light-token/tree/main/pinocchio/swap) | AMM with liquidity pools and swaps (Pinocchio) |
+| [create-and-transfer](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/create-and-transfer) | Create account via macro and transfer via CPI |
+|                                                                                                                                   |                                  |
+
+### Program macros (`light_token`)
+
+|                                                                                                                                           | Description                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| [counter](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/basic-macros/counter)                           | Create PDA with sponsored rent-exemption |
+| [create-ata](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/basic-macros/create-associated-token-account)                     | Create associated light-token account    |
+| [create-mint](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/basic-macros/create-mint)                   | Create light-token mint                  |
+| [create-token-account](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/basic-macros/create-token-account) | Create light-token account               |
+
+### CPI instructions (`light_token`)
+
+CPI calls can be combined with existing and/or light macros. The API is a superset of SPL-token.
+
+| Operation                    | Docs guide                                                                                  | GitHub example                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `CreateAssociatedAccountCpi` | [create-ata](https://zkcompression.com/light-token/cookbook/create-ata)                     | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/create-associated-token-account/src/lib.rs)           |
+| `CreateTokenAccountCpi`      | [create-token-account](https://zkcompression.com/light-token/cookbook/create-token-account) | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/create-token-account/src/lib.rs) |
+| `CreateMintCpi`              | [create-mint](https://zkcompression.com/light-token/cookbook/create-mint)                   | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/create-mint/src/lib.rs)          |
+| `MintToCpi`                  | [mint-to](https://zkcompression.com/light-token/cookbook/mint-to)                           | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/mint-to/src/lib.rs)              |
+| `MintToCheckedCpi`           | [mint-to](https://zkcompression.com/light-token/cookbook/mint-to)                           | [src](https://github.com/Lightprotocol/examples-light-token/tree/main/programs/anchor/basic-instructions/mint-to-checked)         |
+| `BurnCpi`                    | [burn](https://zkcompression.com/light-token/cookbook/burn)                                 | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/burn/src/lib.rs)                 |
+| `TransferCheckedCpi`         | [transfer-checked](https://zkcompression.com/light-token/cookbook/transfer-checked)         | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/transfer-checked/src/lib.rs)     |
+| `TransferInterfaceCpi`       | [transfer-interface](https://zkcompression.com/light-token/cookbook/transfer-interface)     | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/transfer-interface/src/lib.rs)   |
+| `ApproveCpi`                 | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)             | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/approve/src/lib.rs)              |
+| `RevokeCpi`                  | [approve-revoke](https://zkcompression.com/light-token/cookbook/approve-revoke)             | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/revoke/src/lib.rs)               |
+| `FreezeCpi`                  | [freeze-thaw](https://zkcompression.com/light-token/cookbook/freeze-thaw)                   | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/freeze/src/lib.rs)               |
+| `ThawCpi`                    | [freeze-thaw](https://zkcompression.com/light-token/cookbook/freeze-thaw)                   | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/thaw/src/lib.rs)                 |
+| `CloseAccountCpi`            | [close-token-account](https://zkcompression.com/light-token/cookbook/close-token-account)   | [src](https://github.com/Lightprotocol/examples-light-token/blob/main/programs/anchor/basic-instructions/close/src/lib.rs)                |
+
+### Extensions
+
+| Extension | Docs guide | GitHub example |
+|-----------|-----------|----------------|
+| Close mint | [close-mint](https://zkcompression.com/light-token/extensions/close-mint) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/close-mint.ts) |
+| Confidential transfer | [confidential-transfer](https://zkcompression.com/light-token/extensions/confidential-transfer) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/confidential-transfer.ts) |
+| Default account state | [default-account-state](https://zkcompression.com/light-token/extensions/default-account-state) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/default-account-state.ts) |
+| Interest-bearing tokens | [interest-bearing-tokens](https://zkcompression.com/light-token/extensions/interest-bearing-tokens) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/interest-bearing-tokens.ts) |
+| Metadata and metadata pointer | [metadata-and-metadata-pointer](https://zkcompression.com/light-token/extensions/metadata-and-metadata-pointer) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/metadata-and-metadata-pointer.ts) |
+| Pausable mint | [pausable-mint](https://zkcompression.com/light-token/extensions/pausable-mint) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/pausable-mint.ts) |
+| Permanent delegate | [permanent-delegate](https://zkcompression.com/light-token/extensions/permanent-delegate) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/permanent-delegate.ts) |
+| Token groups and members | [token-groups-and-members](https://zkcompression.com/light-token/extensions/token-groups-and-members) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/token-groups-and-members.ts) |
+| Transfer fees | [transfer-fees](https://zkcompression.com/light-token/extensions/transfer-fees) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/transfer-fees.ts) |
+| Transfer hook | [transfer-hook](https://zkcompression.com/light-token/extensions/transfer-hook) | [example](https://github.com/Lightprotocol/examples-light-token/blob/main/extensions/transfer-hook.ts) |
+
+## SDK references
+
+### TypeScript packages
+
+| Package                           | npm                                                                  |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `@lightprotocol/stateless.js`     | [npm](https://www.npmjs.com/package/@lightprotocol/stateless.js)     |
+| `@lightprotocol/compressed-token` | [npm](https://www.npmjs.com/package/@lightprotocol/compressed-token) |
+
+### Rust crates
+
+| Crate                        | docs.rs                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `light-sdk`                  | [docs.rs/light-sdk](https://docs.rs/light-sdk)                                   |
+| `light-sdk-pinocchio`        | [docs.rs/light-sdk-pinocchio](https://docs.rs/light-sdk-pinocchio)               |
+| `light-token`                | [docs.rs/light-token](https://docs.rs/light-token)                               |
+| `light-token-client`         | [docs.rs/light-token-client](https://docs.rs/light-token-client)                 |
+| `light-compressed-token-sdk` | [docs.rs/light-compressed-token-sdk](https://docs.rs/light-compressed-token-sdk) |
+| `light-client`               | [docs.rs/light-client](https://docs.rs/light-client)                             |
+| `light-program-test`         | [docs.rs/light-program-test](https://docs.rs/light-program-test)                 |
+| `light-account-pinocchio`    | [docs.rs/light-account-pinocchio](https://docs.rs/light-account-pinocchio)       |
+| `light-token-pinocchio`      | [docs.rs/light-token-pinocchio](https://docs.rs/light-token-pinocchio)           |
+| `light-hasher`               | [docs.rs/light-hasher](https://docs.rs/light-hasher)                             |
+| `light-account`              | [docs.rs/light-account](https://docs.rs/light-account)                           |
+
+---
+
+> For additional documentation and navigation, see: [https://www.zkcompression.com/llms.txt](https://www.zkcompression.com/llms.txt)
+> For additional skills, see: [https://github.com/Lightprotocol/skills](https://github.com/Lightprotocol/skills)

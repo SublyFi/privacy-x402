@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alchemy API"
+  short_description: "Build with Alchemy using a standard API key"
+  default_prompt: "Use Alchemy's API key flow to help me build with RPC, Data APIs, Webhooks, or Wallet APIs."

@@ -1,0 +1,65 @@
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::instructions as sysvar_instructions;
+
+use crate::ed25519_utils::verify_ed25519_signature;
+use crate::error::VaultError;
+use crate::state::{ForceSettleRequest, VaultConfig};
+
+#[derive(Accounts)]
+pub struct ForceSettleChallenge<'info> {
+    pub challenger: Signer<'info>,
+
+    pub vault_config: Account<'info, VaultConfig>,
+
+    #[account(
+        mut,
+        constraint = force_settle_request.vault == vault_config.key(),
+        constraint = !force_settle_request.is_resolved @ VaultError::AlreadyResolved,
+    )]
+    pub force_settle_request: Account<'info, ForceSettleRequest>,
+
+    /// CHECK: Instructions sysvar for Ed25519 signature verification
+    #[account(address = sysvar_instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
+}
+
+pub fn handler(
+    ctx: Context<ForceSettleChallenge>,
+    newer_free_balance: u64,
+    newer_locked_balance: u64,
+    newer_max_lock_expires_at: i64,
+    newer_receipt_nonce: u64,
+    newer_receipt_signature: [u8; 64],
+    _newer_receipt_message: Vec<u8>,
+) -> Result<()> {
+    let request = &ctx.accounts.force_settle_request;
+
+    // Challenge must be within dispute window
+    let clock = Clock::get()?;
+    require!(
+        clock.unix_timestamp <= request.dispute_deadline,
+        VaultError::DisputeWindowExpired
+    );
+
+    // Newer receipt must have higher nonce
+    require!(
+        newer_receipt_nonce > request.receipt_nonce,
+        VaultError::StaleReceiptNonce
+    );
+
+    // Verify Ed25519 signature
+    verify_ed25519_signature(
+        &ctx.accounts.instructions_sysvar,
+        &ctx.accounts.vault_config.vault_signer_pubkey,
+    )?;
+
+    // Update with newer receipt data
+    let request = &mut ctx.accounts.force_settle_request;
+    request.free_balance_due = newer_free_balance;
+    request.locked_balance_due = newer_locked_balance;
+    request.max_lock_expires_at = newer_max_lock_expires_at;
+    request.receipt_nonce = newer_receipt_nonce;
+    request.receipt_signature = newer_receipt_signature;
+
+    Ok(())
+}

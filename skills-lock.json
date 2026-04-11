@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "skills": {
+    "agentic-gateway": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "computedHash": "5ca0422360044ae5fbf589f426f63682f0d83fee8c2d367d5010f4d2935c03d4"
+    },
+    "alchemy-api": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "computedHash": "a7be7bba4a6cd3396025e4674685c266d6f6cf067236b3c692267e6769ffa28e"
+    },
+    "alchemy-cli": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "computedHash": "0de371cebef01f7410330dba84f5265d55f44de4d46d37a9960a1f58b6602cee"
+    },
+    "alchemy-codex": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "computedHash": "2962142fe40eb3df3a98b250bbee976c043f3c14ab32e48ff723131315e07754"
+    },
+    "arcium-program-development": {
+      "source": "sicmundu/arcium-program-skill",
+      "sourceType": "github",
+      "computedHash": "76a4b2e42e9bc3eae316233ee222669a07dbe874c72169df9f0734ce67b59926"
+    },
+    "ask-mcp": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "e099d45e00d063547779e2eefd88bbc34fb9f139482aa9aa4f44fa62ccdbe0fd"
+    },
+    "colosseum-copilot": {
+      "source": "ColosseumOrg/colosseum-copilot",
+      "sourceType": "github",
+      "computedHash": "7859139478a5276c63a6114f0c3f9899ca4a30b5e4239825d16b92e8744e9e07"
+    },
+    "data-streaming": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "493ce4cb6dc289b290b1ed0a8136156bf213450c5fba0856f8785661daf68230"
+    },
+    "light-sdk": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "03f979a34bb99a8ba426e0c1a43988a4b6740753d807a3e6108755c4bf93d91d"
+    },
+    "light-token-client": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "ab8def1653d3c477032baff245fac183986d47b0b289b9cfa6f146c7893003ac"
+    },
+    "payments": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "9f284f5f2180d00a0a5435c939b8407e8e08069d9ff2aa2792b4a0773442be19"
+    },
+    "solana-compression": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "392a7fa3b04f741f3948046945a610063520cc9c5289b73d28ac7928ed7fe79d"
+    },
+    "solana-dev": {
+      "source": "solana-foundation/solana-dev-skill",
+      "sourceType": "github",
+      "computedHash": "4a4c953b235944cc5c2a76af9669406ee01213bf6892941399e646cfbf9259b9"
+    },
+    "solana-rent-free-dev": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "b7fcc874843daf5324beacd62e83fd686c736e9915fb2491e5eaae328c62717d"
+    },
+    "testing": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "f00cf8444f494873d7a715bbc3500f24ef8416b19f1f8e7237d806873f4863bb"
+    },
+    "token-distribution": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "09fcde78ad7c70a63d63644d801712230f41c1b6ae4bfac5c2428eba80dae746"
+    },
+    "zk-nullifier": {
+      "source": "Lightprotocol/skills",
+      "sourceType": "github",
+      "computedHash": "0a1aca3ca19ac59fe0e0ae047269c80e48bad7c1ce22923869106b1da9fdc0fe"
+    }
+  }
+}
