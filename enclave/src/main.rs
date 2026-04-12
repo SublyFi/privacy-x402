@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
+mod audit;
 mod batch;
+mod deposit_detector;
 mod error;
 mod handlers;
 mod state;
@@ -15,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
+use deposit_detector::DepositDetector;
 use handlers::AppState;
 use state::VaultState;
 use wal::Wal;
@@ -50,12 +53,24 @@ async fn main() {
     // Spawn background tasks (batch settlement, reservation expiry)
     batch::spawn_background_tasks(app_state.clone());
 
+    // Spawn deposit detection (monitors on-chain deposits to update client balances)
+    let deposit_detector = Arc::new(DepositDetector::new(
+        Pubkey::default(), // Phase 1: placeholder vault token account
+        Pubkey::default(), // Phase 1: placeholder program ID
+        "http://127.0.0.1:8899".to_string(),
+        "ws://127.0.0.1:8900".to_string(),
+    ));
+    deposit_detector::spawn_deposit_detector(app_state.clone(), deposit_detector);
+
     let app = Router::new()
         .route("/v1/attestation", get(handlers::get_attestation))
         .route("/v1/verify", post(handlers::post_verify))
         .route("/v1/settle", post(handlers::post_settle))
         .route("/v1/cancel", post(handlers::post_cancel))
         .route("/v1/withdraw-auth", post(handlers::post_withdraw_auth))
+        .route("/v1/balance", post(handlers::post_balance))
+        .route("/v1/receipt", post(handlers::post_receipt))
+        .route("/v1/provider/register", post(handlers::post_register_provider))
         .with_state(app_state);
 
     let addr = "0.0.0.0:3100";

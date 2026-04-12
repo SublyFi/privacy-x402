@@ -88,16 +88,32 @@ pub struct VaultState {
     pub vault_signer_pubkey: Pubkey,
     pub usdc_mint: Pubkey,
     pub attestation_policy_hash: [u8; 32],
+    /// Auditor master secret for ElGamal encryption (Phase 2)
+    pub auditor_master_secret: RwLock<[u8; 32]>,
+    /// Current auditor epoch
+    pub auditor_epoch: AtomicU64,
     pub client_balances: DashMap<Pubkey, ClientBalance>,
     pub reservations: DashMap<String, Reservation>,
     pub payment_id_index: DashMap<String, String>,
     pub provider_credits: DashMap<String, ProviderCredit>,
     pub providers: DashMap<String, ProviderRegistration>,
+    /// Settlement history for audit record generation
+    pub settlement_history: DashMap<String, SettlementRecord>,
     pub receipt_nonce: AtomicU64,
     pub withdraw_nonce: AtomicU64,
     pub snapshot_seqno: AtomicU64,
     pub last_batch_at: RwLock<i64>,
     pub last_finalized_slot: AtomicU64,
+}
+
+/// Record of a completed settlement (for audit record generation)
+#[derive(Debug, Clone)]
+pub struct SettlementRecord {
+    pub settlement_id: String,
+    pub client: Pubkey,
+    pub provider: Pubkey,
+    pub amount: u64,
+    pub timestamp: i64,
 }
 
 impl VaultState {
@@ -116,11 +132,14 @@ impl VaultState {
             vault_signer_pubkey,
             usdc_mint,
             attestation_policy_hash,
+            auditor_master_secret: RwLock::new([0u8; 32]),
+            auditor_epoch: AtomicU64::new(0),
             client_balances: DashMap::new(),
             reservations: DashMap::new(),
             payment_id_index: DashMap::new(),
             provider_credits: DashMap::new(),
             providers: DashMap::new(),
+            settlement_history: DashMap::new(),
             receipt_nonce: AtomicU64::new(1),
             withdraw_nonce: AtomicU64::new(1),
             snapshot_seqno: AtomicU64::new(0),

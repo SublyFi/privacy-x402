@@ -100,6 +100,33 @@ export interface PaymentResponse {
   participantReceipt: string;
 }
 
+/** Facilitator /v1/balance response */
+export interface BalanceResponse {
+  ok: boolean;
+  client: string;
+  free: number;
+  locked: number;
+  totalDeposited: number;
+  totalWithdrawn: number;
+}
+
+/** Facilitator /v1/receipt response (ParticipantReceipt) */
+export interface ParticipantReceiptResponse {
+  ok: boolean;
+  participant: string;
+  participantKind: number;
+  recipientAta: string;
+  freeBalance: number;
+  lockedBalance: number;
+  maxLockExpiresAt: number;
+  nonce: number;
+  timestamp: number;
+  snapshotSeqno: number;
+  vaultConfig: string;
+  signature: string;
+  message: string;
+}
+
 /** A402Client configuration */
 export interface A402ClientConfig {
   /** Client wallet keypair */

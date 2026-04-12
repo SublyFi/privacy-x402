@@ -2,6 +2,7 @@
 members = [
     "programs/*",
     "enclave",
+    "parent",
 ]
 resolver = "2"
 

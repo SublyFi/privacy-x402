@@ -1,4 +1,5 @@
 pub const MAX_SETTLEMENTS_PER_TX: usize = 20;
+pub const MAX_ATOMIC_AUDITS_PER_TX: usize = 5;
 pub const DISPUTE_WINDOW_SEC: i64 = 86400; // 24 hours
 
 pub const VAULT_STATUS_ACTIVE: u8 = 0;
