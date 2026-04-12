@@ -70,6 +70,18 @@ pub enum EnclaveError {
     #[error("Provider participant pubkey is invalid")]
     InvalidProviderParticipant,
 
+    #[error("payTo does not match provider registration")]
+    PayToMismatch,
+
+    #[error("assetMint does not match provider registration")]
+    AssetMintMismatch,
+
+    #[error("network does not match provider registration")]
+    NetworkMismatch,
+
+    #[error("Request origin not in provider allowed origins")]
+    OriginNotAllowed,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -122,6 +134,10 @@ impl IntoResponse for EnclaveError {
             EnclaveError::InvalidProviderParticipant => {
                 (StatusCode::BAD_REQUEST, "invalid_provider_participant")
             }
+            EnclaveError::PayToMismatch => (StatusCode::BAD_REQUEST, "pay_to_mismatch"),
+            EnclaveError::AssetMintMismatch => (StatusCode::BAD_REQUEST, "asset_mint_mismatch"),
+            EnclaveError::NetworkMismatch => (StatusCode::BAD_REQUEST, "network_mismatch"),
+            EnclaveError::OriginNotAllowed => (StatusCode::FORBIDDEN, "origin_not_allowed"),
             EnclaveError::Internal(ref _s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
 
