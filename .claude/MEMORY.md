@@ -237,3 +237,93 @@ Anchor program implemented and all tests passing.
 
 ### Remaining gap after this pass
 - Deposit detection is still local-dev stub / polling skeleton; the surfpool E2E seeds enclave balances via `/v1/admin/seed-balance` after the on-chain deposit because automatic deposit ingestion is not implemented yet.
+
+## Phase 3: Atomic Service Channels + Provider TEE (2026-04-12) ✅
+
+### Ed25519 Adaptor Signatures (enclave/src/adaptor_sig.rs, 374 lines)
+- ECIES-like Ed25519 adaptor signature protocol: pSign, pVerify, adapt, extract, verify_adapted
+- Uses curve25519-dalek v4 for Ristretto/Ed25519 operations
+- 8 unit tests: pre_sign_and_verify, rejection tests, adapt roundtrip, secret extraction, full protocol flow
+
+### ASC Manager (enclave/src/asc_manager.rs, 1001 lines)
+- Design doc Algorithm 1 完全実装
+- Channel lifecycle: open_channel → submit_request → deliver_adaptor → finalize_offchain → close_channel
+- Channel states: Open → Locked → Pending → Closed
+- Fund locking/unlocking, replay protection (used_request_ids)
+- Adaptor pre-signature verification (pVerify integration)
+- Result encryption/decryption using scalar-based symmetric key
+- Rollback handlers for atomic transaction semantics
+
+### ASC State (enclave/src/state.rs)
+- `ChannelState`: channel_id, client, provider_id, balance triple, status, nonce, timestamps
+- `ChannelRequest`: request_id, amount, hashes, provider pubkey, adaptor point, pre-signature, encrypted result
+- `ChannelStatus` enum: Open, Locked, Pending, Closed
+- `ChannelBalance`: (client_free, client_locked, provider_earned)
+- `VaultState.active_channels`: DashMap<ChannelId, ChannelState>
+
+### ASC HTTP Endpoints (enclave/src/handlers.rs)
+- `POST /v1/channel/open` — ASC開設、初期デポジット、署名検証
+- `POST /v1/channel/request` — リクエスト送信、資金ロック、クライアント署名検証
+- `POST /v1/channel/deliver` — プロバイダTEEからアダプタ事前署名受信、pVerify検証
+- `POST /v1/channel/finalize` — アダプタシークレット公開、結果復号、プロバイダクレジット
+- `POST /v1/channel/close` — チャネル閉鎖、オンチェーン決済
+
+### Provider TEE
+- テスト用モック実装あり（handlers.rs内）
+- 本番ではAWS Nitro Enclave別インスタンスとして稼働
+
+### Batch Settlement Integration (enclave/src/batch.rs, 659 lines)
+- ASC決済をオンチェーンtxに集約
+- 時間ウィンドウ(120秒)、決済数上限(MAX 20)、強制発火
+- settle_vault + record_audit のアトミックペアリング
+
+### Tests
+- `tests/asc_provider_helper.ts` (52 lines): ASCデリバリーアーティファクト生成、アダプタ署名検証
+- Enclave unit tests: adaptor_sig 8テスト
+
+## Phase 4: Force Settlement + Dispute Resolution + Receipt Watchtower (2026-04-12) ✅
+
+### On-chain Force Settle Instructions
+- `force_settle_init.rs` (123 lines): ForceSettleRequest PDA作成、Ed25519署名検証、レシートフィールド検証
+- `force_settle_challenge.rs` (112 lines): より新しいレシート(高いnonce)でのチャレンジ、紛争ウィンドウ制約
+- `force_settle_finalize.rs` (113 lines): 紛争ウィンドウ後の支払い実行、free_balance + locked_balance(期限切れ時)
+
+### ForceSettleRequest State (programs/.../force_settle_request.rs, 36 lines)
+- Fields: bump, vault, participant, participant_kind, recipient_ata, free/locked balances, max_lock_expires_at, receipt_nonce, receipt_signature, initiated_at, dispute_deadline, is_resolved
+- Size: 219 bytes (8 discriminator + 211 data)
+- PDA seeds: [b"force_settle", vault, participant, participant_kind]
+- DISPUTE_WINDOW_SEC = 604800 (7 days)
+
+### Ed25519 Signature Utilities (programs/.../ed25519_utils.rs, 191 lines)
+- `verify_ed25519_signature_details()`: sysvar::instructionsからの署名抽出
+- `decode_participant_receipt_message()`: 145バイトレシートメッセージパース
+- `ParticipantReceiptMessage` struct
+
+### Receipt Watchtower (watchtower/src/, 851 lines)
+- **main.rs** (199 lines): Axum HTTPサーバ (port 3200)、`POST /v1/receipt/store`、`GET /v1/status`、バックグラウンドチャレンジャーループ
+- **receipt_store.rs** (224 lines): DashMap + JSONファイル永続化、nonce単調増加チェック、スレッドセーフ
+- **challenger.rs** (428 lines): ForceSettleRequest PDAポーリング(10秒間隔)、古いレシート検出→force_settle_challengeトランザクション送信、Ed25519プリコンパイル命令構築
+
+### Watchtower Integration (enclave/src/handlers.rs)
+- `replicate_receipt_to_watchtower()`: 全ParticipantReceiptをWatchtowerにHTTP POST
+- サーキットブレーカーパターン（エラー時もログ出力して継続）
+- ノンブロッキング非同期
+
+### Tests (tests/a402_vault.ts)
+- 48テストケース、13 describeブロック
+- force_settle_init: 正常パス、改ざん検出、不正署名拒否
+- force_settle_challenge: 古いレシートチャレンジ、署名検証、紛争ウィンドウ
+- force_settle_finalize: 紛争ウィンドウアクティブ拒否（時間経過テストはBankrun time warp必要）
+- Watchtower: receipt_store、challenger ユニットテスト
+
+### Implementation Notes
+- Watchtower永続化は現在JSON形式。本番ではRocksDB等への移行推奨
+- force_settle_finalize の時間経過テストはBankrunのtime warp機能が必要で制限あり
+- Provider TEEは本番では別Nitro Enclaveインスタンスとして稼働が必要
+
+## Remaining for Phase 5
+- Arcium MXE Integration (encrypted-ixs/)
+- Confidential computation circuits
+
+## Remaining for Phase 6
+- Token-2022 Confidential Transfer for deposit privacy
