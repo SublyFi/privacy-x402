@@ -15,10 +15,11 @@ use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 
 /// Adaptor pre-signature: (R', s') where R' is the unadapted nonce point.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptorPreSignature {
     /// R' = r·G (unadapted nonce point, compressed)
     pub r_prime: [u8; 32],

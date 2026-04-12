@@ -37,7 +37,7 @@ pub struct ChannelBalance {
 }
 
 /// Active Service Channel state (enclave-only, per design doc §5.4)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelState {
     pub channel_id: ChannelId,
     pub client: Pubkey,
@@ -55,7 +55,7 @@ pub struct ChannelState {
 }
 
 /// A single request within an ASC
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelRequest {
     pub request_id: String,
     pub amount: u64,
@@ -122,7 +122,7 @@ pub struct ProviderRegistration {
 }
 
 /// A single payment reservation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reservation {
     pub verification_id: String,
     pub reservation_id: String,
@@ -140,7 +140,7 @@ pub struct Reservation {
 }
 
 /// Provider credit (accumulated off-chain settlements awaiting batch)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCredit {
     pub provider_id: String,
     pub settlement_token_account: Pubkey,
@@ -187,7 +187,7 @@ pub struct VaultState {
 }
 
 /// Record of a completed settlement (for audit record generation)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementRecord {
     pub settlement_id: String,
     pub client: Pubkey,

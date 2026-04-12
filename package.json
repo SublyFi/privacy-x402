@@ -6,11 +6,12 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
-    "@solana/spl-token": "^0.4.14",
-    "express": "^5.2.1",
-    "tweetnacl": "^1.0.3",
     "@noble/curves": "^1.4.0",
-    "@noble/hashes": "^1.4.0"
+    "@noble/hashes": "^1.4.0",
+    "@solana/spl-token": "^0.4.14",
+    "cbor": "^10.0.12",
+    "express": "^5.2.1",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

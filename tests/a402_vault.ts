@@ -1994,6 +1994,113 @@ describe("a402_vault", () => {
           expect(err.toString()).to.include("Error");
         }
       });
+
+      it("rejects ed25519 instructions that reference another instruction's data", async () => {
+        const participantKind = 0;
+        const altClient = Keypair.generate();
+        const sig = await provider.connection.requestAirdrop(
+          altClient.publicKey,
+          anchor.web3.LAMPORTS_PER_SOL
+        );
+        await provider.connection.confirmTransaction(sig);
+
+        const recipientAta = Keypair.generate().publicKey;
+        const slot = await provider.connection.getSlot();
+        const blockTime = await provider.connection.getBlockTime(slot);
+        const timestamp = blockTime!;
+
+        const honestReceiptMessage = buildReceiptMessage(
+          altClient.publicKey,
+          participantKind,
+          recipientAta,
+          500_000,
+          0,
+          0,
+          20,
+          timestamp,
+          0,
+          fsVaultConfigPda
+        );
+        const honestEd25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: fsVaultSignerKeypair.secretKey,
+          message: honestReceiptMessage,
+        });
+
+        const maliciousFreeBalance = 1_750_000;
+        const maliciousReceiptNonce = 21;
+        const maliciousReceiptMessage = buildReceiptMessage(
+          altClient.publicKey,
+          participantKind,
+          recipientAta,
+          maliciousFreeBalance,
+          0,
+          0,
+          maliciousReceiptNonce,
+          timestamp,
+          1,
+          fsVaultConfigPda
+        );
+        const fakeSignature = new Uint8Array(64).fill(9);
+        const crossInstructionEd25519Ix =
+          Ed25519Program.createInstructionWithPublicKey({
+            publicKey: fsVaultSignerKeypair.publicKey.toBytes(),
+            message: maliciousReceiptMessage,
+            signature: fakeSignature,
+            instructionIndex: 0,
+          });
+
+        const [forceSettlePda] = PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("force_settle"),
+            fsVaultConfigPda.toBuffer(),
+            altClient.publicKey.toBuffer(),
+            Buffer.from([participantKind]),
+          ],
+          program.programId
+        );
+
+        const forceSettleIx = await program.methods
+          .forceSettleInit(
+            participantKind,
+            recipientAta,
+            new BN(maliciousFreeBalance),
+            new BN(0),
+            new BN(0),
+            new BN(maliciousReceiptNonce),
+            Array.from(fakeSignature) as any,
+            maliciousReceiptMessage
+          )
+          .accountsPartial({
+            participant: altClient.publicKey,
+            vaultConfig: fsVaultConfigPda,
+            forceSettleRequest: forceSettlePda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+          })
+          .instruction();
+
+        const latestBlockhash = await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: altClient.publicKey,
+          recentBlockhash: latestBlockhash.blockhash,
+          instructions: [
+            honestEd25519Ix,
+            crossInstructionEd25519Ix,
+            forceSettleIx,
+          ],
+        }).compileToV0Message();
+
+        const tx = new VersionedTransaction(messageV0);
+        tx.sign([altClient]);
+
+        try {
+          await provider.connection.sendTransaction(tx);
+          await new Promise((r) => setTimeout(r, 1000));
+          expect.fail("Should have thrown");
+        } catch (err: any) {
+          expect(err.toString()).to.include("Error");
+        }
+      });
     });
 
     describe("force_settle_challenge", () => {

@@ -80,6 +80,50 @@ export interface AttestationResponse {
   expiresAt: string;
 }
 
+export interface NitroAttestationPolicy {
+  version: number;
+  pcrs: Record<string, string>;
+  eifSigningCertSha256: string;
+  kmsKeyArnSha256: string;
+  protocol: string;
+}
+
+export interface A402NitroUserDataEnvelope {
+  version: number;
+  vaultConfig: string;
+  vaultSigner: string;
+  attestationPolicyHash: string;
+  snapshotSeqno: number;
+}
+
+export interface NitroAttestationDocument {
+  moduleId: string;
+  timestampMs: number;
+  digest: string;
+  pcrs: Record<string, string>;
+  certificatePem: string;
+  cabundlePem: string[];
+  publicKeyDerB64?: string;
+  userDataB64?: string;
+  nonceB64?: string;
+  parsedA402UserData?: A402NitroUserDataEnvelope | null;
+}
+
+export interface NitroAttestationConfig {
+  policy?: NitroAttestationPolicy;
+  expectedPcrs?: Record<string, string>;
+  expectedPolicyHash?: string;
+  expectedNonce?: string | Uint8Array;
+  expectedVaultSigner?: string;
+  maxAgeMs?: number;
+  rootCertificatesPem?: string[];
+  requireA402UserData?: boolean;
+  documentValidator?: (
+    document: NitroAttestationDocument,
+    attestation: AttestationResponse
+  ) => Promise<void> | void;
+}
+
 /** Facilitator /v1/withdraw-auth response */
 export interface WithdrawAuthResponse {
   ok: boolean;
@@ -187,4 +231,10 @@ export interface A402ClientConfig {
   enclaveUrl: string;
   /** Solana RPC URL */
   rpcUrl?: string;
+  /** Built-in Nitro attestation verification configuration. */
+  nitroAttestation?: NitroAttestationConfig;
+  /** Optional custom verifier for non-local attestation documents. */
+  attestationVerifier?: (
+    attestation: AttestationResponse
+  ) => Promise<void> | void;
 }

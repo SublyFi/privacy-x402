@@ -228,31 +228,35 @@ pub async fn apply_deposit(
         return Ok(());
     }
 
-    // Apply to client balance
-    state.vault.apply_deposit(deposit.client, deposit.amount);
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
 
-    // Record in WAL
-    state
-        .wal
-        .append(WalEntry::DepositApplied {
-            tx_signature: deposit.signature.clone(),
-            client: deposit.client.to_string(),
-            amount: deposit.amount,
-            slot: deposit.slot,
-        })
-        .await?;
+        // Apply to client balance
+        state.vault.apply_deposit(deposit.client, deposit.amount);
 
-    // Mark as processed
-    detector.mark_processed(&deposit.signature).await;
+        // Record in WAL
+        state
+            .wal
+            .append(WalEntry::DepositApplied {
+                tx_signature: deposit.signature.clone(),
+                client: deposit.client.to_string(),
+                amount: deposit.amount,
+                slot: deposit.slot,
+            })
+            .await?;
 
-    // Update last processed signature
-    *detector.last_processed_signature.write().await = Some(deposit.signature.clone());
+        // Mark as processed
+        detector.mark_processed(&deposit.signature).await;
 
-    // Update last finalized slot
-    state
-        .vault
-        .last_finalized_slot
-        .store(deposit.slot, std::sync::atomic::Ordering::SeqCst);
+        // Update last processed signature
+        *detector.last_processed_signature.write().await = Some(deposit.signature.clone());
+
+        // Update last finalized slot
+        state
+            .vault
+            .last_finalized_slot
+            .store(deposit.slot, std::sync::atomic::Ordering::SeqCst);
+    }
 
     info!(
         client = %deposit.client,

@@ -1,21 +1,21 @@
 #![allow(dead_code)]
 
 mod adaptor_sig;
+mod attestation;
 mod asc_manager;
 mod audit;
 mod batch;
 mod deposit_detector;
 mod error;
 mod handlers;
+mod kms_bootstrap;
+mod snapshot;
+mod snapshot_store;
 mod state;
 mod wal;
 
 use axum::routing::{get, post};
 use axum::Router;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use solana_sdk::pubkey::Pubkey;
 use std::env;
 use std::path::PathBuf;
@@ -24,16 +24,15 @@ use tracing::info;
 
 use deposit_detector::DepositDetector;
 use handlers::AppState;
+use kms_bootstrap::bootstrap_materials;
+use snapshot::SnapshotManager;
+use snapshot_store::SnapshotStoreClient;
 use state::{SolanaRuntimeConfig, VaultState};
 use wal::Wal;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-
-    let signing_key = load_signing_key();
-    let vault_signer_pubkey = Pubkey::new_from_array(signing_key.verifying_key().to_bytes());
-    info!(vault_signer = %vault_signer_pubkey, "Loaded vault signer keypair");
 
     let vault_config = read_pubkey_env("A402_VAULT_CONFIG", Pubkey::default());
     let usdc_mint = read_pubkey_env("A402_USDC_MINT", Pubkey::default());
@@ -50,16 +49,37 @@ async fn main() {
     let wal_path = env::var("A402_WAL_PATH").unwrap_or_else(|_| "data/wal.jsonl".to_string());
     let listen_addr =
         env::var("A402_ENCLAVE_LISTEN").unwrap_or_else(|_| "0.0.0.0:3100".to_string());
+    let snapshot_store = SnapshotStoreClient::from_env();
+    let bootstrap = bootstrap_materials(vault_config, attestation_policy_hash, snapshot_store.clone())
+        .await
+        .expect("runtime bootstrap must succeed");
+    let vault_signer_pubkey =
+        Pubkey::new_from_array(bootstrap.signing_key.verifying_key().to_bytes());
+    info!(vault_signer = %vault_signer_pubkey, "Loaded vault signer keypair");
 
     let vault_state = Arc::new(VaultState::new(
         vault_config,
-        signing_key,
+        bootstrap.signing_key,
         usdc_mint,
         attestation_policy_hash,
         solana.clone(),
     ));
 
-    let wal = Arc::new(Wal::new(PathBuf::from(wal_path)).await);
+    let wal = if let Some(snapshot_store) = snapshot_store.clone() {
+        let wal_prefix =
+            env::var("A402_WAL_PREFIX").unwrap_or_else(|_| format!("wal/{vault_config}"));
+        Arc::new(
+            Wal::new_with_snapshot_store(
+                PathBuf::from(&wal_path),
+                bootstrap.storage_key,
+                snapshot_store,
+                wal_prefix,
+            )
+            .await,
+        )
+    } else {
+        Arc::new(Wal::new_with_key(PathBuf::from(&wal_path), bootstrap.storage_key).await)
+    };
     let deposit_detector = Arc::new(DepositDetector::new(
         solana.vault_token_account,
         solana.program_id,
@@ -74,10 +94,27 @@ async fn main() {
         wal,
         deposit_detector: deposit_detector.clone(),
         asc_ops_lock: tokio::sync::Mutex::new(()),
+        persistence_lock: tokio::sync::Mutex::new(()),
         watchtower_url,
+        attestation_document: bootstrap.attestation.document_b64,
+        attestation_is_local_dev: bootstrap.attestation.is_local_dev,
     });
 
-    wal::replay_app_state(&app_state)
+    let snapshot_manager = snapshot_store
+        .clone()
+        .and_then(|client| SnapshotManager::from_env(client, bootstrap.storage_key, vault_config))
+        .map(Arc::new);
+
+    let replay_from = if let Some(manager) = snapshot_manager.as_ref() {
+        manager
+            .recover_latest(&app_state)
+            .await
+            .expect("snapshot recovery must succeed")
+    } else {
+        None
+    };
+
+    wal::replay_app_state_from(&app_state, replay_from)
         .await
         .expect("WAL replay must succeed on startup");
 
@@ -86,6 +123,10 @@ async fn main() {
 
     // Spawn deposit detection (monitors on-chain deposits to update client balances)
     deposit_detector::spawn_deposit_detector(app_state.clone(), deposit_detector);
+
+    if let Some(manager) = snapshot_manager {
+        manager.spawn_background_task(app_state.clone());
+    }
 
     let app = Router::new()
         .route("/v1/attestation", get(handlers::get_attestation))
@@ -116,20 +157,6 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
-}
-
-fn load_signing_key() -> SigningKey {
-    if let Ok(encoded) = env::var("A402_VAULT_SIGNER_SECRET_KEY_B64") {
-        let secret = BASE64
-            .decode(encoded)
-            .expect("A402_VAULT_SIGNER_SECRET_KEY_B64 must be valid base64");
-        let secret: [u8; 32] = secret
-            .try_into()
-            .expect("A402_VAULT_SIGNER_SECRET_KEY_B64 must decode to exactly 32 bytes");
-        return SigningKey::from_bytes(&secret);
-    }
-
-    SigningKey::generate(&mut OsRng)
 }
 
 fn read_pubkey_env(name: &str, default: Pubkey) -> Pubkey {

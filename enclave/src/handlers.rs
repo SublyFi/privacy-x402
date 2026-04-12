@@ -15,6 +15,7 @@ use tracing::info;
 
 use crate::adaptor_sig::AdaptorPreSignature;
 use crate::asc_manager;
+use crate::attestation::response_window;
 use crate::batch;
 use crate::deposit_detector::DepositDetector;
 use crate::error::EnclaveError;
@@ -26,8 +27,11 @@ pub struct AppState {
     pub wal: Arc<Wal>,
     pub deposit_detector: Arc<DepositDetector>,
     pub asc_ops_lock: Mutex<()>,
+    pub persistence_lock: Mutex<()>,
     /// Watchtower URL for receipt replication (Phase 4).
     pub watchtower_url: Option<String>,
+    pub attestation_document: String,
+    pub attestation_is_local_dev: bool,
 }
 
 // ── Attestation ──
@@ -44,17 +48,15 @@ pub struct AttestationResponse {
 }
 
 pub async fn get_attestation(State(state): State<Arc<AppState>>) -> Json<AttestationResponse> {
-    let now = Utc::now();
-    let expires = now + chrono::Duration::minutes(10);
+    let (issued_at, expires_at) = response_window();
 
     Json(AttestationResponse {
         vault_config: state.vault.vault_config.to_string(),
         vault_signer: state.vault.vault_signer_pubkey.to_string(),
         attestation_policy_hash: hex::encode(state.vault.attestation_policy_hash),
-        // Phase 1 local dev: stub attestation document
-        attestation_document: BASE64.encode(b"local-dev-attestation-stub"),
-        issued_at: now.to_rfc3339(),
-        expires_at: expires.to_rfc3339(),
+        attestation_document: state.attestation_document.clone(),
+        issued_at: issued_at.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
     })
 }
 
@@ -141,7 +143,13 @@ fn canonical_json(value: &serde_json::Value) -> String {
             keys.sort();
             let entries: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonical_json(&map[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap(),
+                        canonical_json(&map[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", entries.join(","))
         }
@@ -283,10 +291,6 @@ pub async fn post_verify(
         }
     }
 
-    // 8. Reserve balance
-    state.vault.reserve_balance(&client_pubkey, amount)?;
-
-    // 9. Create reservation
     let now = Utc::now().timestamp();
     let verification_id = format!("ver_{}", uuid::Uuid::now_v7());
     let reservation_id = format!("res_{}", uuid::Uuid::now_v7());
@@ -314,27 +318,34 @@ pub async fn post_verify(
         settled_at: None,
     };
 
-    // 10. WAL append (durable before response)
-    state
-        .wal
-        .append(WalEntry::ReservationCreated {
-            verification_id: verification_id.clone(),
-            payment_id: payload.payment_id.clone(),
-            client: payload.client.clone(),
-            provider_id: payload.provider_id.clone(),
-            amount,
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
 
-    state
-        .vault
-        .reservations
-        .insert(verification_id.clone(), reservation);
-    state
-        .vault
-        .payment_id_index
-        .insert(payload.payment_id.clone(), verification_id.clone());
+        // 8. Reserve balance
+        state.vault.reserve_balance(&client_pubkey, amount)?;
+
+        // 10. WAL append (durable before response)
+        state
+            .wal
+            .append(WalEntry::ReservationCreated {
+                verification_id: verification_id.clone(),
+                payment_id: payload.payment_id.clone(),
+                client: payload.client.clone(),
+                provider_id: payload.provider_id.clone(),
+                amount,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+        state
+            .vault
+            .reservations
+            .insert(verification_id.clone(), reservation);
+        state
+            .vault
+            .payment_id_index
+            .insert(payload.payment_id.clone(), verification_id.clone());
+    }
 
     let res_expires =
         chrono::DateTime::from_timestamp(reservation_expires_at, 0).unwrap_or_default();
@@ -431,49 +442,53 @@ pub async fn post_settle(
     let now = Utc::now().timestamp();
     let settlement_id = format!("set_{}", uuid::Uuid::now_v7());
 
-    // Settle payment
-    state
-        .vault
-        .settle_payment(&client, amount, &provider_id, &settlement_id, now)?;
-
-    // Record settlement for audit record generation (Phase 2)
-    let provider_reg = state.vault.providers.get(&provider_id);
-    let provider_pubkey = provider_reg
-        .as_ref()
-        .map(|p| p.settlement_token_account)
-        .unwrap_or_default();
-    state.vault.settlement_history.insert(
-        settlement_id.clone(),
-        crate::state::SettlementRecord {
-            settlement_id: settlement_id.clone(),
-            client,
-            provider: provider_pubkey,
-            amount,
-            timestamp: now,
-        },
-    );
-
-    // WAL append (durable before response)
-    state
-        .wal
-        .append(WalEntry::SettlementCommitted {
-            settlement_id: settlement_id.clone(),
-            verification_id: req.verification_id.clone(),
-            provider_id: provider_id.clone(),
-            amount,
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
-
     {
-        let mut reservation = state
+        let _persist_guard = state.persistence_lock.lock().await;
+
+        // Settle payment
+        state
             .vault
-            .reservations
-            .get_mut(&req.verification_id)
-            .ok_or(EnclaveError::ReservationNotFound)?;
-        reservation.status = ReservationStatus::SettledOffchain;
-        reservation.settlement_id = Some(settlement_id.clone());
-        reservation.settled_at = Some(now);
+            .settle_payment(&client, amount, &provider_id, &settlement_id, now)?;
+
+        // Record settlement for audit record generation (Phase 2)
+        let provider_reg = state.vault.providers.get(&provider_id);
+        let provider_pubkey = provider_reg
+            .as_ref()
+            .map(|p| p.settlement_token_account)
+            .unwrap_or_default();
+        state.vault.settlement_history.insert(
+            settlement_id.clone(),
+            crate::state::SettlementRecord {
+                settlement_id: settlement_id.clone(),
+                client,
+                provider: provider_pubkey,
+                amount,
+                timestamp: now,
+            },
+        );
+
+        // WAL append (durable before response)
+        state
+            .wal
+            .append(WalEntry::SettlementCommitted {
+                settlement_id: settlement_id.clone(),
+                verification_id: req.verification_id.clone(),
+                provider_id: provider_id.clone(),
+                amount,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+        {
+            let mut reservation = state
+                .vault
+                .reservations
+                .get_mut(&req.verification_id)
+                .ok_or(EnclaveError::ReservationNotFound)?;
+            reservation.status = ReservationStatus::SettledOffchain;
+            reservation.settlement_id = Some(settlement_id.clone());
+            reservation.settled_at = Some(now);
+        }
     }
 
     let participant_receipt =
@@ -543,22 +558,26 @@ pub async fn post_cancel(
         )));
     }
 
-    // Release balance
-    state
-        .vault
-        .release_balance(&reservation.client, reservation.amount)?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
 
-    // WAL
-    state
-        .wal
-        .append(WalEntry::ReservationCancelled {
-            verification_id: req.verification_id.clone(),
-            reason: req.reason.clone(),
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+        // Release balance
+        state
+            .vault
+            .release_balance(&reservation.client, reservation.amount)?;
 
-    reservation.status = ReservationStatus::Cancelled;
+        // WAL
+        state
+            .wal
+            .append(WalEntry::ReservationCancelled {
+                verification_id: req.verification_id.clone(),
+                reason: req.reason.clone(),
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+        reservation.status = ReservationStatus::Cancelled;
+    }
 
     let now_str = Utc::now().to_rfc3339();
 
@@ -699,6 +718,14 @@ pub struct ReceiptResponse {
     pub message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchtowerStoreReceiptResponse {
+    pub ok: bool,
+    pub stored: bool,
+    pub current_nonce: u64,
+}
+
 pub async fn post_receipt(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReceiptRequest>,
@@ -780,67 +807,71 @@ async fn issue_participant_receipt(
     locked_balance: u64,
     max_lock_expires_at: i64,
 ) -> Result<ReceiptResponse, EnclaveError> {
-    let nonce = state.vault.next_receipt_nonce();
-    let timestamp = Utc::now().timestamp();
-    let snapshot_seqno = state
-        .vault
-        .snapshot_seqno
-        .load(std::sync::atomic::Ordering::SeqCst);
-    let receipt_message = state.vault.build_participant_receipt_message(
-        &participant,
-        participant_kind,
-        &recipient_ata,
-        free_balance,
-        locked_balance,
-        max_lock_expires_at,
-        nonce,
-        timestamp,
-        snapshot_seqno,
-    );
-    let signature = state.vault.sign_message(&receipt_message);
+    let receipt = {
+        let _persist_guard = state.persistence_lock.lock().await;
+        let nonce = state.vault.next_receipt_nonce();
+        let timestamp = Utc::now().timestamp();
+        let snapshot_seqno = state
+            .vault
+            .snapshot_seqno
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let receipt_message = state.vault.build_participant_receipt_message(
+            &participant,
+            participant_kind,
+            &recipient_ata,
+            free_balance,
+            locked_balance,
+            max_lock_expires_at,
+            nonce,
+            timestamp,
+            snapshot_seqno,
+        );
+        let signature = state.vault.sign_message(&receipt_message);
 
-    let receipt = ReceiptResponse {
-        ok: true,
-        participant: participant.to_string(),
-        participant_kind,
-        recipient_ata: recipient_ata.to_string(),
-        free_balance,
-        locked_balance,
-        max_lock_expires_at,
-        nonce,
-        timestamp,
-        snapshot_seqno,
-        vault_config: state.vault.vault_config.to_string(),
-        signature: BASE64.encode(signature),
-        message: BASE64.encode(receipt_message),
+        let receipt = ReceiptResponse {
+            ok: true,
+            participant: participant.to_string(),
+            participant_kind,
+            recipient_ata: recipient_ata.to_string(),
+            free_balance,
+            locked_balance,
+            max_lock_expires_at,
+            nonce,
+            timestamp,
+            snapshot_seqno,
+            vault_config: state.vault.vault_config.to_string(),
+            signature: BASE64.encode(signature),
+            message: BASE64.encode(receipt_message),
+        };
+
+        state
+            .wal
+            .append(WalEntry::ParticipantReceiptIssued {
+                participant: receipt.participant.clone(),
+                participant_kind,
+                nonce,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+        replicate_receipt_to_watchtower(state, &receipt).await?;
+
+        state
+            .wal
+            .append(WalEntry::ParticipantReceiptMirrored {
+                participant: receipt.participant.clone(),
+                participant_kind,
+                nonce,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+        receipt
     };
-
-    state
-        .wal
-        .append(WalEntry::ParticipantReceiptIssued {
-            participant: receipt.participant.clone(),
-            participant_kind,
-            nonce,
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
-
-    replicate_receipt_to_watchtower(state, &receipt).await?;
-
-    state
-        .wal
-        .append(WalEntry::ParticipantReceiptMirrored {
-            participant: receipt.participant.clone(),
-            participant_kind,
-            nonce,
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
     info!(
         participant = %receipt.participant,
         participant_kind,
-        nonce,
+        nonce = receipt.nonce,
         "ParticipantReceipt issued"
     );
 
@@ -867,6 +898,18 @@ async fn replicate_receipt_to_watchtower(
         return Err(EnclaveError::Internal(format!(
             "Watchtower replication failed with status {}",
             response.status()
+        )));
+    }
+
+    let body = response
+        .json::<WatchtowerStoreReceiptResponse>()
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("Watchtower response decode failed: {e}")))?;
+
+    if !body.ok || body.current_nonce != receipt.nonce {
+        return Err(EnclaveError::Internal(format!(
+            "Watchtower rejected receipt nonce {} (stored={}, current_nonce={})",
+            receipt.nonce, body.stored, body.current_nonce
         )));
     }
 
@@ -925,26 +968,29 @@ pub async fn post_register_provider(
         api_key_hash,
     };
 
-    state
-        .wal
-        .append(WalEntry::ProviderRegistered {
-            provider_id: req.provider_id.clone(),
-            display_name: req.display_name.clone(),
-            participant_pubkey: req.participant_pubkey.clone(),
-            settlement_token_account: req.settlement_token_account.clone(),
-            network: req.network.clone(),
-            asset_mint: req.asset_mint.clone(),
-            allowed_origins: req.allowed_origins.clone(),
-            auth_mode: req.auth_mode.clone(),
-            api_key_hash: req.api_key_hash.clone(),
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state
+            .wal
+            .append(WalEntry::ProviderRegistered {
+                provider_id: req.provider_id.clone(),
+                display_name: req.display_name.clone(),
+                participant_pubkey: req.participant_pubkey.clone(),
+                settlement_token_account: req.settlement_token_account.clone(),
+                network: req.network.clone(),
+                asset_mint: req.asset_mint.clone(),
+                allowed_origins: req.allowed_origins.clone(),
+                auth_mode: req.auth_mode.clone(),
+                api_key_hash: req.api_key_hash.clone(),
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
-    state
-        .vault
-        .providers
-        .insert(req.provider_id.clone(), registration);
+        state
+            .vault
+            .providers
+            .insert(req.provider_id.clone(), registration);
+    }
 
     let now = Utc::now().to_rfc3339();
     info!(provider_id = %req.provider_id, "Provider registered");
@@ -990,29 +1036,32 @@ pub async fn post_seed_balance(
         .unwrap_or(req.free.saturating_add(locked));
     let total_withdrawn = req.total_withdrawn.unwrap_or(0);
 
-    state
-        .wal
-        .append(WalEntry::ClientBalanceSeeded {
-            client: req.client.clone(),
-            free: req.free,
-            locked,
-            max_lock_expires_at,
-            total_deposited,
-            total_withdrawn,
-        })
-        .await
-        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state
+            .wal
+            .append(WalEntry::ClientBalanceSeeded {
+                client: req.client.clone(),
+                free: req.free,
+                locked,
+                max_lock_expires_at,
+                total_deposited,
+                total_withdrawn,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
-    state.vault.client_balances.insert(
-        client,
-        crate::state::ClientBalance {
-            free: req.free,
-            locked,
-            max_lock_expires_at,
-            total_deposited,
-            total_withdrawn,
-        },
-    );
+        state.vault.client_balances.insert(
+            client,
+            crate::state::ClientBalance {
+                free: req.free,
+                locked,
+                max_lock_expires_at,
+                total_deposited,
+                total_withdrawn,
+            },
+        );
+    }
 
     info!(client = %req.client, free = req.free, locked, "Seeded client balance for local dev");
 
@@ -1250,6 +1299,7 @@ pub async fn post_channel_open(
     Json(req): Json<OpenChannelRequest>,
 ) -> Result<Json<OpenChannelResponse>, EnclaveError> {
     let _guard = state.asc_ops_lock.lock().await;
+    let _persist_guard = state.persistence_lock.lock().await;
     let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
 
     // Verify client signature
@@ -1306,6 +1356,7 @@ pub async fn post_channel_request(
     Json(req): Json<ChannelRequestReq>,
 ) -> Result<Json<ChannelRequestResponse>, EnclaveError> {
     let _guard = state.asc_ops_lock.lock().await;
+    let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_request_message(
         &req.channel_id,
         &req.request_id,
@@ -1378,6 +1429,7 @@ pub async fn post_channel_deliver(
     Json(req): Json<ChannelDeliverRequest>,
 ) -> Result<Json<ChannelDeliverResponse>, EnclaveError> {
     let _guard = state.asc_ops_lock.lock().await;
+    let _persist_guard = state.persistence_lock.lock().await;
     verify_channel_provider_auth(&state, &req.channel_id, &headers)?;
 
     let adaptor_point: [u8; 32] = hex::decode(&req.adaptor_point)
@@ -1483,6 +1535,7 @@ pub async fn post_channel_finalize(
     Json(req): Json<ChannelFinalizeRequest>,
 ) -> Result<Json<ChannelFinalizeResponse>, EnclaveError> {
     let _guard = state.asc_ops_lock.lock().await;
+    let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_finalize_message(&req.channel_id, &req.adaptor_secret);
     verify_channel_client_signature(&state, &req.channel_id, &message, &req.client_sig)?;
 
@@ -1544,6 +1597,7 @@ pub async fn post_channel_close(
     Json(req): Json<CloseChannelRequest>,
 ) -> Result<Json<CloseChannelResponse>, EnclaveError> {
     let _guard = state.asc_ops_lock.lock().await;
+    let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_close_message(&req.channel_id);
     verify_channel_client_signature(&state, &req.channel_id, &message, &req.client_sig)?;
 
@@ -1624,7 +1678,10 @@ mod tests {
                 wal,
                 deposit_detector: detector,
                 asc_ops_lock: Mutex::new(()),
+                persistence_lock: Mutex::new(()),
                 watchtower_url: None,
+                attestation_document: String::new(),
+                attestation_is_local_dev: true,
             }),
             wal_path,
         )
@@ -1767,9 +1824,17 @@ mod tests {
         assert_eq!(close_res.0.returned_to_client, 1_750_000);
         assert_eq!(close_res.0.provider_earned, 1_250_000);
 
-        let wal_contents = tokio::fs::read_to_string(&wal_path).await.unwrap();
-        assert!(wal_contents.contains(r#""type":"ChannelFinalized""#));
-        assert!(wal_contents.contains(r#""request_id":"req-123""#));
+        let wal_records = state.wal.read_records().await.unwrap();
+        assert!(wal_records.iter().any(|record| {
+            matches!(
+                &record.entry,
+                WalEntry::ChannelFinalized {
+                    request_id,
+                    amount_paid,
+                    ..
+                } if request_id == "req-123" && *amount_paid == 1_250_000
+            )
+        }));
 
         let _ = tokio::fs::remove_file(wal_path).await;
     }
@@ -2042,7 +2107,10 @@ mod tests {
                 replay_solana.ws_url,
             )),
             asc_ops_lock: Mutex::new(()),
+            persistence_lock: Mutex::new(()),
             watchtower_url: None,
+            attestation_document: String::new(),
+            attestation_is_local_dev: true,
         });
 
         wal::replay_app_state(&replay_state).await.unwrap();
@@ -2118,7 +2186,10 @@ mod tests {
                 solana.ws_url,
             )),
             asc_ops_lock: Mutex::new(()),
+            persistence_lock: Mutex::new(()),
             watchtower_url: None,
+            attestation_document: String::new(),
+            attestation_is_local_dev: true,
         });
 
         let client_signing_key = SigningKey::generate(&mut OsRng);
@@ -2217,7 +2288,10 @@ mod tests {
                 replay_solana.ws_url,
             )),
             asc_ops_lock: Mutex::new(()),
+            persistence_lock: Mutex::new(()),
             watchtower_url: None,
+            attestation_document: String::new(),
+            attestation_is_local_dev: true,
         });
 
         wal::replay_app_state(&replay_state).await.unwrap();

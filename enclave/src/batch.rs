@@ -210,28 +210,36 @@ async fn fire_batch_at(state: &Arc<AppState>, now: i64) -> Result<BatchSubmitRes
             format!("chunk {chunk_idx} submission failed for batch {batch_id}: {error}")
         })?;
 
-        apply_submitted_chunk(state, &chunk, now).await;
-        state
-            .wal
-            .append(WalEntry::BatchConfirmed {
-                batch_id,
-                tx_signature: signature.clone(),
-            })
-            .await
-            .map_err(|error| format!("failed to append BatchConfirmed WAL entry: {error}"))?;
+        {
+            let _persist_guard = state.persistence_lock.lock().await;
+            apply_submitted_chunk(state, &chunk, now).await;
+            state
+                .wal
+                .append(WalEntry::BatchConfirmed {
+                    batch_id,
+                    tx_signature: signature.clone(),
+                })
+                .await
+                .map_err(|error| {
+                    format!("failed to append BatchConfirmed WAL entry: {error}")
+                })?;
+        }
 
         tx_signatures.push(signature);
     }
 
-    state
-        .wal
-        .append(WalEntry::BatchSubmitted {
-            batch_id,
-            provider_count,
-            total_amount,
-        })
-        .await
-        .map_err(|error| format!("failed to append BatchSubmitted WAL entry: {error}"))?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state
+            .wal
+            .append(WalEntry::BatchSubmitted {
+                batch_id,
+                provider_count,
+                total_amount,
+            })
+            .await
+            .map_err(|error| format!("failed to append BatchSubmitted WAL entry: {error}"))?;
+    }
 
     Ok(BatchSubmitResult {
         submitted: true,
@@ -563,6 +571,7 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
 
         for ver_id in expired_ids {
             if let Some(mut reservation) = state.vault.reservations.get_mut(&ver_id) {
+                let _persist_guard = state.persistence_lock.lock().await;
                 reservation.status = ReservationStatus::Expired;
                 let _ = state
                     .vault

@@ -54,6 +54,7 @@ pub fn verify_ed25519_signature_details(
         ed25519_ix.program_id == solana_sdk_ids::ed25519_program::ID,
         VaultError::InvalidEd25519Instruction
     );
+    let ed25519_index = current_index - 1;
 
     // Ed25519 instruction data format:
     // [0]: num_signatures (1 byte)
@@ -69,6 +70,12 @@ pub fn verify_ed25519_signature_details(
     require!(ix_data.len() >= 16, VaultError::InvalidEd25519Instruction);
     require!(ix_data[0] == 1, VaultError::InvalidEd25519Instruction); // exactly 1 signature
 
+    let signature_instruction_index = u16::from_le_bytes([ix_data[4], ix_data[5]]);
+    require!(
+        instruction_index_refs_embedded_data(signature_instruction_index, ed25519_index),
+        VaultError::InvalidEd25519Instruction
+    );
+
     let signature_offset = u16::from_le_bytes([ix_data[2], ix_data[3]]) as usize;
     require!(
         ix_data.len() >= signature_offset + 64,
@@ -83,6 +90,12 @@ pub fn verify_ed25519_signature_details(
         VaultError::InvalidEd25519Instruction
     );
 
+    let public_key_instruction_index = u16::from_le_bytes([ix_data[8], ix_data[9]]);
+    require!(
+        instruction_index_refs_embedded_data(public_key_instruction_index, ed25519_index),
+        VaultError::InvalidEd25519Instruction
+    );
+
     let pubkey_bytes = &ix_data[pubkey_offset..pubkey_offset + 32];
     require!(
         pubkey_bytes == expected_pubkey.as_ref(),
@@ -90,6 +103,12 @@ pub fn verify_ed25519_signature_details(
     );
 
     // Extract message data
+    let message_instruction_index = u16::from_le_bytes([ix_data[14], ix_data[15]]);
+    require!(
+        instruction_index_refs_embedded_data(message_instruction_index, ed25519_index),
+        VaultError::InvalidEd25519Instruction
+    );
+
     let message_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
     let message_size = u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
     require!(
@@ -100,6 +119,10 @@ pub fn verify_ed25519_signature_details(
     let message = ix_data[message_offset..message_offset + message_size].to_vec();
 
     Ok(VerifiedEd25519Signature { signature, message })
+}
+
+fn instruction_index_refs_embedded_data(instruction_index: u16, ed25519_index: u16) -> bool {
+    instruction_index == u16::MAX || instruction_index == ed25519_index
 }
 
 pub fn decode_participant_receipt_message(message: &[u8]) -> Result<ParticipantReceiptMessage> {
@@ -187,4 +210,21 @@ pub fn decode_participant_receipt_message(message: &[u8]) -> Result<ParticipantR
         snapshot_seqno,
         vault_config,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::instruction_index_refs_embedded_data;
+
+    #[test]
+    fn accepts_embedded_ed25519_data_refs() {
+        assert!(instruction_index_refs_embedded_data(u16::MAX, 3));
+        assert!(instruction_index_refs_embedded_data(3, 3));
+    }
+
+    #[test]
+    fn rejects_cross_instruction_refs() {
+        assert!(!instruction_index_refs_embedded_data(0, 1));
+        assert!(!instruction_index_refs_embedded_data(7, 1));
+    }
 }

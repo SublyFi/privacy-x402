@@ -1,3 +1,4 @@
+use std::env;
 use tracing::info;
 
 mod egress_relay;
@@ -40,11 +41,34 @@ impl Default for ParentConfig {
     }
 }
 
+impl ParentConfig {
+    fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            ingress_listen_addr: env::var("A402_PARENT_INGRESS_LISTEN")
+                .unwrap_or(defaults.ingress_listen_addr),
+            enclave_cid: read_env_u32("A402_ENCLAVE_CID").unwrap_or(defaults.enclave_cid),
+            enclave_ingress_port: read_env_u32("A402_ENCLAVE_INGRESS_PORT")
+                .unwrap_or(defaults.enclave_ingress_port),
+            enclave_egress_port: read_env_u32("A402_ENCLAVE_EGRESS_PORT")
+                .unwrap_or(defaults.enclave_egress_port),
+            enclave_kms_port: read_env_u32("A402_ENCLAVE_KMS_PORT")
+                .unwrap_or(defaults.enclave_kms_port),
+            snapshot_dir: env::var("A402_SNAPSHOT_DIR").unwrap_or(defaults.snapshot_dir),
+            enclave_snapshot_port: read_env_u32("A402_ENCLAVE_SNAPSHOT_PORT")
+                .unwrap_or(defaults.enclave_snapshot_port),
+            kms_region: env::var("A402_KMS_REGION")
+                .or_else(|_| env::var("AWS_REGION"))
+                .unwrap_or(defaults.kms_region),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let config = ParentConfig::default();
+    let config = ParentConfig::from_env();
 
     info!("Starting A402 parent instance services");
     info!("  Ingress listen: {}", config.ingress_listen_addr);
@@ -74,4 +98,12 @@ async fn main() {
             }
         }
     }
+}
+
+fn read_env_u32(name: &str) -> Option<u32> {
+    env::var(name).ok().map(|value| {
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} must be a valid u32"))
+    })
 }

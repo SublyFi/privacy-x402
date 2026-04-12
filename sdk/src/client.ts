@@ -16,6 +16,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 
+import { verifyNitroAttestationDocument } from "./attestation";
 import {
   buildSignatureMessage,
   computePaymentDetailsHash,
@@ -45,6 +46,18 @@ type ErrorResponse = {
   message?: string;
 };
 
+type LocalDevAttestationDocument = {
+  version: number;
+  mode: string;
+  vaultConfig: string;
+  vaultSigner: string;
+  attestationPolicyHash: string;
+  recipientPublicKeyPem: string;
+  recipientPublicKeySha256: string;
+  issuedAt: string;
+  expiresAt: string;
+};
+
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
@@ -58,11 +71,16 @@ export class A402Client {
   private enclaveUrl: string;
   private connection: Connection;
   private cachedAttestation: AttestationResponse | null = null;
+  private latestClientReceipt: ParticipantReceiptResponse | null = null;
+  private nitroAttestation: A402ClientConfig["nitroAttestation"];
+  private attestationVerifier: A402ClientConfig["attestationVerifier"];
 
   constructor(config: A402ClientConfig) {
     this.wallet = config.walletKeypair;
     this.vaultAddress = config.vaultAddress;
     this.enclaveUrl = config.enclaveUrl.replace(/\/$/, "");
+    this.nitroAttestation = config.nitroAttestation;
+    this.attestationVerifier = config.attestationVerifier;
     this.connection = new Connection(
       config.rpcUrl || "http://localhost:8899",
       "confirmed"
@@ -79,14 +97,88 @@ export class A402Client {
     }
     const attestation = await readJson<AttestationResponse>(res);
 
-    // Phase 1 local dev: basic validation only
-    // Production: verify AWS Nitro attestation document, PCR values, etc.
     if (attestation.vaultConfig !== this.vaultAddress.toBase58()) {
       throw new Error("Vault config mismatch in attestation");
+    }
+    const issuedAtMs = Date.parse(attestation.issuedAt);
+    const expiresAtMs = Date.parse(attestation.expiresAt);
+    if (!Number.isFinite(issuedAtMs) || !Number.isFinite(expiresAtMs)) {
+      throw new Error("Attestation timestamps are invalid");
+    }
+    if (expiresAtMs <= Date.now()) {
+      throw new Error("Attestation has expired");
+    }
+    if (expiresAtMs <= issuedAtMs) {
+      throw new Error("Attestation expiry must be after issuance");
+    }
+
+    const decodedDocument = Buffer.from(
+      attestation.attestationDocument,
+      "base64"
+    );
+    const decodedText = decodedDocument.toString("utf8");
+    let localDocument: LocalDevAttestationDocument | null = null;
+    try {
+      localDocument = JSON.parse(decodedText) as LocalDevAttestationDocument;
+    } catch {
+      localDocument = null;
+    }
+
+    if (localDocument?.mode === "local-dev") {
+      this.verifyLocalAttestationDocument(attestation, localDocument);
+    } else if (this.nitroAttestation) {
+      await verifyNitroAttestationDocument(attestation, {
+        ...this.nitroAttestation,
+        expectedVaultSigner:
+          this.nitroAttestation.expectedVaultSigner ?? attestation.vaultSigner,
+        requireA402UserData: this.nitroAttestation.requireA402UserData ?? true,
+      });
+      if (this.attestationVerifier) {
+        await this.attestationVerifier(attestation);
+      }
+    } else if (this.attestationVerifier) {
+      await this.attestationVerifier(attestation);
+    } else {
+      throw new Error(
+        "Non-local attestation document requires nitroAttestation or attestationVerifier"
+      );
     }
 
     this.cachedAttestation = attestation;
     return attestation;
+  }
+
+  private verifyLocalAttestationDocument(
+    attestation: AttestationResponse,
+    document: LocalDevAttestationDocument
+  ): void {
+    if (document.version !== 1) {
+      throw new Error("Unsupported local attestation document version");
+    }
+    if (document.vaultConfig !== attestation.vaultConfig) {
+      throw new Error("Local attestation document vaultConfig mismatch");
+    }
+    if (document.vaultSigner !== attestation.vaultSigner) {
+      throw new Error("Local attestation document vaultSigner mismatch");
+    }
+    if (
+      document.attestationPolicyHash.toLowerCase() !==
+      attestation.attestationPolicyHash.toLowerCase()
+    ) {
+      throw new Error("Local attestation document policy hash mismatch");
+    }
+    if (!document.recipientPublicKeyPem.includes("BEGIN PUBLIC KEY")) {
+      throw new Error("Local attestation document recipient key is invalid");
+    }
+
+    const docIssuedAtMs = Date.parse(document.issuedAt);
+    const docExpiresAtMs = Date.parse(document.expiresAt);
+    if (!Number.isFinite(docIssuedAtMs) || !Number.isFinite(docExpiresAtMs)) {
+      throw new Error("Local attestation document timestamps are invalid");
+    }
+    if (docExpiresAtMs <= Date.now()) {
+      throw new Error("Local attestation document has expired");
+    }
   }
 
   // ── Deposit ──
@@ -277,7 +369,25 @@ export class A402Client {
       throw new Error(`Receipt request failed: ${err.message || res.status}`);
     }
 
-    return readJson<ParticipantReceiptResponse>(res);
+    const receipt = await readJson<ParticipantReceiptResponse>(res);
+    this.rememberClientReceipt(receipt);
+    return receipt;
+  }
+
+  /** Return the most recently cached client receipt, if any. */
+  getLatestClientReceipt(): ParticipantReceiptResponse | null {
+    return this.latestClientReceipt;
+  }
+
+  /** Restore or update the cached client receipt. */
+  rememberClientReceipt(receipt: ParticipantReceiptResponse): void {
+    if (receipt.participant !== this.wallet.publicKey.toBase58()) {
+      throw new Error("Receipt participant does not match the current wallet");
+    }
+    if (receipt.vaultConfig !== this.vaultAddress.toBase58()) {
+      throw new Error("Receipt vaultConfig does not match this client vault");
+    }
+    this.latestClientReceipt = receipt;
   }
 
   // ── Force Settle ──
@@ -287,19 +397,18 @@ export class A402Client {
    * Used when the enclave is unresponsive and funds need to be recovered.
    */
   async forceSettle(
-    receipt: ParticipantReceiptResponse,
+    receipt: ParticipantReceiptResponse | undefined,
     program: anchor.Program
   ): Promise<string> {
-    if (receipt.participant !== this.wallet.publicKey.toBase58()) {
-      throw new Error("Receipt participant does not match the current wallet");
+    const resolvedReceipt = receipt ?? this.latestClientReceipt;
+    if (!resolvedReceipt) {
+      throw new Error("No cached client receipt is available for force-settle");
     }
-    if (receipt.vaultConfig !== this.vaultAddress.toBase58()) {
-      throw new Error("Receipt vaultConfig does not match this client vault");
-    }
+    this.rememberClientReceipt(resolvedReceipt);
 
-    const participantKind = receipt.participantKind;
-    const signatureBytes = Buffer.from(receipt.signature, "base64");
-    const messageBytes = Buffer.from(receipt.message, "base64");
+    const participantKind = resolvedReceipt.participantKind;
+    const signatureBytes = Buffer.from(resolvedReceipt.signature, "base64");
+    const messageBytes = Buffer.from(resolvedReceipt.message, "base64");
 
     const [forceSettlePda] = PublicKey.findProgramAddressSync(
       [
@@ -322,16 +431,16 @@ export class A402Client {
       signature: signatureBytes,
     });
 
-    const recipientAta = new PublicKey(receipt.recipientAta);
+    const recipientAta = new PublicKey(resolvedReceipt.recipientAta);
 
     const forceSettleIx = await program.methods
       .forceSettleInit(
         participantKind,
         recipientAta,
-        new BN(receipt.freeBalance),
-        new BN(receipt.lockedBalance),
-        new BN(receipt.maxLockExpiresAt),
-        new BN(receipt.nonce),
+        new BN(resolvedReceipt.freeBalance),
+        new BN(resolvedReceipt.lockedBalance),
+        new BN(resolvedReceipt.maxLockExpiresAt),
+        new BN(resolvedReceipt.nonce),
         Array.from(signatureBytes) as any,
         Array.from(messageBytes)
       )
@@ -349,6 +458,69 @@ export class A402Client {
       payerKey: this.wallet.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: [ed25519Ix, forceSettleIx],
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(messageV0);
+    const signer = Keypair.fromSecretKey(this.wallet.secretKey);
+    tx.sign([signer]);
+
+    const txSig = await this.connection.sendTransaction(tx);
+    await this.connection.confirmTransaction({
+      signature: txSig,
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    });
+
+    return txSig;
+  }
+
+  /**
+   * Finalize a previously initiated force settle after the dispute window elapses.
+   */
+  async finalizeForceSettle(
+    program: anchor.Program,
+    receipt?: ParticipantReceiptResponse
+  ): Promise<string> {
+    const resolvedReceipt = receipt ?? this.latestClientReceipt;
+    if (!resolvedReceipt) {
+      throw new Error("No cached client receipt is available for force-settle");
+    }
+    this.rememberClientReceipt(resolvedReceipt);
+
+    const participantKind = resolvedReceipt.participantKind;
+    const [forceSettlePda] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("force_settle"),
+        this.vaultAddress.toBuffer(),
+        this.wallet.publicKey.toBuffer(),
+        Buffer.from([participantKind]),
+      ],
+      program.programId
+    );
+
+    const recipientAta = new PublicKey(resolvedReceipt.recipientAta);
+    const [vaultTokenAccountPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault_token"), this.vaultAddress.toBuffer()],
+      program.programId
+    );
+
+    const finalizeIx = await program.methods
+      .forceSettleFinalize()
+      .accountsPartial({
+        caller: this.wallet.publicKey,
+        vaultConfig: this.vaultAddress,
+        forceSettleRequest: forceSettlePda,
+        vaultTokenAccount: vaultTokenAccountPda,
+        recipientTokenAccount: recipientAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .instruction();
+
+    const latestBlockhash = await this.connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+      payerKey: this.wallet.publicKey,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: [finalizeIx],
     }).compileToV0Message();
 
     const tx = new VersionedTransaction(messageV0);

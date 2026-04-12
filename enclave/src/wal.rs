@@ -1,5 +1,9 @@
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::path::PathBuf;
@@ -13,6 +17,7 @@ use crate::adaptor_sig::AdaptorPreSignature;
 use crate::asc_manager;
 use crate::error::EnclaveError;
 use crate::handlers::AppState;
+use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{ClientBalance, ProviderRegistration};
 
 /// WAL entry types for Phase 1
@@ -135,29 +140,80 @@ pub struct WalRecord {
     pub entry: WalEntry,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedWalEnvelope {
+    version: u8,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[derive(Clone)]
+enum WalBackend {
+    LocalFile {
+        path: PathBuf,
+    },
+    SnapshotStore {
+        client: SnapshotStoreClient,
+        prefix: String,
+    },
+}
+
 /// Write-Ahead Log for durable state changes.
-/// Phase 1: Simple file-based append-only log (not encrypted).
-/// Production: encrypted via KMS, stored on parent instance.
+/// State transitions are encrypted before leaving the enclave.
 pub struct Wal {
-    path: PathBuf,
+    backend: WalBackend,
+    key: [u8; 32],
     seqno: std::sync::atomic::AtomicU64,
 }
 
 impl Wal {
-    pub async fn new(path: PathBuf) -> Self {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await.ok();
-        }
-        // Count existing entries to set seqno
-        let seqno = if path.exists() {
-            let content = fs::read_to_string(&path).await.unwrap_or_default();
-            content.lines().count() as u64
-        } else {
-            0
-        };
+    pub async fn new_with_key(path: PathBuf, key: [u8; 32]) -> Self {
+        Self::new_with_backend(WalBackend::LocalFile { path }, key).await
+    }
 
+    pub async fn new_with_snapshot_store(
+        path: PathBuf,
+        key: [u8; 32],
+        snapshot_store: SnapshotStoreClient,
+        prefix: String,
+    ) -> Self {
+        let backend = if prefix.is_empty() {
+            WalBackend::LocalFile { path }
+        } else {
+            WalBackend::SnapshotStore {
+                client: snapshot_store,
+                prefix,
+            }
+        };
+        Self::new_with_backend(backend, key).await
+    }
+
+    pub async fn new(path: PathBuf) -> Self {
+        Self::new_with_key(path, [0x41; 32]).await
+    }
+
+    async fn new_with_backend(backend: WalBackend, key: [u8; 32]) -> Self {
+        let seqno = match &backend {
+            WalBackend::LocalFile { path } => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).await.ok();
+                }
+                if path.exists() {
+                    let content = fs::read_to_string(path).await.unwrap_or_default();
+                    content.lines().filter(|line| !line.trim().is_empty()).count() as u64
+                } else {
+                    0
+                }
+            }
+            WalBackend::SnapshotStore { client, prefix } => client
+                .list(prefix)
+                .await
+                .map(|items| items.len() as u64)
+                .unwrap_or(0),
+        };
         Self {
-            path,
+            backend,
+            key,
             seqno: std::sync::atomic::AtomicU64::new(seqno),
         }
     }
@@ -173,52 +229,178 @@ impl Wal {
             entry,
         };
 
-        let mut line = serde_json::to_string(&record)
+        let record_bytes = serde_json::to_vec(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        line.push('\n');
+        let envelope = encrypt_record(self.key, &record_bytes)?;
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.flush().await?;
-        file.sync_all().await?;
+        match &self.backend {
+            WalBackend::LocalFile { path } => {
+                let mut line = serde_json::to_string(&envelope)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                line.push('\n');
+
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .await?;
+                file.write_all(line.as_bytes()).await?;
+                file.flush().await?;
+                file.sync_all().await?;
+            }
+            WalBackend::SnapshotStore { client, prefix } => {
+                let blob = serde_json::to_vec(&envelope)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                let key = wal_object_key(prefix, seqno);
+                client.put(&key, &blob).await?;
+            }
+        }
 
         info!(seqno, "WAL entry appended");
         Ok(seqno)
     }
 
     pub async fn read_records(&self) -> Result<Vec<WalRecord>, std::io::Error> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let file = OpenOptions::new().read(true).open(&self.path).await?;
-        let mut lines = BufReader::new(file).lines();
-        let mut records = Vec::new();
-
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
+        let mut records = match &self.backend {
+            WalBackend::LocalFile { path } => read_local_records(path, self.key).await?,
+            WalBackend::SnapshotStore { client, prefix } => {
+                read_snapshot_records(client, prefix, self.key).await?
             }
-
-            let record = serde_json::from_str::<WalRecord>(&line).map_err(|error| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-            })?;
-            records.push(record);
-        }
+        };
 
         records.sort_by_key(|record| record.seqno);
         Ok(records)
     }
+
+    pub async fn read_records_after(
+        &self,
+        min_exclusive: Option<u64>,
+    ) -> Result<Vec<WalRecord>, std::io::Error> {
+        let mut records = self.read_records().await?;
+        if let Some(min_seqno) = min_exclusive {
+            records.retain(|record| record.seqno > min_seqno);
+        }
+        Ok(records)
+    }
+
+    pub fn last_seqno(&self) -> Option<u64> {
+        let next = self.seqno.load(std::sync::atomic::Ordering::SeqCst);
+        next.checked_sub(1)
+    }
+}
+
+async fn read_local_records(
+    path: &PathBuf,
+    key: [u8; 32],
+) -> Result<Vec<WalRecord>, std::io::Error> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = OpenOptions::new().read(true).open(path).await?;
+    let mut lines = BufReader::new(file).lines();
+    let mut records = Vec::new();
+
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        records.push(parse_stored_record(&line, key)?);
+    }
+
+    Ok(records)
+}
+
+async fn read_snapshot_records(
+    client: &SnapshotStoreClient,
+    prefix: &str,
+    key: [u8; 32],
+) -> Result<Vec<WalRecord>, std::io::Error> {
+    let mut items = client.list(prefix).await?;
+    items.sort();
+
+    let mut records = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(blob) = client.get(&item).await? else {
+            continue;
+        };
+        let line = String::from_utf8(blob)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+        records.push(parse_stored_record(&line, key)?);
+    }
+    Ok(records)
+}
+
+fn parse_stored_record(line: &str, key: [u8; 32]) -> Result<WalRecord, std::io::Error> {
+    if let Ok(record) = serde_json::from_str::<WalRecord>(line) {
+        return Ok(record);
+    }
+
+    let envelope = serde_json::from_str::<EncryptedWalEnvelope>(line).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+    })?;
+    let plaintext = decrypt_record(key, &envelope)?;
+    serde_json::from_slice::<WalRecord>(&plaintext)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
+}
+
+fn encrypt_record(key: [u8; 32], plaintext: &[u8]) -> Result<EncryptedWalEnvelope, std::io::Error> {
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+
+    Ok(EncryptedWalEnvelope {
+        version: 1,
+        nonce: BASE64.encode(nonce),
+        ciphertext: BASE64.encode(ciphertext),
+    })
+}
+
+fn decrypt_record(key: [u8; 32], envelope: &EncryptedWalEnvelope) -> Result<Vec<u8>, std::io::Error> {
+    if envelope.version != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported WAL envelope version {}", envelope.version),
+        ));
+    }
+
+    let nonce_bytes = BASE64.decode(&envelope.nonce).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+    })?;
+    if nonce_bytes.len() != 12 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAL nonce must be 12 bytes",
+        ));
+    }
+
+    let ciphertext = BASE64.decode(&envelope.ciphertext).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+    })?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    cipher
+        .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
+}
+
+fn wal_object_key(prefix: &str, seqno: u64) -> String {
+    format!("{}/wal-{seqno:020}.json", prefix.trim_end_matches('/'))
 }
 
 pub async fn replay_app_state(state: &AppState) -> Result<(), String> {
+    replay_app_state_from(state, None).await
+}
+
+pub async fn replay_app_state_from(state: &AppState, min_seqno_exclusive: Option<u64>) -> Result<(), String> {
     let records = state
         .wal
-        .read_records()
+        .read_records_after(min_seqno_exclusive)
         .await
         .map_err(|error| format!("failed to read WAL: {error}"))?;
 

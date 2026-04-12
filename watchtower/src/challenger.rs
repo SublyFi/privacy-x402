@@ -30,6 +30,7 @@ pub struct ChallengerConfig {
 
 /// On-chain ForceSettleRequest data (parsed from account).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OnChainForceSettleRequest {
     pub address: Pubkey,
     pub vault: Pubkey,
@@ -327,12 +328,12 @@ fn build_ed25519_verify_instruction(
 
     // Signature offsets struct (per signature)
     data.extend_from_slice(&signature_offset.to_le_bytes()); // signature_offset
-    data.extend_from_slice(&0u16.to_le_bytes()); // signature_instruction_index (same ix)
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // signature_instruction_index (current ix)
     data.extend_from_slice(&pubkey_offset.to_le_bytes()); // public_key_offset
-    data.extend_from_slice(&0u16.to_le_bytes()); // public_key_instruction_index
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // public_key_instruction_index
     data.extend_from_slice(&message_offset.to_le_bytes()); // message_data_offset
     data.extend_from_slice(&message_size.to_le_bytes()); // message_data_size
-    data.extend_from_slice(&0u16.to_le_bytes()); // message_instruction_index
+    data.extend_from_slice(&u16::MAX.to_le_bytes()); // message_instruction_index
 
     // Actual data
     data.extend_from_slice(pubkey);

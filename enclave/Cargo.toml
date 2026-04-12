@@ -35,3 +35,5 @@ solana-rpc-client = "2.3.13"
 solana-rpc-client-api = "2.3.13"
 solana-transaction-status-client-types = "2.3.13"
 reqwest = { version = "0.12", features = ["json"] }
+aes-gcm = "0.10"
+rsa = { version = "0.9", features = ["pem"] }
