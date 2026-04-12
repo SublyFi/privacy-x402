@@ -3,6 +3,8 @@ export { computePaymentDetailsHash, computeRequestHash, sha256hex } from "./cryp
 export type {
   A402ClientConfig,
   AttestationResponse,
+  BalanceResponse,
+  ParticipantReceiptResponse,
   PaymentDetails,
   PaymentPayload,
   PaymentRequiredResponse,

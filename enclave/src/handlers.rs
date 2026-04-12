@@ -493,6 +493,202 @@ pub async fn post_withdraw_auth(
     }))
 }
 
+// ── Client Balance ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceRequest {
+    pub client: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceResponse {
+    pub ok: bool,
+    pub client: String,
+    pub free: u64,
+    pub locked: u64,
+    pub total_deposited: u64,
+    pub total_withdrawn: u64,
+}
+
+pub async fn post_balance(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BalanceRequest>,
+) -> Result<Json<BalanceResponse>, EnclaveError> {
+    let client = Pubkey::from_str(&req.client)
+        .map_err(|_| EnclaveError::ClientNotFound)?;
+
+    let balance = state
+        .vault
+        .client_balances
+        .get(&client)
+        .ok_or(EnclaveError::ClientNotFound)?;
+
+    Ok(Json(BalanceResponse {
+        ok: true,
+        client: req.client,
+        free: balance.free,
+        locked: balance.locked,
+        total_deposited: balance.total_deposited,
+        total_withdrawn: balance.total_withdrawn,
+    }))
+}
+
+// ── Client Receipt ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptRequest {
+    pub client: String,
+    pub recipient_ata: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptResponse {
+    pub ok: bool,
+    pub participant: String,
+    pub participant_kind: u8,
+    pub recipient_ata: String,
+    pub free_balance: u64,
+    pub locked_balance: u64,
+    pub max_lock_expires_at: i64,
+    pub nonce: u64,
+    pub timestamp: i64,
+    pub snapshot_seqno: u64,
+    pub vault_config: String,
+    pub signature: String,
+    pub message: String,
+}
+
+pub async fn post_receipt(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ReceiptRequest>,
+) -> Result<Json<ReceiptResponse>, EnclaveError> {
+    let client = Pubkey::from_str(&req.client)
+        .map_err(|_| EnclaveError::ClientNotFound)?;
+    let recipient_ata = Pubkey::from_str(&req.recipient_ata)
+        .map_err(|_| EnclaveError::Internal("Invalid recipient ATA".into()))?;
+
+    let balance = state
+        .vault
+        .client_balances
+        .get(&client)
+        .ok_or(EnclaveError::ClientNotFound)?;
+
+    let nonce = state.vault.next_receipt_nonce();
+    let now = Utc::now().timestamp();
+    let snapshot_seqno = state
+        .vault
+        .snapshot_seqno
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    let receipt_message = state.vault.build_participant_receipt_message(
+        &client,
+        0, // Client kind
+        &recipient_ata,
+        balance.free,
+        balance.locked,
+        balance.max_lock_expires_at,
+        nonce,
+        now,
+        snapshot_seqno,
+    );
+
+    let signature = state.vault.sign_message(&receipt_message);
+
+    // Record in WAL
+    state
+        .wal
+        .append(WalEntry::ParticipantReceiptIssued {
+            participant: req.client.clone(),
+            participant_kind: 0,
+            nonce,
+        })
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+    info!(client = %req.client, nonce, "ParticipantReceipt issued");
+
+    Ok(Json(ReceiptResponse {
+        ok: true,
+        participant: req.client,
+        participant_kind: 0,
+        recipient_ata: req.recipient_ata,
+        free_balance: balance.free,
+        locked_balance: balance.locked,
+        max_lock_expires_at: balance.max_lock_expires_at,
+        nonce,
+        timestamp: now,
+        snapshot_seqno,
+        vault_config: state.vault.vault_config.to_string(),
+        signature: BASE64.encode(&signature),
+        message: BASE64.encode(&receipt_message),
+    }))
+}
+
+// ── Provider Registration ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterProviderRequest {
+    pub provider_id: String,
+    pub display_name: String,
+    pub settlement_token_account: String,
+    pub network: String,
+    pub asset_mint: String,
+    pub allowed_origins: Vec<String>,
+    pub auth_mode: String,
+    pub api_key_hash: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterProviderResponse {
+    pub ok: bool,
+    pub provider_id: String,
+    pub registered_at: String,
+}
+
+pub async fn post_register_provider(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterProviderRequest>,
+) -> Result<Json<RegisterProviderResponse>, EnclaveError> {
+    let settlement_token_account = Pubkey::from_str(&req.settlement_token_account)
+        .map_err(|_| EnclaveError::Internal("Invalid settlement token account".into()))?;
+    let asset_mint = Pubkey::from_str(&req.asset_mint)
+        .map_err(|_| EnclaveError::Internal("Invalid asset mint".into()))?;
+
+    let api_key_hash = hex::decode(&req.api_key_hash)
+        .unwrap_or_default();
+
+    let registration = crate::state::ProviderRegistration {
+        provider_id: req.provider_id.clone(),
+        display_name: req.display_name.clone(),
+        settlement_token_account,
+        network: req.network.clone(),
+        asset_mint,
+        allowed_origins: req.allowed_origins.clone(),
+        auth_mode: req.auth_mode.clone(),
+        api_key_hash,
+    };
+
+    state
+        .vault
+        .providers
+        .insert(req.provider_id.clone(), registration);
+
+    let now = Utc::now().to_rfc3339();
+    info!(provider_id = %req.provider_id, "Provider registered");
+
+    Ok(Json(RegisterProviderResponse {
+        ok: true,
+        provider_id: req.provider_id,
+        registered_at: now,
+    }))
+}
+
 // ── Helper functions ──
 
 fn compute_request_hash(ctx: &RequestContext, payment_details_hash: &str) -> Vec<u8> {

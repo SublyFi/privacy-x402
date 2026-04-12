@@ -26,6 +26,8 @@ import {
 import {
   A402ClientConfig,
   AttestationResponse,
+  BalanceResponse,
+  ParticipantReceiptResponse,
   PaymentDetails,
   PaymentPayload,
   PaymentRequiredResponse,
@@ -203,6 +205,133 @@ export class A402Client {
 
     const tx = new VersionedTransaction(messageV0);
     // Sign with the wallet keypair
+    const signer = Keypair.fromSecretKey(this.wallet.secretKey);
+    tx.sign([signer]);
+
+    const txSig = await this.connection.sendTransaction(tx);
+    await this.connection.confirmTransaction({
+      signature: txSig,
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    });
+
+    return txSig;
+  }
+
+  // ── Balance ──
+
+  /** Query client balance from enclave. */
+  async getBalance(): Promise<BalanceResponse> {
+    const res = await globalThis.fetch(`${this.enclaveUrl}/v1/balance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client: this.wallet.publicKey.toBase58(),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(`Balance query failed: ${err.message || res.status}`);
+    }
+
+    return res.json();
+  }
+
+  // ── Receipt ──
+
+  /**
+   * Request a signed ParticipantReceipt from the enclave.
+   * Used for force-settle (emergency withdrawal when enclave is down).
+   */
+  async getReceipt(usdcMint: PublicKey): Promise<ParticipantReceiptResponse> {
+    const recipientAta = getAssociatedTokenAddressSync(
+      usdcMint,
+      this.wallet.publicKey
+    );
+
+    const res = await globalThis.fetch(`${this.enclaveUrl}/v1/receipt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client: this.wallet.publicKey.toBase58(),
+        recipientAta: recipientAta.toBase58(),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(`Receipt request failed: ${err.message || res.status}`);
+    }
+
+    return res.json();
+  }
+
+  // ── Force Settle ──
+
+  /**
+   * Initiate a force settle using a ParticipantReceipt.
+   * Used when the enclave is unresponsive and funds need to be recovered.
+   */
+  async forceSettle(
+    receipt: ParticipantReceiptResponse,
+    program: anchor.Program
+  ): Promise<string> {
+    const participantKind = receipt.participantKind;
+    const signatureBytes = Buffer.from(receipt.signature, "base64");
+    const messageBytes = Buffer.from(receipt.message, "base64");
+
+    const [forceSettlePda] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("force_settle"),
+        this.vaultAddress.toBuffer(),
+        this.wallet.publicKey.toBuffer(),
+        Buffer.from([participantKind]),
+      ],
+      program.programId
+    );
+
+    const attestation =
+      this.cachedAttestation || (await this.verifyAttestation());
+    const vaultSignerPubkey = new PublicKey(attestation.vaultSigner);
+
+    // Build Ed25519 precompile instruction for receipt verification
+    const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
+      publicKey: vaultSignerPubkey.toBytes(),
+      message: messageBytes,
+      signature: signatureBytes,
+    });
+
+    const recipientAta = new PublicKey(receipt.recipientAta);
+
+    const forceSettleIx = await program.methods
+      .forceSettleInit(
+        participantKind,
+        recipientAta,
+        new BN(receipt.freeBalance),
+        new BN(receipt.lockedBalance),
+        new BN(receipt.maxLockExpiresAt),
+        new BN(receipt.nonce),
+        Array.from(signatureBytes) as any,
+        Array.from(messageBytes)
+      )
+      .accounts({
+        participant: this.wallet.publicKey,
+        vaultConfig: this.vaultAddress,
+        forceSettleRequest: forceSettlePda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+
+    const latestBlockhash = await this.connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+      payerKey: this.wallet.publicKey,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: [ed25519Ix, forceSettleIx],
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(messageV0);
     const signer = Keypair.fromSecretKey(this.wallet.secretKey);
     tx.sign([signer]);
 
