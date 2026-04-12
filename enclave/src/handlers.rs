@@ -93,7 +93,64 @@ pub struct PaymentPayload {
 #[serde(rename_all = "camelCase")]
 pub struct VerifyRequest {
     pub payment_payload: PaymentPayload,
+    #[serde(default)]
+    pub payment_details: Option<serde_json::Value>,
     pub request_context: RequestContext,
+}
+
+// ── Provider Authentication Helper (§8.2 requirement 1) ──
+
+/// Authenticate provider from Authorization header.
+/// Returns the authenticated provider_id on success.
+fn authenticate_provider(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<String, EnclaveError> {
+    let auth_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(EnclaveError::ProviderAuthFailed)?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(EnclaveError::ProviderAuthFailed)?;
+
+    let token_hash = Sha256::digest(token.as_bytes()).to_vec();
+
+    for entry in state.vault.providers.iter() {
+        if entry.value().api_key_hash == token_hash {
+            return Ok(entry.key().clone());
+        }
+    }
+
+    Err(EnclaveError::ProviderAuthFailed)
+}
+
+/// Compute canonical JSON hash of payment details (§6, paymentDetailsHash).
+fn compute_payment_details_hash(details: &serde_json::Value) -> Vec<u8> {
+    // canonical_json: UTF-8, keys in lexicographic order, no extra whitespace
+    let canonical = canonical_json(details);
+    Sha256::digest(canonical.as_bytes()).to_vec()
+}
+
+/// Produce canonical JSON: sorted keys, no extra whitespace.
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let entries: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonical_json(&map[k])))
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let entries: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", entries.join(","))
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 #[derive(Serialize)]
@@ -110,6 +167,7 @@ pub struct VerifyResponse {
 
 pub async fn post_verify(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, EnclaveError> {
     let payload = &req.payment_payload;
@@ -118,17 +176,57 @@ pub async fn post_verify(
         return Err(EnclaveError::DepositSyncInProgress);
     }
 
+    // C5: Authenticate provider from Authorization header (§8.2 requirement 1)
+    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
+
     // 1. Validate scheme
     if payload.scheme != "a402-svm-v1" {
         return Err(EnclaveError::InvalidScheme);
     }
 
-    // 2. Validate provider
-    let _provider = state
+    // 2. Validate provider exists and matches authenticated identity
+    let provider = state
         .vault
         .providers
         .get(&payload.provider_id)
         .ok_or(EnclaveError::ProviderNotFound)?;
+
+    if authenticated_provider_id != payload.provider_id {
+        return Err(EnclaveError::ProviderIdMismatch);
+    }
+
+    // C6: Validate registration fields match payload (§8.2 requirement 7)
+    if payload.pay_to != provider.settlement_token_account.to_string() {
+        return Err(EnclaveError::PayToMismatch);
+    }
+    if payload.asset_mint != provider.asset_mint.to_string() {
+        return Err(EnclaveError::AssetMintMismatch);
+    }
+    if payload.network != provider.network {
+        return Err(EnclaveError::NetworkMismatch);
+    }
+
+    // C9: Validate request origin against provider allowedOrigins (§4)
+    if !provider.allowed_origins.is_empty()
+        && !provider
+            .allowed_origins
+            .contains(&req.request_context.origin)
+    {
+        return Err(EnclaveError::OriginNotAllowed);
+    }
+
+    // C7: Validate paymentDetailsHash via canonical JSON (§8.2 requirement 3)
+    if let Some(ref payment_details) = req.payment_details {
+        let computed_hash = compute_payment_details_hash(payment_details);
+        let provided_hash = hex::decode(&payload.payment_details_hash)
+            .map_err(|_| EnclaveError::PaymentDetailsHashMismatch)?;
+        if computed_hash != provided_hash {
+            return Err(EnclaveError::PaymentDetailsHashMismatch);
+        }
+    }
+
+    // Drop the provider reference before further borrows
+    drop(provider);
 
     // 3. Validate vault address
     if payload.vault != state.vault.vault_config.to_string() {
@@ -280,8 +378,12 @@ pub struct SettleResponse {
 
 pub async fn post_settle(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<SettleRequest>,
 ) -> Result<Json<SettleResponse>, EnclaveError> {
+    // C5: Authenticate provider (§8.3 — same auth as /verify)
+    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
+
     let (status, client, provider_id, amount, existing_settlement_id, settled_at) = {
         let reservation = state
             .vault
@@ -297,6 +399,11 @@ pub async fn post_settle(
             reservation.settled_at,
         )
     };
+
+    // Verify authenticated provider owns this reservation
+    if authenticated_provider_id != provider_id {
+        return Err(EnclaveError::ProviderIdMismatch);
+    }
 
     if status == ReservationStatus::SettledOffchain {
         let settled_at = settled_at.unwrap_or(0);
@@ -404,13 +511,22 @@ pub struct CancelResponse {
 
 pub async fn post_cancel(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<CancelRequest>,
 ) -> Result<Json<CancelResponse>, EnclaveError> {
+    // C8: Authenticate provider (§8.5)
+    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
+
     let mut reservation = state
         .vault
         .reservations
         .get_mut(&req.verification_id)
         .ok_or(EnclaveError::ReservationNotFound)?;
+
+    // C8: Check provider_mismatch — only the provider that owns the reservation can cancel (§8.5)
+    if authenticated_provider_id != reservation.provider_id {
+        return Err(EnclaveError::ProviderIdMismatch);
+    }
 
     if reservation.status == ReservationStatus::Cancelled {
         let now_str = Utc::now().to_rfc3339();
