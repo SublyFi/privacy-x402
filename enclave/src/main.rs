@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod audit;
 mod batch;
 mod deposit_detector;
 mod error;

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 
+use crate::audit::{self, EncryptedAuditRecord};
 use crate::handlers::AppState;
 use crate::state::ReservationStatus;
 use crate::wal::WalEntry;
@@ -10,6 +11,8 @@ use crate::wal::WalEntry;
 const BATCH_WINDOW_SEC: u64 = 120;
 const MAX_SETTLEMENT_DELAY_SEC: i64 = 900;
 const MAX_SETTLEMENTS_PER_TX: usize = 20;
+/// Max audit records per tx (settlement + audit in same tx)
+const MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT: usize = 4;
 const MIN_BATCH_PROVIDERS: usize = 2;
 const RESERVATION_TIMEOUT_SEC: i64 = 60;
 
@@ -18,6 +21,15 @@ const RESERVATION_TIMEOUT_SEC: i64 = 60;
 pub struct BatchSettlementEntry {
     pub provider_token_account: Pubkey,
     pub amount: u64,
+}
+
+/// Audit record paired with a settlement entry
+#[derive(Debug, Clone)]
+pub struct BatchAuditEntry {
+    pub encrypted_sender: [u8; 64],
+    pub encrypted_amount: [u8; 64],
+    pub provider: Pubkey,
+    pub timestamp: i64,
 }
 
 /// Spawns the batch settlement loop and reservation expiry checker
@@ -84,10 +96,11 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
     }
 }
 
-/// Execute a batch settlement
+/// Execute a batch settlement with audit record generation
 async fn fire_batch(state: &Arc<AppState>, now: i64) {
     let mut entries: Vec<BatchSettlementEntry> = Vec::new();
     let mut provider_ids: Vec<String> = Vec::new();
+    let mut settlement_ids_per_provider: Vec<Vec<String>> = Vec::new();
     let mut total_amount: u64 = 0;
 
     // Collect provider credits (up to MAX_SETTLEMENTS_PER_TX)
@@ -105,6 +118,7 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
         });
         total_amount += entry.credited_amount;
         provider_ids.push(entry.provider_id.clone());
+        settlement_ids_per_provider.push(entry.settlement_ids.clone());
 
         // Reset credit
         entry.credited_amount = 0;
@@ -116,16 +130,56 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
         return;
     }
 
-    // TODO: Phase 1 — Submit on-chain settle_vault transaction
-    // For now, log the batch and record in WAL
-    let batch_id = now as u64; // Simple batch ID
+    let batch_id = now as u64;
+
+    // Phase 2: Generate encrypted audit records for each settlement
+    let auditor_secret = *state.vault.auditor_master_secret.read().await;
+    let auditor_epoch = state
+        .vault
+        .auditor_epoch
+        .load(std::sync::atomic::Ordering::SeqCst) as u32;
+
+    let mut audit_entries: Vec<BatchAuditEntry> = Vec::new();
+
+    for settlement_ids in &settlement_ids_per_provider {
+        for sid in settlement_ids {
+            if let Some(record) = state.vault.settlement_history.get(sid) {
+                let encrypted = audit::generate_audit_record(
+                    &record.client,
+                    &record.provider,
+                    record.amount,
+                    auditor_epoch,
+                    &auditor_secret,
+                );
+                audit_entries.push(BatchAuditEntry {
+                    encrypted_sender: encrypted.encrypted_sender,
+                    encrypted_amount: encrypted.encrypted_amount,
+                    provider: encrypted.provider,
+                    timestamp: encrypted.timestamp,
+                });
+            }
+        }
+    }
 
     info!(
         batch_id,
         provider_count = entries.len(),
+        audit_count = audit_entries.len(),
         total_amount,
         "Batch settlement ready for on-chain submission"
     );
+
+    // Phase 2: Submit atomic settle_vault + record_audit chunks
+    // Per design doc §6.3:
+    //   - Without audit: up to 20 settlements per tx
+    //   - With audit: up to 4-5 settlements per tx (AuditRecord PDA creation is expensive)
+    //
+    // TODO: Submit to on-chain via Solana RPC
+    // For each chunk:
+    //   1. Build settle_vault instruction with chunk of settlements
+    //   2. Build record_audit instruction with corresponding audit records
+    //   3. Combine in same transaction for atomic execution
+    //   4. Sign with vault_signer and submit
 
     if let Err(e) = state
         .wal
@@ -137,6 +191,13 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
         .await
     {
         warn!("Failed to append batch WAL entry: {e}");
+    }
+
+    // Clean up settlement history for processed records
+    for settlement_ids in &settlement_ids_per_provider {
+        for sid in settlement_ids {
+            state.vault.settlement_history.remove(sid);
+        }
     }
 
     // Update last batch time

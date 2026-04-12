@@ -921,6 +921,7 @@ describe("a402_vault", () => {
           .accounts({
             vaultSigner: fakeSigner.publicKey,
             vaultConfig: vaultConfigPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
             systemProgram: SystemProgram.programId,
           })
           .signers([fakeSigner])
@@ -929,6 +930,165 @@ describe("a402_vault", () => {
       } catch (err: any) {
         expect(err.error.errorCode.code).to.equal("InvalidVaultSigner");
       }
+    });
+
+    it("rejects standalone record_audit (no settle_vault pairing)", async () => {
+      // record_audit must be in the same tx as settle_vault
+      const batchId = new BN(999);
+      const batchChunkHash = new Array(32).fill(42);
+
+      // Fake encrypted audit record data
+      const fakeAuditRecord = {
+        encryptedSender: new Array(64).fill(1),
+        encryptedAmount: new Array(64).fill(2),
+        provider: Keypair.generate().publicKey,
+        timestamp: new BN(Math.floor(Date.now() / 1000)),
+      };
+
+      const [auditPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("audit"),
+          vaultConfigPda.toBuffer(),
+          batchId.toArrayLike(Buffer, "le", 8),
+          Buffer.from([0]),
+        ],
+        program.programId
+      );
+
+      try {
+        await program.methods
+          .recordAudit(batchId, batchChunkHash, [fakeAuditRecord])
+          .accounts({
+            vaultSigner: vaultSignerKeypair.publicKey,
+            vaultConfig: vaultConfigPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts([
+            {
+              pubkey: auditPda,
+              isWritable: true,
+              isSigner: false,
+            },
+          ])
+          .signers([vaultSignerKeypair])
+          .rpc();
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        // Should fail with RecordAuditWithoutSettle
+        expect(err.error.errorCode.code).to.equal("RecordAuditWithoutSettle");
+      }
+    });
+
+    it("creates audit record atomically with settle_vault", async () => {
+      // Set up: create a provider with token account and fund vault
+      const auditProviderKeypair = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(
+        auditProviderKeypair.publicKey,
+        2 * anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig);
+
+      const auditProviderTokenAccount = await createAccount(
+        provider.connection,
+        auditProviderKeypair,
+        usdcMint,
+        auditProviderKeypair.publicKey
+      );
+
+      const batchId = new BN(50);
+      const batchChunkHash = new Array(32).fill(0);
+      const settleAmount = 10_000;
+      const now = Math.floor(Date.now() / 1000);
+
+      // Fake encrypted data (in production, enclave generates real ElGamal ciphertexts)
+      const auditRecord = {
+        encryptedSender: new Array(64).fill(0xAB),
+        encryptedAmount: new Array(64).fill(0xCD),
+        provider: auditProviderKeypair.publicKey,
+        timestamp: new BN(now),
+      };
+
+      const [auditPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("audit"),
+          vaultConfigPda.toBuffer(),
+          batchId.toArrayLike(Buffer, "le", 8),
+          Buffer.from([0]),
+        ],
+        program.programId
+      );
+
+      // Build settle_vault instruction
+      const settleIx = await program.methods
+        .settleVault(batchId, batchChunkHash, [
+          {
+            providerTokenAccount: auditProviderTokenAccount,
+            amount: new BN(settleAmount),
+          },
+        ])
+        .accounts({
+          vaultSigner: vaultSignerKeypair.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts([
+          {
+            pubkey: auditProviderTokenAccount,
+            isWritable: true,
+            isSigner: false,
+          },
+        ])
+        .instruction();
+
+      // Build record_audit instruction
+      const auditIx = await program.methods
+        .recordAudit(batchId, batchChunkHash, [auditRecord])
+        .accounts({
+          vaultSigner: vaultSignerKeypair.publicKey,
+          vaultConfig: vaultConfigPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts([
+          {
+            pubkey: auditPda,
+            isWritable: true,
+            isSigner: false,
+          },
+        ])
+        .instruction();
+
+      // Combine in one transaction (atomic)
+      const latestBlockhash = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: vaultSignerKeypair.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [settleIx, auditIx],
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(messageV0);
+      tx.sign([vaultSignerKeypair]);
+
+      const txSig = await provider.connection.sendTransaction(tx);
+      await provider.connection.confirmTransaction({
+        signature: txSig,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      });
+
+      // Verify the AuditRecord PDA was created
+      const auditAccount = await program.account.auditRecord.fetch(auditPda);
+      expect(auditAccount.vault.toBase58()).to.equal(vaultConfigPda.toBase58());
+      expect(auditAccount.batchId.toNumber()).to.equal(50);
+      expect(auditAccount.index).to.equal(0);
+      expect(auditAccount.provider.toBase58()).to.equal(
+        auditProviderKeypair.publicKey.toBase58()
+      );
+      expect(auditAccount.auditorEpoch).to.equal(1); // rotated earlier in test
+      expect(auditAccount.encryptedSender.length).to.equal(64);
+      expect(auditAccount.encryptedAmount.length).to.equal(64);
     });
   });
 

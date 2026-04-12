@@ -101,9 +101,54 @@ Anchor program implemented and all tests passing.
 - PAYMENT-SIGNATURE decoding and facilitator verify/settle
 - Async settlement after response delivery
 
-## Remaining for Phase 2
-- `record_audit` full implementation (ElGamal encryption)
-- Hierarchical key derivation for selective disclosure
-- AuditTool in SDK
-- settle_vault + record_audit atomic chunk pairing
+## Phase 2: Audit Records + Selective Disclosure (2026-04-12) ✅
+
+### ElGamal Encryption (enclave/src/audit.rs)
+- ECIES-like variant on Ristretto255: C1 = r*G (32 bytes), C2 = data XOR SHA256("a402-elgamal-mask-v1" || r*P) (32 bytes)
+- Total ciphertext: 64 bytes per field (encrypted_sender, encrypted_amount)
+- Uses curve25519-dalek Ristretto points, HKDF-SHA256 for key derivation
+- Unit tests: encrypt/decrypt roundtrip, selective disclosure, exported key
+
+### Hierarchical Key Derivation
+- Master secret → provider-specific key via HKDF(salt="a402-audit-v1", info=provider_address)
+- 64-byte HKDF output reduced mod l to Ristretto scalar
+- `export_provider_key()`: export derived secret for scoped third-party auditing
+- Separate master key derivation for full-audit use case
+
+### record_audit On-chain Instruction (Full Implementation)
+- Creates AuditRecord PDAs via remaining_accounts
+- sysvar::instructions verification: atomic pairing with settle_vault required
+- Verifies batch_id, batch_chunk_hash, vault_config match between settle and audit
+- Standalone execution rejected (RecordAuditWithoutSettle error)
+- auditor_epoch from VaultConfig embedded in each record
+- MAX_ATOMIC_AUDITS_PER_TX = 5
+
+### Enclave Batch Settlement with Audit
+- fire_batch() generates EncryptedAuditRecord for each settlement
+- Settlement history tracking (SettlementRecord) in VaultState
+- Batch chunking: up to 4 settlements per tx when audit records included
+- auditor_master_secret and auditor_epoch added to VaultState
+
+### AuditTool (SDK, sdk/src/audit.ts)
+- `AuditTool` class: decryptAll, decryptForProvider, exportProviderKey
+- `decryptWithKey()` static method for third-party auditors
+- On-chain AuditRecord PDA fetching via getProgramAccounts + memcmp filter
+- ElGamal decryption using @noble/curves for Ristretto255
+- HKDF key derivation matching enclave's HKDF parameters
+
+### Tests (3 new)
+- record_audit: rejects non-vault-signer (updated with instructions_sysvar)
+- record_audit: rejects standalone execution (no settle_vault in same tx)
+- record_audit: creates audit record atomically with settle_vault
+
+### Implementation Notes
+- Anchor discriminator for settle_vault computed as sha256("global:settle_vault")[..8]
+- record_audit searches up to 16 instructions in the tx for settle_vault pairing
+- @noble/curves and @noble/hashes added to package.json for SDK crypto
+- VaultState now tracks settlement_history for audit record generation
+
+## Remaining for Phase 3
+- Ed25519 adaptor signatures for Exec-Pay-Deliver atomicity
+- Provider TEE integration
+- ASC state management (A402 Algorithm 1)
 - Batch submission to on-chain settle_vault (enclave → Solana RPC)

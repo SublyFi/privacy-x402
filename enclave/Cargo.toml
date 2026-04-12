@@ -16,6 +16,8 @@ serde_json = "1"
 base64 = "0.22"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+curve25519-dalek = { version = "4", features = ["rand_core"] }
+hkdf = "0.12"
 rand = "0.8"
 uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", features = ["serde"] }

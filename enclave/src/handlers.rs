@@ -305,6 +305,23 @@ pub async fn post_settle(
         now,
     )?;
 
+    // Record settlement for audit record generation (Phase 2)
+    let provider_reg = state.vault.providers.get(&reservation.provider_id);
+    let provider_pubkey = provider_reg
+        .as_ref()
+        .map(|p| p.settlement_token_account)
+        .unwrap_or_default();
+    state.vault.settlement_history.insert(
+        settlement_id.clone(),
+        crate::state::SettlementRecord {
+            settlement_id: settlement_id.clone(),
+            client: reservation.client,
+            provider: provider_pubkey,
+            amount: reservation.amount,
+            timestamp: now,
+        },
+    );
+
     // WAL append (durable before response)
     state
         .wal
