@@ -44,10 +44,7 @@ pub struct EncryptedAuditRecord {
 /// Uses HKDF-SHA256 with the provider address as info:
 ///   derived_secret = HKDF-Expand(HKDF-Extract(master_secret), provider_address)
 ///   derived_pubkey = derived_secret * G
-pub fn derive_provider_key(
-    master_secret: &[u8; 32],
-    provider: &Pubkey,
-) -> ElGamalKeyPair {
+pub fn derive_provider_key(master_secret: &[u8; 32], provider: &Pubkey) -> ElGamalKeyPair {
     let hk = Hkdf::<Sha256>::new(Some(b"a402-audit-v1"), master_secret);
     let mut okm = [0u8; 64];
     hk.expand(provider.as_ref(), &mut okm)
@@ -147,19 +144,13 @@ pub fn generate_audit_record(
 }
 
 /// Decrypt the sender pubkey from an audit record.
-pub fn decrypt_sender(
-    secret_key: &Scalar,
-    encrypted_sender: &[u8; 64],
-) -> Option<Pubkey> {
+pub fn decrypt_sender(secret_key: &Scalar, encrypted_sender: &[u8; 64]) -> Option<Pubkey> {
     let bytes = elgamal_decrypt(secret_key, encrypted_sender)?;
     Some(Pubkey::new_from_array(bytes))
 }
 
 /// Decrypt the amount from an audit record.
-pub fn decrypt_amount(
-    secret_key: &Scalar,
-    encrypted_amount: &[u8; 64],
-) -> Option<u64> {
+pub fn decrypt_amount(secret_key: &Scalar, encrypted_amount: &[u8; 64]) -> Option<u64> {
     let bytes = elgamal_decrypt(secret_key, encrypted_amount)?;
     let amount_bytes: [u8; 8] = bytes[..8].try_into().ok()?;
     Some(u64::from_le_bytes(amount_bytes))
@@ -178,10 +169,7 @@ fn kdf_mask(shared_secret_bytes: &[u8; 32]) -> [u8; 32] {
 
 /// Export a provider-derived secret key for selective disclosure.
 /// The recipient can use this to decrypt only that provider's audit records.
-pub fn export_provider_key(
-    master_secret: &[u8; 32],
-    provider: &Pubkey,
-) -> [u8; 32] {
+pub fn export_provider_key(master_secret: &[u8; 32], provider: &Pubkey) -> [u8; 32] {
     let key_pair = derive_provider_key(master_secret, provider);
     key_pair.secret.to_bytes()
 }
@@ -211,18 +199,15 @@ mod tests {
         let amount = 1_500_000u64;
         let auditor_epoch = 0;
 
-        let record = generate_audit_record(
-            &client,
-            &provider,
-            amount,
-            auditor_epoch,
-            &master_secret,
-        );
+        let record =
+            generate_audit_record(&client, &provider, amount, auditor_epoch, &master_secret);
 
         // Decrypt with provider-derived key
         let provider_key = derive_provider_key(&master_secret, &provider);
-        let decrypted_sender = decrypt_sender(&provider_key.secret, &record.encrypted_sender).unwrap();
-        let decrypted_amount = decrypt_amount(&provider_key.secret, &record.encrypted_amount).unwrap();
+        let decrypted_sender =
+            decrypt_sender(&provider_key.secret, &record.encrypted_sender).unwrap();
+        let decrypted_amount =
+            decrypt_amount(&provider_key.secret, &record.encrypted_amount).unwrap();
 
         assert_eq!(decrypted_sender, client);
         assert_eq!(decrypted_amount, amount);

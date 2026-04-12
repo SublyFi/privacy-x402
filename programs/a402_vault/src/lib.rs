@@ -8,7 +8,7 @@ pub mod state;
 
 use instructions::*;
 
-declare_id!("GjxYKTUpPFhBectiPfKJkUKJnP7MaZU3kEG5kAFyMj3E");
+declare_id!("DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR");
 
 #[program]
 pub mod a402_vault {
@@ -53,8 +53,8 @@ pub mod a402_vault {
         instructions::settle_vault::handler(ctx, batch_id, batch_chunk_hash, settlements)
     }
 
-    pub fn record_audit(
-        ctx: Context<RecordAudit>,
+    pub fn record_audit<'info>(
+        ctx: Context<'_, '_, 'info, 'info, RecordAudit<'info>>,
         batch_id: u64,
         batch_chunk_hash: [u8; 32],
         records: Vec<AuditRecordData>,

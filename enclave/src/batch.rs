@@ -1,5 +1,17 @@
+use a402_vault::accounts::{RecordAudit, SettleVault};
+use a402_vault::instruction::{RecordAudit as RecordAuditIx, SettleVault as SettleVaultIx};
+use a402_vault::instructions::record_audit::AuditRecordData;
+use a402_vault::instructions::settle_vault::SettlementEntry;
+use anchor_client::solana_sdk::commitment_config::CommitmentConfig;
+use anchor_client::solana_sdk::instruction::AccountMeta;
+use anchor_client::solana_sdk::signature::Keypair;
+use anchor_client::solana_sdk::{system_program, sysvar};
+use anchor_client::{Client, Cluster};
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
@@ -33,6 +45,37 @@ pub struct BatchAuditEntry {
     pub encrypted_amount: [u8; 64],
     pub provider: Pubkey,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSettlement {
+    settlement_id: String,
+    provider_id: String,
+    settlement: BatchSettlementEntry,
+    audit: BatchAuditEntry,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchSubmitResult {
+    pub submitted: bool,
+    pub batch_id: Option<u64>,
+    pub provider_count: usize,
+    pub settlement_count: usize,
+    pub total_amount: u64,
+    pub tx_signatures: Vec<String>,
+}
+
+impl BatchSubmitResult {
+    fn no_op() -> Self {
+        Self {
+            submitted: false,
+            batch_id: None,
+            provider_count: 0,
+            settlement_count: 0,
+            total_amount: 0,
+            tx_signatures: Vec::new(),
+        }
+    }
 }
 
 /// Spawns the batch settlement loop and reservation expiry checker
@@ -89,167 +132,379 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
         }
 
         // Privacy: wait for MIN_BATCH_PROVIDERS unless MAX_SETTLEMENT_DELAY_SEC exceeded
-        if should_batch && provider_count < MIN_BATCH_PROVIDERS && oldest_credit_age < MAX_SETTLEMENT_DELAY_SEC {
+        if should_batch
+            && provider_count < MIN_BATCH_PROVIDERS
+            && oldest_credit_age < MAX_SETTLEMENT_DELAY_SEC
+        {
             continue;
         }
 
         if should_batch {
-            fire_batch(&state, now).await;
+            if let Err(error) = fire_batch_at(&state, now).await {
+                warn!(error = %error, "Automatic batch submission failed");
+            }
         }
     }
 }
 
-/// Execute a batch settlement with audit record generation
-async fn fire_batch(state: &Arc<AppState>, now: i64) {
-    let mut entries: Vec<BatchSettlementEntry> = Vec::new();
-    let mut provider_ids: Vec<String> = Vec::new();
-    let mut settlement_ids_per_provider: Vec<Vec<String>> = Vec::new();
-    let mut total_amount: u64 = 0;
+/// Trigger a batch immediately, bypassing timing/privacy gates.
+pub async fn fire_batch_now(state: &Arc<AppState>) -> Result<BatchSubmitResult, String> {
+    fire_batch_at(state, chrono::Utc::now().timestamp()).await
+}
 
-    // Collect provider credits (up to MAX_SETTLEMENTS_PER_TX)
-    for mut entry in state.vault.provider_credits.iter_mut() {
-        if entry.credited_amount == 0 {
-            continue;
-        }
-        if entries.len() >= MAX_SETTLEMENTS_PER_TX {
-            break;
-        }
-
-        entries.push(BatchSettlementEntry {
-            provider_token_account: entry.settlement_token_account,
-            amount: entry.credited_amount,
-        });
-        total_amount += entry.credited_amount;
-        provider_ids.push(entry.provider_id.clone());
-        settlement_ids_per_provider.push(entry.settlement_ids.clone());
-
-        // Reset credit
-        entry.credited_amount = 0;
-        entry.settlement_ids.clear();
-        entry.oldest_credit_at = now;
+/// Execute a batch settlement with audit record generation.
+async fn fire_batch_at(state: &Arc<AppState>, now: i64) -> Result<BatchSubmitResult, String> {
+    let prepared = prepare_batch(state).await?;
+    if prepared.is_empty() {
+        return Ok(BatchSubmitResult::no_op());
     }
 
-    if entries.is_empty() {
-        return;
-    }
-
+    let provider_count = prepared
+        .iter()
+        .map(|entry| entry.provider_id.clone())
+        .collect::<HashSet<_>>()
+        .len();
+    let total_amount: u64 = prepared.iter().map(|entry| entry.settlement.amount).sum();
     let batch_id = now as u64;
 
-    // Phase 2: Generate encrypted audit records for each settlement
+    info!(
+        batch_id,
+        provider_count,
+        audit_count = prepared.len(),
+        total_amount,
+        "Batch settlement ready for on-chain submission"
+    );
+
+    let chunks = build_batch_chunks(&prepared);
+    let mut tx_signatures = Vec::with_capacity(chunks.len());
+
+    for (chunk_idx, chunk) in chunks.iter().cloned().enumerate() {
+        let settlements = chunk.settlements();
+        let audits = chunk.audits();
+        let batch_chunk_hash = compute_batch_chunk_hash(batch_id, &settlements, &audits);
+
+        info!(
+            batch_id,
+            chunk_idx,
+            chunk_size = settlements.len(),
+            start_index = chunk.start_index,
+            chunk_hash = hex::encode(batch_chunk_hash),
+            "Submitting atomic settle_vault + record_audit chunk"
+        );
+
+        let state_for_submit = state.clone();
+        let chunk_for_submit = chunk.clone();
+        let signature = tokio::task::spawn_blocking(move || {
+            submit_atomic_chunk(
+                &state_for_submit,
+                batch_id,
+                &chunk_for_submit,
+                batch_chunk_hash,
+            )
+        })
+        .await
+        .map_err(|error| format!("chunk {chunk_idx} task join failed for batch {batch_id}: {error}"))?
+        .map_err(|error| format!("chunk {chunk_idx} submission failed for batch {batch_id}: {error}"))?;
+
+        apply_submitted_chunk(state, &chunk, now).await;
+        state
+            .wal
+            .append(WalEntry::BatchConfirmed {
+                batch_id,
+                tx_signature: signature.clone(),
+            })
+            .await
+            .map_err(|error| format!("failed to append BatchConfirmed WAL entry: {error}"))?;
+
+        tx_signatures.push(signature);
+    }
+
+    state
+        .wal
+        .append(WalEntry::BatchSubmitted {
+            batch_id,
+            provider_count,
+            total_amount,
+        })
+        .await
+        .map_err(|error| format!("failed to append BatchSubmitted WAL entry: {error}"))?;
+
+    Ok(BatchSubmitResult {
+        submitted: true,
+        batch_id: Some(batch_id),
+        provider_count,
+        settlement_count: prepared.len(),
+        total_amount,
+        tx_signatures,
+    })
+}
+
+async fn prepare_batch(state: &Arc<AppState>) -> Result<Vec<PreparedSettlement>, String> {
     let auditor_secret = *state.vault.auditor_master_secret.read().await;
     let auditor_epoch = state
         .vault
         .auditor_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
+    let mut prepared: Vec<PreparedSettlement> = Vec::new();
 
-    let mut audit_entries: Vec<BatchAuditEntry> = Vec::new();
+    'credits: for entry in state.vault.provider_credits.iter() {
+        if entry.credited_amount == 0 {
+            continue;
+        }
 
-    for settlement_ids in &settlement_ids_per_provider {
-        for sid in settlement_ids {
-            if let Some(record) = state.vault.settlement_history.get(sid) {
-                let encrypted = audit::generate_audit_record(
-                    &record.client,
-                    &record.provider,
-                    record.amount,
-                    auditor_epoch,
-                    &auditor_secret,
-                );
-                audit_entries.push(BatchAuditEntry {
+        for sid in &entry.settlement_ids {
+            if prepared.len() >= MAX_SETTLEMENTS_PER_TX {
+                break 'credits;
+            }
+
+            let Some(record) = state.vault.settlement_history.get(sid) else {
+                return Err(format!(
+                    "missing settlement_history entry for settlement_id={sid} provider_id={}",
+                    entry.provider_id
+                ));
+            };
+
+            let encrypted = audit::generate_audit_record(
+                &record.client,
+                &record.provider,
+                record.amount,
+                auditor_epoch,
+                &auditor_secret,
+            );
+
+            prepared.push(PreparedSettlement {
+                settlement_id: sid.clone(),
+                provider_id: entry.provider_id.clone(),
+                settlement: BatchSettlementEntry {
+                    provider_token_account: record.provider,
+                    amount: record.amount,
+                },
+                audit: BatchAuditEntry {
                     encrypted_sender: encrypted.encrypted_sender,
                     encrypted_amount: encrypted.encrypted_amount,
                     provider: encrypted.provider,
                     timestamp: encrypted.timestamp,
-                });
-            }
+                },
+            });
         }
     }
 
-    // Validate 1:1 pairing between settlements and audit records (design doc §6.3 l.800)
-    if entries.len() != audit_entries.len() {
-        warn!(
-            settlements = entries.len(),
-            audits = audit_entries.len(),
-            "Settlement/audit count mismatch — skipping batch"
-        );
-        return;
-    }
-
-    info!(
-        batch_id,
-        provider_count = entries.len(),
-        audit_count = audit_entries.len(),
-        total_amount,
-        "Batch settlement ready for on-chain submission"
-    );
-
-    // Phase 2: Submit atomic settle_vault + record_audit in chunks
-    // Per design doc §6.3:
-    //   - With audit: up to MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT per tx
-    //   - Each chunk gets its own batch_chunk_hash for atomic pairing verification
-    let chunks = build_batch_chunks(&entries, &audit_entries);
-
-    for (chunk_idx, chunk) in chunks.iter().enumerate() {
-        let batch_chunk_hash = compute_batch_chunk_hash(batch_id, &chunk.settlements, &chunk.audits);
-
-        info!(
-            batch_id,
-            chunk_idx,
-            chunk_size = chunk.settlements.len(),
-            chunk_hash = hex::encode(batch_chunk_hash),
-            "Submitting atomic settle_vault + record_audit chunk"
-        );
-
-        // TODO: Build and submit Solana transaction via RPC:
-        //   1. Build settle_vault instruction with chunk.settlements
-        //   2. Build record_audit instruction with chunk.audits
-        //   3. Add AuditRecord PDA accounts to remaining_accounts
-        //   4. Combine in same VersionedTransaction
-        //   5. Sign with vault_signer and send via RPC
-        //
-        // This requires Solana RPC client integration which depends on
-        // enclave networking setup (vsock relay in production).
-
-        if let Err(e) = state
-            .wal
-            .append(WalEntry::BatchSubmitted {
-                batch_id,
-                provider_count: chunk.settlements.len(),
-                total_amount: chunk.settlements.iter().map(|s| s.amount).sum(),
-            })
-            .await
-        {
-            warn!(chunk_idx, "Failed to append batch chunk WAL entry: {e}");
-        }
-    }
-
-    // Clean up settlement history for processed records
-    for settlement_ids in &settlement_ids_per_provider {
-        for sid in settlement_ids {
-            state.vault.settlement_history.remove(sid);
-        }
-    }
-
-    // Update last batch time
-    *state.vault.last_batch_at.write().await = now;
+    Ok(prepared)
 }
 
 /// A chunk of settlements + audits to be submitted in a single atomic transaction.
+#[derive(Clone)]
 struct BatchChunk {
-    settlements: Vec<BatchSettlementEntry>,
-    audits: Vec<BatchAuditEntry>,
+    start_index: u8,
+    entries: Vec<PreparedSettlement>,
 }
 
-/// Split settlements and audits into chunks of MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT.
-fn build_batch_chunks(
-    settlements: &[BatchSettlementEntry],
-    audits: &[BatchAuditEntry],
-) -> Vec<BatchChunk> {
-    settlements
+impl BatchChunk {
+    fn settlements(&self) -> Vec<BatchSettlementEntry> {
+        self.entries
+            .iter()
+            .map(|entry| entry.settlement.clone())
+            .collect()
+    }
+
+    fn audits(&self) -> Vec<BatchAuditEntry> {
+        self.entries
+            .iter()
+            .map(|entry| entry.audit.clone())
+            .collect()
+    }
+}
+
+fn build_batch_chunks(entries: &[PreparedSettlement]) -> Vec<BatchChunk> {
+    entries
         .chunks(MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT)
-        .zip(audits.chunks(MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT))
-        .map(|(s_chunk, a_chunk)| BatchChunk {
-            settlements: s_chunk.to_vec(),
-            audits: a_chunk.to_vec(),
+        .enumerate()
+        .map(|(chunk_idx, chunk)| BatchChunk {
+            start_index: (chunk_idx * MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT) as u8,
+            entries: chunk.to_vec(),
+        })
+        .collect()
+}
+
+fn submit_atomic_chunk(
+    state: &Arc<AppState>,
+    batch_id: u64,
+    chunk: &BatchChunk,
+    batch_chunk_hash: [u8; 32],
+) -> Result<String, String> {
+    let payer = Rc::new(Keypair::new_from_array(state.vault.vault_signer.to_bytes()));
+    let client = Client::new_with_options(
+        Cluster::Custom(
+            state.vault.solana.rpc_url.clone(),
+            state.vault.solana.ws_url.clone(),
+        ),
+        payer,
+        CommitmentConfig::confirmed(),
+    );
+    let program = client
+        .program(state.vault.solana.program_id)
+        .map_err(|error| format!("failed to create Anchor program client: {error}"))?;
+
+    let settlements: Vec<SettlementEntry> = chunk
+        .entries
+        .iter()
+        .map(|entry| SettlementEntry {
+            provider_token_account: entry.settlement.provider_token_account,
+            amount: entry.settlement.amount,
+        })
+        .collect();
+    let settlement_accounts: Vec<AccountMeta> = chunk
+        .entries
+        .iter()
+        .map(|entry| AccountMeta::new(entry.settlement.provider_token_account, false))
+        .collect();
+
+    let settle_ix = program
+        .request()
+        .accounts(SettleVault {
+            vault_signer: state.vault.vault_signer_pubkey,
+            vault_config: state.vault.vault_config,
+            vault_token_account: state.vault.solana.vault_token_account,
+            instructions_sysvar: sysvar::instructions::ID,
+            token_program: spl_token::ID,
+        })
+        .accounts(settlement_accounts)
+        .args(SettleVaultIx {
+            batch_id,
+            batch_chunk_hash,
+            settlements,
+        })
+        .instructions()
+        .map_err(|error| format!("failed to build settle_vault instruction: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "failed to extract settle_vault instruction".to_string())?;
+
+    let records: Vec<AuditRecordData> = chunk
+        .entries
+        .iter()
+        .map(|entry| AuditRecordData {
+            encrypted_sender: entry.audit.encrypted_sender,
+            encrypted_amount: entry.audit.encrypted_amount,
+            provider: entry.audit.provider,
+            timestamp: entry.audit.timestamp,
+        })
+        .collect();
+    let audit_accounts: Vec<AccountMeta> = chunk
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(offset, _)| {
+            let (audit_pda, _) = Pubkey::find_program_address(
+                &[
+                    b"audit",
+                    state.vault.vault_config.as_ref(),
+                    &batch_id.to_le_bytes(),
+                    &[chunk.start_index + offset as u8],
+                ],
+                &state.vault.solana.program_id,
+            );
+            AccountMeta::new(audit_pda, false)
+        })
+        .collect();
+
+    let record_audit_ix = program
+        .request()
+        .accounts(RecordAudit {
+            vault_signer: state.vault.vault_signer_pubkey,
+            vault_config: state.vault.vault_config,
+            instructions_sysvar: sysvar::instructions::ID,
+            system_program: system_program::ID,
+        })
+        .accounts(audit_accounts)
+        .args(RecordAuditIx {
+            batch_id,
+            batch_chunk_hash,
+            records,
+        })
+        .instructions()
+        .map_err(|error| format!("failed to build record_audit instruction: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "failed to extract record_audit instruction".to_string())?;
+
+    let submit_result = program
+        .request()
+        .instruction(settle_ix)
+        .instruction(record_audit_ix)
+        .send()
+        .map(|signature| signature.to_string())
+        .map_err(|error| format!("failed to submit atomic chunk: {error}"));
+
+    submit_result
+}
+
+async fn apply_submitted_chunk(state: &Arc<AppState>, chunk: &BatchChunk, now: i64) {
+    let submitted_ids: HashSet<String> = chunk
+        .entries
+        .iter()
+        .map(|entry| entry.settlement_id.clone())
+        .collect();
+
+    for entry in &chunk.entries {
+        state.vault.settlement_history.remove(&entry.settlement_id);
+
+        if let Some(mut credit) = state.vault.provider_credits.get_mut(&entry.provider_id) {
+            credit.credited_amount = credit.credited_amount.saturating_sub(entry.settlement.amount);
+            credit.settlement_ids.retain(|sid| sid != &entry.settlement_id);
+        }
+    }
+
+    let provider_ids_to_remove: Vec<String> = state
+        .vault
+        .provider_credits
+        .iter()
+        .filter(|credit| credit.credited_amount == 0 || credit.settlement_ids.is_empty())
+        .map(|credit| credit.provider_id.clone())
+        .collect();
+    for provider_id in provider_ids_to_remove {
+        state.vault.provider_credits.remove(&provider_id);
+    }
+
+    let remaining_oldest_by_provider = recompute_oldest_credit_times(state);
+    for (provider_id, oldest_credit_at) in remaining_oldest_by_provider {
+        if let Some(mut credit) = state.vault.provider_credits.get_mut(&provider_id) {
+            credit.oldest_credit_at = oldest_credit_at;
+        }
+    }
+
+    for mut reservation in state.vault.reservations.iter_mut() {
+        if reservation
+            .settlement_id
+            .as_ref()
+            .map(|settlement_id| submitted_ids.contains(settlement_id))
+            .unwrap_or(false)
+        {
+            reservation.status = ReservationStatus::BatchedOnchain;
+        }
+    }
+
+    *state.vault.last_batch_at.write().await = now;
+}
+
+fn recompute_oldest_credit_times(state: &Arc<AppState>) -> HashMap<String, i64> {
+    state
+        .vault
+        .provider_credits
+        .iter()
+        .filter_map(|credit| {
+            credit
+                .settlement_ids
+                .iter()
+                .filter_map(|settlement_id| {
+                    state
+                        .vault
+                        .settlement_history
+                        .get(settlement_id)
+                        .map(|record| record.timestamp)
+                })
+                .min()
+                .map(|oldest| (credit.provider_id.clone(), oldest))
         })
         .collect()
 }
@@ -335,5 +590,59 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
                 "Cleaned up stale settlement_history entries"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_entry(index: u8) -> PreparedSettlement {
+        PreparedSettlement {
+            settlement_id: format!("set-{index}"),
+            provider_id: format!("provider-{index}"),
+            settlement: BatchSettlementEntry {
+                provider_token_account: Pubkey::new_unique(),
+                amount: (index as u64) + 1,
+            },
+            audit: BatchAuditEntry {
+                encrypted_sender: [index; 64],
+                encrypted_amount: [index.wrapping_add(1); 64],
+                provider: Pubkey::new_unique(),
+                timestamp: index as i64,
+            },
+        }
+    }
+
+    #[test]
+    fn build_batch_chunks_preserves_global_indices() {
+        let entries: Vec<PreparedSettlement> = (0..6).map(sample_entry).collect();
+        let chunks = build_batch_chunks(&entries);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].start_index, 0);
+        assert_eq!(chunks[0].entries.len(), 4);
+        assert_eq!(chunks[1].start_index, 4);
+        assert_eq!(chunks[1].entries.len(), 2);
+        assert_eq!(chunks[1].entries[0].settlement_id, "set-4");
+    }
+
+    #[test]
+    fn compute_batch_chunk_hash_depends_on_order() {
+        let entry_a = sample_entry(1);
+        let entry_b = sample_entry(2);
+
+        let hash_ab = compute_batch_chunk_hash(
+            42,
+            &[entry_a.settlement.clone(), entry_b.settlement.clone()],
+            &[entry_a.audit.clone(), entry_b.audit.clone()],
+        );
+        let hash_ba = compute_batch_chunk_hash(
+            42,
+            &[entry_b.settlement.clone(), entry_a.settlement.clone()],
+            &[entry_b.audit.clone(), entry_a.audit.clone()],
+        );
+
+        assert_ne!(hash_ab, hash_ba);
     }
 }

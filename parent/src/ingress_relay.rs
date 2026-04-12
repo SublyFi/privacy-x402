@@ -17,10 +17,7 @@ const RELAY_BUF_SIZE: usize = 65536;
 /// Run the ingress relay: listen on TCP, forward to enclave vsock.
 pub async fn run(config: &ParentConfig) -> io::Result<()> {
     let listener = TcpListener::bind(&config.ingress_listen_addr).await?;
-    info!(
-        "Ingress relay listening on {}",
-        config.ingress_listen_addr
-    );
+    info!("Ingress relay listening on {}", config.ingress_listen_addr);
 
     let enclave_cid = config.enclave_cid;
     let enclave_port = config.enclave_ingress_port;

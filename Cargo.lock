@@ -16,6 +16,7 @@ dependencies = [
 name = "a402-enclave"
 version = "0.1.0"
 dependencies = [
+ "a402_vault",
  "anchor-client",
  "axum",
  "base64 0.22.1",
@@ -30,7 +31,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "solana-message",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
  "solana-sdk",
+ "solana-transaction-status-client-types",
+ "spl-token",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -59,6 +65,7 @@ version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
+ "sha2 0.10.9",
  "solana-sdk-ids",
 ]
 

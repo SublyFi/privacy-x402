@@ -13,5 +13,5 @@ impl UsedWithdrawNonce {
         + 1   // bump
         + 32  // vault
         + 32  // client
-        + 8;  // withdraw_nonce
+        + 8; // withdraw_nonce
 }

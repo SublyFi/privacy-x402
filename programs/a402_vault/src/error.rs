@@ -65,6 +65,9 @@ pub enum VaultError {
     #[msg("record_audit must be paired with settle_vault")]
     RecordAuditWithoutSettle,
 
+    #[msg("settle_vault must be paired with record_audit")]
+    SettleVaultWithoutAudit,
+
     #[msg("Invalid amount")]
     InvalidAmount,
 

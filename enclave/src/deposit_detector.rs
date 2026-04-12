@@ -13,8 +13,16 @@
 //!   3. Skip already-applied deposits (checked against WAL)
 //!   4. Reject /verify with 503 until catch-up completes
 
+use sha2::{Digest, Sha256};
+use solana_message::{v0::LoadedAddresses, AccountKeys};
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_rpc_client_api::config::RpcTransactionConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,6 +30,13 @@ use tracing::{error, info, warn};
 
 use crate::handlers::AppState;
 use crate::wal::WalEntry;
+use solana_transaction_status_client_types::{
+    option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta,
+    UiTransactionEncoding, UiTransactionStatusMeta,
+};
+
+const POLL_INTERVAL_SECS: u64 = 2;
+const SIGNATURE_PAGE_LIMIT: usize = 1_000;
 
 /// Tracks deposit detection state and sync status.
 pub struct DepositDetector {
@@ -73,6 +88,10 @@ impl DepositDetector {
         self.is_synced.load(Ordering::SeqCst)
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.vault_token_account != Pubkey::default() && self.program_id != Pubkey::default()
+    }
+
     /// Mark a signature as processed (called during WAL replay on startup).
     pub async fn mark_processed(&self, signature: &str) {
         self.processed_signatures
@@ -83,10 +102,7 @@ impl DepositDetector {
 
     /// Check if a signature has already been processed.
     pub async fn is_processed(&self, signature: &str) -> bool {
-        self.processed_signatures
-            .read()
-            .await
-            .contains(signature)
+        self.processed_signatures.read().await.contains(signature)
     }
 }
 
@@ -104,6 +120,12 @@ async fn deposit_monitor_loop(state: Arc<AppState>, detector: Arc<DepositDetecto
         "Starting deposit detection"
     );
 
+    if !detector.is_enabled() {
+        info!("Deposit detection disabled: vault runtime configuration not provided");
+        detector.is_synced.store(true, Ordering::SeqCst);
+        return;
+    }
+
     // Initial catch-up: fetch any deposits since last known signature
     match catch_up_deposits(&state, &detector).await {
         Ok(count) => {
@@ -112,8 +134,7 @@ async fn deposit_monitor_loop(state: Arc<AppState>, detector: Arc<DepositDetecto
         }
         Err(e) => {
             error!("Initial deposit catch-up failed: {e}");
-            // Still mark as synced to avoid blocking indefinitely in dev
-            detector.is_synced.store(true, Ordering::SeqCst);
+            detector.is_synced.store(false, Ordering::SeqCst);
         }
     }
 
@@ -140,7 +161,7 @@ async fn deposit_monitor_loop(state: Arc<AppState>, detector: Arc<DepositDetecto
             }
             Err(e) => {
                 error!("Deposit catch-up failed: {e}");
-                detector.is_synced.store(true, Ordering::SeqCst);
+                detector.is_synced.store(false, Ordering::SeqCst);
             }
         }
     }
@@ -154,28 +175,12 @@ async fn subscribe_and_process(
     state: &Arc<AppState>,
     detector: &Arc<DepositDetector>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Phase 1 local dev: polling-based deposit detection
-    // Production: Use logsSubscribe WebSocket for real-time monitoring
-    //
-    // let subscription = rpc_client.logs_subscribe(
-    //     RpcTransactionLogsFilter::Mentions(vec![detector.program_id.to_string()]),
-    //     RpcTransactionLogsConfig { commitment: Some(CommitmentConfig::finalized()) },
-    // ).await?;
-    //
-    // while let Some(log) = subscription.next().await {
-    //     if let Some(deposit) = parse_deposit_log(&log) {
-    //         apply_deposit(state, detector, deposit).await?;
-    //     }
-    // }
-
     info!("Deposit subscription active (polling mode for local dev)");
 
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(POLL_INTERVAL_SECS));
     loop {
         interval.tick().await;
 
-        // In production: this would be event-driven from logsSubscribe
-        // For local dev: poll getSignaturesForAddress
         match poll_recent_deposits(state, detector).await {
             Ok(count) => {
                 if count > 0 {
@@ -191,29 +196,10 @@ async fn subscribe_and_process(
 
 /// Poll for recent deposits using getSignaturesForAddress.
 async fn poll_recent_deposits(
-    _state: &Arc<AppState>,
-    _detector: &Arc<DepositDetector>,
+    state: &Arc<AppState>,
+    detector: &Arc<DepositDetector>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    // Phase 1 stub: In production, this queries the RPC for recent transactions
-    //
-    // let sigs = rpc_client.get_signatures_for_address_with_config(
-    //     &detector.vault_token_account,
-    //     GetConfirmedSignaturesForAddress2Config {
-    //         until: last_processed_signature,
-    //         commitment: Some(CommitmentConfig::finalized()),
-    //         ..Default::default()
-    //     },
-    // ).await?;
-    //
-    // for sig_info in sigs.iter().rev() {
-    //     if detector.is_processed(&sig_info.signature).await { continue; }
-    //     let tx = rpc_client.get_transaction(&sig_info.signature, ...).await?;
-    //     if let Some(deposit) = parse_deposit_tx(&tx) {
-    //         apply_deposit(state, detector, deposit).await?;
-    //     }
-    // }
-
-    Ok(0)
+    process_new_deposits(state, detector, false).await
 }
 
 /// Catch-up on deposits missed during a WebSocket disconnection.
@@ -224,13 +210,11 @@ async fn poll_recent_deposits(
 ///   3. Skip WAL-recorded deposits
 ///   4. Apply new deposits to client_balances
 async fn catch_up_deposits(
-    _state: &Arc<AppState>,
-    _detector: &Arc<DepositDetector>,
+    state: &Arc<AppState>,
+    detector: &Arc<DepositDetector>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    // Phase 1 stub: catch-up logic follows same pattern as poll_recent_deposits
-    // Production implementation uses getSignaturesForAddress with pagination
     info!("Deposit catch-up: checking for missed deposits");
-    Ok(0)
+    process_new_deposits(state, detector, true).await
 }
 
 /// Apply a confirmed deposit to enclave state.
@@ -278,4 +262,183 @@ pub async fn apply_deposit(
     );
 
     Ok(())
+}
+
+async fn process_new_deposits(
+    state: &Arc<AppState>,
+    detector: &Arc<DepositDetector>,
+    catch_up: bool,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let deposits = fetch_deposit_events(detector, catch_up).await?;
+    let mut applied = 0usize;
+    for deposit in deposits {
+        apply_deposit(state, detector, deposit).await?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+async fn fetch_deposit_events(
+    detector: &Arc<DepositDetector>,
+    catch_up: bool,
+) -> Result<Vec<DepositEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    let rpc = RpcClient::new_with_commitment(
+        detector.rpc_url.clone(),
+        CommitmentConfig::finalized(),
+    );
+    let until_signature = if catch_up {
+        detector
+            .last_processed_signature
+            .read()
+            .await
+            .as_ref()
+            .and_then(|signature| Signature::from_str(signature).ok())
+    } else {
+        None
+    };
+
+    let mut before: Option<Signature> = None;
+    let mut signature_infos = Vec::new();
+
+    loop {
+        let config = GetConfirmedSignaturesForAddress2Config {
+            before,
+            until: until_signature,
+            limit: Some(SIGNATURE_PAGE_LIMIT),
+            commitment: Some(CommitmentConfig::finalized()),
+        };
+        let page = rpc
+            .get_signatures_for_address_with_config(&detector.vault_token_account, config)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+
+        before = page.last().and_then(|item| Signature::from_str(&item.signature).ok());
+        let page_len = page.len();
+        signature_infos.extend(page);
+
+        if page_len < SIGNATURE_PAGE_LIMIT {
+            break;
+        }
+    }
+
+    let mut deposits = Vec::new();
+    for signature_info in signature_infos.into_iter().rev() {
+        if detector.is_processed(&signature_info.signature).await {
+            continue;
+        }
+
+        let signature = Signature::from_str(&signature_info.signature)?;
+        let tx = rpc
+            .get_transaction_with_config(
+                &signature,
+                RpcTransactionConfig {
+                    encoding: Some(UiTransactionEncoding::Base64),
+                    commitment: Some(CommitmentConfig::finalized()),
+                    max_supported_transaction_version: Some(0),
+                },
+            )
+            .await?;
+
+        if let Some(deposit) = parse_deposit_transaction(detector, &tx, &signature_info.signature)? {
+            deposits.push(deposit);
+        }
+    }
+
+    Ok(deposits)
+}
+
+fn parse_deposit_transaction(
+    detector: &DepositDetector,
+    tx: &EncodedConfirmedTransactionWithStatusMeta,
+    signature: &str,
+) -> Result<Option<DepositEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    if tx
+        .transaction
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.err.as_ref())
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let transaction = tx
+        .transaction
+        .transaction
+        .decode()
+        .ok_or_else(|| format!("failed to decode transaction for deposit signature {signature}"))?;
+
+    let loaded_addresses = tx
+        .transaction
+        .meta
+        .as_ref()
+        .and_then(parse_loaded_addresses);
+    let account_keys = AccountKeys::new(transaction.message.static_account_keys(), loaded_addresses.as_ref());
+    let deposit_discriminator = instruction_discriminator("deposit");
+
+    for instruction in transaction.message.instructions() {
+        let Some(program_id) = account_keys.get(instruction.program_id_index as usize) else {
+            continue;
+        };
+        if *program_id != detector.program_id
+            || instruction.data.len() < 16
+            || instruction.data[..8] != deposit_discriminator
+            || instruction.accounts.len() < 4
+        {
+            continue;
+        }
+
+        let Some(client) = account_keys.get(instruction.accounts[0] as usize) else {
+            continue;
+        };
+        let Some(vault_token_account) = account_keys.get(instruction.accounts[3] as usize) else {
+            continue;
+        };
+        if *vault_token_account != detector.vault_token_account {
+            continue;
+        }
+
+        let amount = u64::from_le_bytes(instruction.data[8..16].try_into()?);
+        return Ok(Some(DepositEvent {
+            signature: signature.to_string(),
+            client: *client,
+            amount,
+            slot: tx.slot,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn parse_loaded_addresses(meta: &UiTransactionStatusMeta) -> Option<LoadedAddresses> {
+    let loaded = match meta.loaded_addresses.as_ref() {
+        OptionSerializer::Some(loaded) => loaded,
+        OptionSerializer::None | OptionSerializer::Skip => return None,
+    };
+
+    let writable = loaded
+        .writable
+        .iter()
+        .map(|key| Pubkey::from_str(key))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let readonly = loaded
+        .readonly
+        .iter()
+        .map(|key| Pubkey::from_str(key))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    Some(LoadedAddresses { writable, readonly })
+}
+
+fn instruction_discriminator(name: &str) -> [u8; 8] {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{name}").as_bytes());
+    let hash = hasher.finalize();
+    let mut discriminator = [0u8; 8];
+    discriminator.copy_from_slice(&hash[..8]);
+    discriminator
 }

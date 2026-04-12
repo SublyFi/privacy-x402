@@ -23,5 +23,5 @@ impl AuditRecord {
         + 64  // encrypted_amount
         + 32  // provider
         + 8   // timestamp
-        + 4;  // auditor_epoch
+        + 4; // auditor_epoch
 }

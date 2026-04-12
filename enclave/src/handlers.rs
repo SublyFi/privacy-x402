@@ -11,6 +11,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::batch;
+use crate::deposit_detector::DepositDetector;
 use crate::error::EnclaveError;
 use crate::state::{Reservation, ReservationStatus, VaultState};
 use crate::wal::{Wal, WalEntry};
@@ -18,6 +20,7 @@ use crate::wal::{Wal, WalEntry};
 pub struct AppState {
     pub vault: Arc<VaultState>,
     pub wal: Arc<Wal>,
+    pub deposit_detector: Arc<DepositDetector>,
 }
 
 // ── Attestation ──
@@ -33,9 +36,7 @@ pub struct AttestationResponse {
     pub expires_at: String,
 }
 
-pub async fn get_attestation(
-    State(state): State<Arc<AppState>>,
-) -> Json<AttestationResponse> {
+pub async fn get_attestation(State(state): State<Arc<AppState>>) -> Json<AttestationResponse> {
     let now = Utc::now();
     let expires = now + chrono::Duration::minutes(10);
 
@@ -106,6 +107,10 @@ pub async fn post_verify(
 ) -> Result<Json<VerifyResponse>, EnclaveError> {
     let payload = &req.payment_payload;
 
+    if state.deposit_detector.is_enabled() && !state.deposit_detector.is_ready() {
+        return Err(EnclaveError::DepositSyncInProgress);
+    }
+
     // 1. Validate scheme
     if payload.scheme != "a402-svm-v1" {
         return Err(EnclaveError::InvalidScheme);
@@ -131,15 +136,16 @@ pub async fn post_verify(
     }
 
     // 5. Verify client signature
-    let client_pubkey = Pubkey::from_str(&payload.client)
-        .map_err(|_| EnclaveError::InvalidClientSignature)?;
+    let client_pubkey =
+        Pubkey::from_str(&payload.client).map_err(|_| EnclaveError::InvalidClientSignature)?;
 
     verify_client_signature(payload)?;
 
     // 6. Verify request hash
-    let computed_request_hash = compute_request_hash(&req.request_context, &payload.payment_details_hash);
-    let provided_request_hash = hex::decode(&payload.request_hash)
-        .map_err(|_| EnclaveError::RequestHashMismatch)?;
+    let computed_request_hash =
+        compute_request_hash(&req.request_context, &payload.payment_details_hash);
+    let provided_request_hash =
+        hex::decode(&payload.request_hash).map_err(|_| EnclaveError::RequestHashMismatch)?;
     if computed_request_hash != provided_request_hash.as_slice() {
         return Err(EnclaveError::RequestHashMismatch);
     }
@@ -155,8 +161,8 @@ pub async fn post_verify(
             // Same payment_id + same request_hash → idempotent retry
             let req_hash: [u8; 32] = computed_request_hash.try_into().unwrap();
             if existing.request_hash == req_hash {
-                let res_expires = chrono::DateTime::from_timestamp(existing.expires_at, 0)
-                    .unwrap_or_default();
+                let res_expires =
+                    chrono::DateTime::from_timestamp(existing.expires_at, 0).unwrap_or_default();
                 return Ok(Json(VerifyResponse {
                     ok: true,
                     verification_id: existing.verification_id.clone(),
@@ -225,7 +231,8 @@ pub async fn post_verify(
         .payment_id_index
         .insert(payload.payment_id.clone(), verification_id.clone());
 
-    let res_expires = chrono::DateTime::from_timestamp(reservation_expires_at, 0).unwrap_or_default();
+    let res_expires =
+        chrono::DateTime::from_timestamp(reservation_expires_at, 0).unwrap_or_default();
 
     info!(verification_id = %verification_id, amount, "Payment verified and reserved");
 
@@ -288,9 +295,10 @@ pub async fn post_settle(
 
     // Must be Reserved
     if reservation.status != ReservationStatus::Reserved {
-        return Err(EnclaveError::InvalidReservationStatus(
-            format!("{:?}", reservation.status),
-        ));
+        return Err(EnclaveError::InvalidReservationStatus(format!(
+            "{:?}",
+            reservation.status
+        )));
     }
 
     let now = Utc::now().timestamp();
@@ -416,9 +424,10 @@ pub async fn post_cancel(
     }
 
     if reservation.status != ReservationStatus::Reserved {
-        return Err(EnclaveError::InvalidReservationStatus(
-            format!("{:?}", reservation.status),
-        ));
+        return Err(EnclaveError::InvalidReservationStatus(format!(
+            "{:?}",
+            reservation.status
+        )));
     }
 
     // Release balance
@@ -472,8 +481,7 @@ pub async fn post_withdraw_auth(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WithdrawAuthRequest>,
 ) -> Result<Json<WithdrawAuthResponse>, EnclaveError> {
-    let client = Pubkey::from_str(&req.client)
-        .map_err(|_| EnclaveError::ClientNotFound)?;
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
     let recipient_ata = Pubkey::from_str(&req.recipient_ata)
         .map_err(|_| EnclaveError::Internal("Invalid recipient ATA".into()))?;
 
@@ -533,8 +541,7 @@ pub async fn post_balance(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BalanceRequest>,
 ) -> Result<Json<BalanceResponse>, EnclaveError> {
-    let client = Pubkey::from_str(&req.client)
-        .map_err(|_| EnclaveError::ClientNotFound)?;
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
 
     let balance = state
         .vault
@@ -583,8 +590,7 @@ pub async fn post_receipt(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReceiptRequest>,
 ) -> Result<Json<ReceiptResponse>, EnclaveError> {
-    let client = Pubkey::from_str(&req.client)
-        .map_err(|_| EnclaveError::ClientNotFound)?;
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
     let recipient_ata = Pubkey::from_str(&req.recipient_ata)
         .map_err(|_| EnclaveError::Internal("Invalid recipient ATA".into()))?;
 
@@ -677,8 +683,7 @@ pub async fn post_register_provider(
     let asset_mint = Pubkey::from_str(&req.asset_mint)
         .map_err(|_| EnclaveError::Internal("Invalid asset mint".into()))?;
 
-    let api_key_hash = hex::decode(&req.api_key_hash)
-        .unwrap_or_default();
+    let api_key_hash = hex::decode(&req.api_key_hash).unwrap_or_default();
 
     let registration = crate::state::ProviderRegistration {
         provider_id: req.provider_id.clone(),
@@ -703,6 +708,91 @@ pub async fn post_register_provider(
         ok: true,
         provider_id: req.provider_id,
         registered_at: now,
+    }))
+}
+
+// ── Admin (local dev / tests) ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedBalanceRequest {
+    pub client: String,
+    pub free: u64,
+    pub locked: Option<u64>,
+    pub max_lock_expires_at: Option<i64>,
+    pub total_deposited: Option<u64>,
+    pub total_withdrawn: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedBalanceResponse {
+    pub ok: bool,
+    pub client: String,
+    pub free: u64,
+    pub locked: u64,
+}
+
+pub async fn post_seed_balance(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SeedBalanceRequest>,
+) -> Result<Json<SeedBalanceResponse>, EnclaveError> {
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
+    let locked = req.locked.unwrap_or(0);
+
+    state.vault.client_balances.insert(
+        client,
+        crate::state::ClientBalance {
+            free: req.free,
+            locked,
+            max_lock_expires_at: req.max_lock_expires_at.unwrap_or(0),
+            total_deposited: req.total_deposited.unwrap_or(req.free.saturating_add(locked)),
+            total_withdrawn: req.total_withdrawn.unwrap_or(0),
+        },
+    );
+
+    info!(client = %req.client, free = req.free, locked, "Seeded client balance for local dev");
+
+    Ok(Json(SeedBalanceResponse {
+        ok: true,
+        client: req.client,
+        free: req.free,
+        locked,
+    }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FireBatchRequest {}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FireBatchResponse {
+    pub ok: bool,
+    pub submitted: bool,
+    pub batch_id: Option<u64>,
+    pub provider_count: usize,
+    pub settlement_count: usize,
+    pub total_amount: u64,
+    pub tx_signatures: Vec<String>,
+}
+
+pub async fn post_fire_batch(
+    State(state): State<Arc<AppState>>,
+    Json(_req): Json<FireBatchRequest>,
+) -> Result<Json<FireBatchResponse>, EnclaveError> {
+    let result = batch::fire_batch_now(&state)
+        .await
+        .map_err(|error| EnclaveError::Internal(format!("fire_batch failed: {error}")))?;
+
+    Ok(Json(FireBatchResponse {
+        ok: true,
+        submitted: result.submitted,
+        batch_id: result.batch_id,
+        provider_count: result.provider_count,
+        settlement_count: result.settlement_count,
+        total_amount: result.total_amount,
+        tx_signatures: result.tx_signatures,
     }))
 }
 
@@ -750,7 +840,8 @@ fn verify_client_signature(payload: &PaymentPayload) -> Result<(), EnclaveError>
     let verifying_key = VerifyingKey::from_bytes(&client_pubkey_bytes)
         .map_err(|_| EnclaveError::InvalidClientSignature)?;
 
-    let sig_bytes = BASE64.decode(&payload.client_sig)
+    let sig_bytes = BASE64
+        .decode(&payload.client_sig)
         .map_err(|_| EnclaveError::InvalidClientSignature)?;
 
     let signature = Signature::from_bytes(

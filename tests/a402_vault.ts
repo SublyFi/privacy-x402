@@ -19,7 +19,14 @@ import {
 } from "@solana/web3.js";
 import { expect } from "chai";
 import BN from "bn.js";
+import { createHash, hkdfSync } from "crypto";
+import { RistrettoPoint } from "@noble/curves/ed25519";
 import nacl from "tweetnacl";
+import { AuditTool } from "../sdk/src/audit";
+
+const SCALAR_ORDER = BigInt(
+  "7237005577332262213973186563042994240857116359379907606001950938285454250989"
+);
 
 describe("a402_vault", () => {
   const provider = anchor.AnchorProvider.env();
@@ -37,8 +44,16 @@ describe("a402_vault", () => {
 
   const auditorMasterPubkey = new Array(32).fill(0);
   const attestationPolicyHash = new Array(32).fill(1);
+  const oldAuditorMasterSecret = new Uint8Array(32).fill(7);
+  const newAuditorMasterSecret = new Uint8Array(32).fill(9);
 
   before(async () => {
+    const vaultSignerAirdrop = await provider.connection.requestAirdrop(
+      vaultSignerKeypair.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(vaultSignerAirdrop);
+
     // Create USDC mint
     usdcMint = await createMint(
       provider.connection,
@@ -63,6 +78,213 @@ describe("a402_vault", () => {
       program.programId
     );
   });
+
+  function findAuditPda(batchId: BN, index: number): PublicKey {
+    return PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("audit"),
+        vaultConfigPda.toBuffer(),
+        batchId.toArrayLike(Buffer, "le", 8),
+        Buffer.from([index]),
+      ],
+      program.programId
+    )[0];
+  }
+
+  function buildAuditRecord(providerTokenAccount: PublicKey, seed: number, timestamp?: number) {
+    return {
+      encryptedSender: new Array(64).fill(seed & 0xff),
+      encryptedAmount: new Array(64).fill((seed + 1) & 0xff),
+      provider: providerTokenAccount,
+      timestamp: new BN(timestamp ?? Math.floor(Date.now() / 1000)),
+    };
+  }
+
+  function bytesToScalar(bytes: Uint8Array): bigint {
+    let n = BigInt(0);
+    const len = Math.min(bytes.length, 64);
+    for (let i = len - 1; i >= 0; i--) {
+      n = (n << BigInt(8)) | BigInt(bytes[i]);
+    }
+    return n % SCALAR_ORDER;
+  }
+
+  function kdfMask(sharedSecretBytes: Uint8Array): Uint8Array {
+    const hash = createHash("sha256");
+    hash.update("a402-elgamal-mask-v1");
+    hash.update(sharedSecretBytes);
+    return new Uint8Array(hash.digest());
+  }
+
+  function deriveProviderKeyMaterial(
+    masterSecret: Uint8Array,
+    provider: PublicKey
+  ): Uint8Array {
+    return new Uint8Array(
+      hkdfSync(
+        "sha256",
+        masterSecret,
+        Buffer.from("a402-audit-v1"),
+        provider.toBuffer(),
+        64
+      )
+    );
+  }
+
+  function encryptWithProvider(
+    masterSecret: Uint8Array,
+    provider: PublicKey,
+    plaintext: Uint8Array,
+    r: bigint
+  ): number[] {
+    const providerSecret = bytesToScalar(
+      deriveProviderKeyMaterial(masterSecret, provider)
+    );
+    const providerPublic = RistrettoPoint.BASE.multiply(providerSecret);
+    const c1 = RistrettoPoint.BASE.multiply(r);
+    const shared = providerPublic.multiply(r);
+    const mask = kdfMask(shared.toRawBytes());
+
+    const ciphertext = new Uint8Array(64);
+    ciphertext.set(c1.toRawBytes(), 0);
+    for (let i = 0; i < 32; i++) {
+      ciphertext[32 + i] = plaintext[i] ^ mask[i];
+    }
+    return Array.from(ciphertext);
+  }
+
+  function encodeAmount(amount: bigint): Uint8Array {
+    const out = new Uint8Array(32);
+    const view = Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+    view.writeBigUInt64LE(amount, 0);
+    return out;
+  }
+
+  function buildEncryptedAuditRecord(
+    masterSecret: Uint8Array,
+    providerTokenAccount: PublicKey,
+    sender: PublicKey,
+    amount: bigint,
+    timestamp?: number
+  ) {
+    return {
+      encryptedSender: encryptWithProvider(
+        masterSecret,
+        providerTokenAccount,
+        sender.toBytes(),
+        BigInt(11)
+      ),
+      encryptedAmount: encryptWithProvider(
+        masterSecret,
+        providerTokenAccount,
+        encodeAmount(amount),
+        BigInt(17)
+      ),
+      provider: providerTokenAccount,
+      timestamp: new BN(timestamp ?? Math.floor(Date.now() / 1000)),
+    };
+  }
+
+  async function fetchAuditRecord(address: PublicKey) {
+    const accountInfo = await provider.connection.getAccountInfo(address);
+    expect(accountInfo).to.not.equal(null);
+
+    const data = Buffer.from(accountInfo!.data);
+    let offset = 8; // discriminator
+
+    const bump = data.readUInt8(offset);
+    offset += 1;
+    const vault = new PublicKey(data.subarray(offset, offset + 32));
+    offset += 32;
+    const batchId = Number(data.readBigUInt64LE(offset));
+    offset += 8;
+    const index = data.readUInt8(offset);
+    offset += 1;
+    const encryptedSender = data.subarray(offset, offset + 64);
+    offset += 64;
+    const encryptedAmount = data.subarray(offset, offset + 64);
+    offset += 64;
+    const providerTokenAccount = new PublicKey(data.subarray(offset, offset + 32));
+    offset += 32;
+    const timestamp = Number(data.readBigInt64LE(offset));
+    offset += 8;
+    const auditorEpoch = data.readUInt32LE(offset);
+
+    return {
+      address,
+      bump,
+      vault,
+      batchId,
+      index,
+      encryptedSender,
+      encryptedAmount,
+      provider: providerTokenAccount,
+      timestamp,
+      auditorEpoch,
+    };
+  }
+
+  async function sendAtomicSettleAndAudit(
+    batchId: BN,
+    batchChunkHash: number[],
+    settlements: Array<{ providerTokenAccount: PublicKey; amount: BN }>,
+    auditRecords: Array<ReturnType<typeof buildAuditRecord>>,
+    auditStartIndex = 0
+  ) {
+    const settleIx = await program.methods
+      .settleVault(batchId, batchChunkHash, settlements)
+      .accounts({
+        vaultSigner: vaultSignerKeypair.publicKey,
+        vaultConfig: vaultConfigPda,
+        vaultTokenAccount: vaultTokenAccountPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .remainingAccounts(
+        settlements.map((settlement) => ({
+          pubkey: settlement.providerTokenAccount,
+          isWritable: true,
+          isSigner: false,
+        }))
+      )
+      .instruction();
+
+    const auditIx = await program.methods
+      .recordAudit(batchId, batchChunkHash, auditRecords)
+      .accounts({
+        vaultSigner: vaultSignerKeypair.publicKey,
+        vaultConfig: vaultConfigPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        auditRecords.map((_, idx) => ({
+          pubkey: findAuditPda(batchId, auditStartIndex + idx),
+          isWritable: true,
+          isSigner: false,
+        }))
+      )
+      .instruction();
+
+    const latestBlockhash = await provider.connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+      payerKey: governance.publicKey,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: [settleIx, auditIx],
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(messageV0);
+    tx.sign([(governance as any).payer, vaultSignerKeypair]);
+
+    const txSig = await provider.connection.sendTransaction(tx);
+    await provider.connection.confirmTransaction({
+      signature: txSig,
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    });
+
+    return txSig;
+  }
 
   describe("initialize_vault", () => {
     it("initializes vault correctly", async () => {
@@ -598,32 +820,21 @@ describe("a402_vault", () => {
         .rpc();
     });
 
-    it("settles vault with vault signer", async () => {
+    it("settles vault atomically with audit records", async () => {
       const batchId = new BN(1);
-      const batchChunkHash = new Array(32).fill(0);
+      const batchChunkHash = new Array(32).fill(11);
 
-      await program.methods
-        .settleVault(batchId, batchChunkHash, [
+      await sendAtomicSettleAndAudit(
+        batchId,
+        batchChunkHash,
+        [
           {
-            providerTokenAccount: providerTokenAccount,
+            providerTokenAccount,
             amount: new BN(settleAmount),
           },
-        ])
-        .accounts({
-          vaultSigner: vaultSignerKeypair.publicKey,
-          vaultConfig: vaultConfigPda,
-          vaultTokenAccount: vaultTokenAccountPda,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .remainingAccounts([
-          {
-            pubkey: providerTokenAccount,
-            isWritable: true,
-            isSigner: false,
-          },
-        ])
-        .signers([vaultSignerKeypair])
-        .rpc();
+        ],
+        [buildAuditRecord(providerTokenAccount, 17)]
+      );
 
       const providerToken = await getAccount(
         provider.connection,
@@ -656,37 +867,24 @@ describe("a402_vault", () => {
       const vaultBefore = await program.account.vaultConfig.fetch(vaultConfigPda);
       const settledBefore = vaultBefore.lifetimeSettled.toNumber();
 
-      await program.methods
-        .settleVault(new BN(10), new Array(32).fill(0), [
+      await sendAtomicSettleAndAudit(
+        new BN(10),
+        new Array(32).fill(22),
+        [
           {
-            providerTokenAccount: providerTokenAccount,
+            providerTokenAccount,
             amount: new BN(amount1),
           },
           {
             providerTokenAccount: provider2TokenAccount,
             amount: new BN(amount2),
           },
-        ])
-        .accounts({
-          vaultSigner: vaultSignerKeypair.publicKey,
-          vaultConfig: vaultConfigPda,
-          vaultTokenAccount: vaultTokenAccountPda,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .remainingAccounts([
-          {
-            pubkey: providerTokenAccount,
-            isWritable: true,
-            isSigner: false,
-          },
-          {
-            pubkey: provider2TokenAccount,
-            isWritable: true,
-            isSigner: false,
-          },
-        ])
-        .signers([vaultSignerKeypair])
-        .rpc();
+        ],
+        [
+          buildAuditRecord(providerTokenAccount, 33),
+          buildAuditRecord(provider2TokenAccount, 44),
+        ]
+      );
 
       const p2Token = await getAccount(provider.connection, provider2TokenAccount);
       expect(Number(p2Token.amount)).to.equal(amount2);
@@ -717,6 +915,7 @@ describe("a402_vault", () => {
             vaultSigner: fakeSigner.publicKey,
             vaultConfig: vaultConfigPda,
             vaultTokenAccount: vaultTokenAccountPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts([
@@ -731,6 +930,37 @@ describe("a402_vault", () => {
         expect.fail("Should have thrown");
       } catch (err: any) {
         expect(err.error.errorCode.code).to.equal("InvalidVaultSigner");
+      }
+    });
+
+    it("rejects standalone settle_vault without record_audit pairing", async () => {
+      try {
+        await program.methods
+          .settleVault(new BN(3), new Array(32).fill(0), [
+            {
+              providerTokenAccount,
+              amount: new BN(5_000),
+            },
+          ])
+          .accounts({
+            vaultSigner: vaultSignerKeypair.publicKey,
+            vaultConfig: vaultConfigPda,
+            vaultTokenAccount: vaultTokenAccountPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts([
+            {
+              pubkey: providerTokenAccount,
+              isWritable: true,
+              isSigner: false,
+            },
+          ])
+          .signers([vaultSignerKeypair])
+          .rpc();
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        expect(err.error.errorCode.code).to.equal("SettleVaultWithoutAudit");
       }
     });
   });
@@ -890,6 +1120,46 @@ describe("a402_vault", () => {
 
   describe("rotate_auditor", () => {
     it("rotates auditor key", async () => {
+      const rotatingProvider = Keypair.generate();
+      const providerAirdrop = await provider.connection.requestAirdrop(
+        rotatingProvider.publicKey,
+        2 * anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(providerAirdrop);
+
+      const rotatingProviderTokenAccount = await createAccount(
+        provider.connection,
+        rotatingProvider,
+        usdcMint,
+        rotatingProvider.publicKey
+      );
+
+      const oldSender = Keypair.generate().publicKey;
+      const oldBatchId = new BN(40);
+      const oldAuditPda = findAuditPda(oldBatchId, 0);
+      await sendAtomicSettleAndAudit(
+        oldBatchId,
+        new Array(32).fill(3),
+        [
+          {
+            providerTokenAccount: rotatingProviderTokenAccount,
+            amount: new BN(12_345),
+          },
+        ],
+        [
+          buildEncryptedAuditRecord(
+            oldAuditorMasterSecret,
+            rotatingProviderTokenAccount,
+            oldSender,
+            BigInt(12_345),
+            1_700_000_001
+          ),
+        ]
+      );
+
+      const oldAuditAccount = await fetchAuditRecord(oldAuditPda);
+      expect(oldAuditAccount.auditorEpoch).to.equal(0);
+
       const newAuditorPubkey = new Array(32).fill(42);
 
       await program.methods
@@ -903,6 +1173,82 @@ describe("a402_vault", () => {
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
       expect(vault.auditorEpoch).to.equal(1);
       expect(vault.auditorMasterPubkey).to.deep.equal(newAuditorPubkey);
+
+      const newSender = Keypair.generate().publicKey;
+      const newBatchId = new BN(41);
+      const newAuditPda = findAuditPda(newBatchId, 0);
+      await sendAtomicSettleAndAudit(
+        newBatchId,
+        new Array(32).fill(4),
+        [
+          {
+            providerTokenAccount: rotatingProviderTokenAccount,
+            amount: new BN(54_321),
+          },
+        ],
+        [
+          buildEncryptedAuditRecord(
+            newAuditorMasterSecret,
+            rotatingProviderTokenAccount,
+            newSender,
+            BigInt(54_321),
+            1_700_000_002
+          ),
+        ]
+      );
+
+      const newAuditAccount = await fetchAuditRecord(newAuditPda);
+      expect(newAuditAccount.auditorEpoch).to.equal(1);
+
+      const oldTool = new AuditTool(oldAuditorMasterSecret);
+      const newTool = new AuditTool(newAuditorMasterSecret);
+
+      const oldDecrypts = await oldTool.decryptForProvider(
+        vaultConfigPda,
+        rotatingProviderTokenAccount,
+        provider.connection,
+        program.programId
+      );
+      const newDecrypts = await newTool.decryptForProvider(
+        vaultConfigPda,
+        rotatingProviderTokenAccount,
+        provider.connection,
+        program.programId
+      );
+
+      const oldEpochRecord = oldDecrypts.find(
+        (record) => record.batchId === oldBatchId.toNumber()
+      );
+      const oldToolNewEpochRecord = oldDecrypts.find(
+        (record) => record.batchId === newBatchId.toNumber()
+      );
+      const newEpochRecord = newDecrypts.find(
+        (record) => record.batchId === newBatchId.toNumber()
+      );
+      const newToolOldEpochRecord = newDecrypts.find(
+        (record) => record.batchId === oldBatchId.toNumber()
+      );
+
+      expect(oldEpochRecord).to.not.equal(undefined);
+      expect(oldEpochRecord!.sender.toBase58()).to.equal(oldSender.toBase58());
+      expect(oldEpochRecord!.amount).to.equal(12_345);
+      expect(oldEpochRecord!.auditorEpoch).to.equal(0);
+
+      expect(newEpochRecord).to.not.equal(undefined);
+      expect(newEpochRecord!.sender.toBase58()).to.equal(newSender.toBase58());
+      expect(newEpochRecord!.amount).to.equal(54_321);
+      expect(newEpochRecord!.auditorEpoch).to.equal(1);
+
+      if (oldToolNewEpochRecord) {
+        expect(oldToolNewEpochRecord.sender.toBase58()).to.not.equal(
+          newSender.toBase58()
+        );
+      }
+      if (newToolOldEpochRecord) {
+        expect(newToolOldEpochRecord.sender.toBase58()).to.not.equal(
+          oldSender.toBase58()
+        );
+      }
     });
   });
 
@@ -938,22 +1284,9 @@ describe("a402_vault", () => {
       const batchChunkHash = new Array(32).fill(42);
 
       // Fake encrypted audit record data
-      const fakeAuditRecord = {
-        encryptedSender: new Array(64).fill(1),
-        encryptedAmount: new Array(64).fill(2),
-        provider: Keypair.generate().publicKey,
-        timestamp: new BN(Math.floor(Date.now() / 1000)),
-      };
-
-      const [auditPda] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("audit"),
-          vaultConfigPda.toBuffer(),
-          batchId.toArrayLike(Buffer, "le", 8),
-          Buffer.from([0]),
-        ],
-        program.programId
-      );
+      const fakeProvider = Keypair.generate().publicKey;
+      const fakeAuditRecord = buildAuditRecord(fakeProvider, 1);
+      const auditPda = findAuditPda(batchId, 0);
 
       try {
         await program.methods
@@ -1000,95 +1333,86 @@ describe("a402_vault", () => {
       const batchChunkHash = new Array(32).fill(0);
       const settleAmount = 10_000;
       const now = Math.floor(Date.now() / 1000);
+      const auditRecord = buildAuditRecord(auditProviderTokenAccount, 0xab, now);
+      const auditPda = findAuditPda(batchId, 0);
 
-      // Fake encrypted data (in production, enclave generates real ElGamal ciphertexts)
-      const auditRecord = {
-        encryptedSender: new Array(64).fill(0xAB),
-        encryptedAmount: new Array(64).fill(0xCD),
-        provider: auditProviderKeypair.publicKey,
-        timestamp: new BN(now),
-      };
-
-      const [auditPda] = PublicKey.findProgramAddressSync(
+      await sendAtomicSettleAndAudit(
+        batchId,
+        batchChunkHash,
         [
-          Buffer.from("audit"),
-          vaultConfigPda.toBuffer(),
-          batchId.toArrayLike(Buffer, "le", 8),
-          Buffer.from([0]),
-        ],
-        program.programId
-      );
-
-      // Build settle_vault instruction
-      const settleIx = await program.methods
-        .settleVault(batchId, batchChunkHash, [
           {
             providerTokenAccount: auditProviderTokenAccount,
             amount: new BN(settleAmount),
           },
-        ])
-        .accounts({
-          vaultSigner: vaultSignerKeypair.publicKey,
-          vaultConfig: vaultConfigPda,
-          vaultTokenAccount: vaultTokenAccountPda,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .remainingAccounts([
-          {
-            pubkey: auditProviderTokenAccount,
-            isWritable: true,
-            isSigner: false,
-          },
-        ])
-        .instruction();
-
-      // Build record_audit instruction
-      const auditIx = await program.methods
-        .recordAudit(batchId, batchChunkHash, [auditRecord])
-        .accounts({
-          vaultSigner: vaultSignerKeypair.publicKey,
-          vaultConfig: vaultConfigPda,
-          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-          systemProgram: SystemProgram.programId,
-        })
-        .remainingAccounts([
-          {
-            pubkey: auditPda,
-            isWritable: true,
-            isSigner: false,
-          },
-        ])
-        .instruction();
-
-      // Combine in one transaction (atomic)
-      const latestBlockhash = await provider.connection.getLatestBlockhash();
-      const messageV0 = new TransactionMessage({
-        payerKey: vaultSignerKeypair.publicKey,
-        recentBlockhash: latestBlockhash.blockhash,
-        instructions: [settleIx, auditIx],
-      }).compileToV0Message();
-
-      const tx = new VersionedTransaction(messageV0);
-      tx.sign([vaultSignerKeypair]);
-
-      const txSig = await provider.connection.sendTransaction(tx);
-      await provider.connection.confirmTransaction({
-        signature: txSig,
-        blockhash: latestBlockhash.blockhash,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-      });
+        ],
+        [auditRecord]
+      );
 
       // Verify the AuditRecord PDA was created
-      const auditAccount = await program.account.auditRecord.fetch(auditPda);
+      const auditAccount = await fetchAuditRecord(auditPda);
       expect(auditAccount.vault.toBase58()).to.equal(vaultConfigPda.toBase58());
-      expect(auditAccount.batchId.toNumber()).to.equal(50);
+      expect(auditAccount.batchId).to.equal(50);
       expect(auditAccount.index).to.equal(0);
       expect(auditAccount.provider.toBase58()).to.equal(
-        auditProviderKeypair.publicKey.toBase58()
+        auditProviderTokenAccount.toBase58()
       );
       expect(auditAccount.auditorEpoch).to.equal(1); // rotated earlier in test
       expect(auditAccount.encryptedSender.length).to.equal(64);
       expect(auditAccount.encryptedAmount.length).to.equal(64);
+    });
+
+    it("supports multiple atomic chunks for the same batch_id", async () => {
+      const multiChunkProvider = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(
+        multiChunkProvider.publicKey,
+        2 * anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig);
+
+      const multiChunkProviderTokenAccount = await createAccount(
+        provider.connection,
+        multiChunkProvider,
+        usdcMint,
+        multiChunkProvider.publicKey
+      );
+
+      const batchId = new BN(77);
+
+      await sendAtomicSettleAndAudit(
+        batchId,
+        new Array(32).fill(7),
+        [
+          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(1_000) },
+          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(2_000) },
+        ],
+        [
+          buildAuditRecord(multiChunkProviderTokenAccount, 51),
+          buildAuditRecord(multiChunkProviderTokenAccount, 52),
+        ],
+        0
+      );
+
+      await sendAtomicSettleAndAudit(
+        batchId,
+        new Array(32).fill(8),
+        [
+          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(3_000) },
+          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(4_000) },
+        ],
+        [
+          buildAuditRecord(multiChunkProviderTokenAccount, 53),
+          buildAuditRecord(multiChunkProviderTokenAccount, 54),
+        ],
+        2
+      );
+
+      const auditTwo = await fetchAuditRecord(findAuditPda(batchId, 2));
+      const auditThree = await fetchAuditRecord(findAuditPda(batchId, 3));
+
+      expect(auditTwo.index).to.equal(2);
+      expect(auditThree.index).to.equal(3);
+      expect(auditTwo.provider.toBase58()).to.equal(multiChunkProviderTokenAccount.toBase58());
+      expect(auditThree.provider.toBase58()).to.equal(multiChunkProviderTokenAccount.toBase58());
     });
   });
 
@@ -1369,7 +1693,7 @@ describe("a402_vault", () => {
             new BN(maxLockExpiresAt),
             new BN(receiptNonce),
             Array.from(receiptSignature) as any,
-            Array.from(receiptMessage)
+            receiptMessage
           )
           .accounts({
             participant: fsClient.publicKey,
@@ -1497,7 +1821,7 @@ describe("a402_vault", () => {
             new BN(0),
             new BN(1),
             Array.from(receiptSignature) as any,
-            Array.from(receiptMessage)
+            receiptMessage
           )
           .accounts({
             participant: fsClient.publicKey,
@@ -1589,7 +1913,7 @@ describe("a402_vault", () => {
             new BN(newerMaxLockExpiresAt),
             new BN(newerReceiptNonce),
             Array.from(newerSignature) as any,
-            Array.from(newerReceiptMessage)
+            newerReceiptMessage
           )
           .accounts({
             challenger: challenger.publicKey,
@@ -1679,7 +2003,7 @@ describe("a402_vault", () => {
             new BN(0),
             new BN(staleNonce),
             Array.from(staleSignature) as any,
-            Array.from(staleReceiptMessage)
+            staleReceiptMessage
           )
           .accounts({
             challenger: challenger.publicKey,

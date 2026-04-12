@@ -24,6 +24,7 @@ custom-panic = []
 anchor-lang = "0.32.1"
 anchor-spl = { version = "0.32.1", features = ["token"] }
 solana-sdk-ids = "2.2.1"
+sha2 = "0.10"
 
 
 [lints.rust]

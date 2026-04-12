@@ -78,11 +78,16 @@ pub fn handler(
 
     // Check expiration
     let clock = Clock::get()?;
-    require!(clock.unix_timestamp <= expires_at, VaultError::WithdrawExpired);
+    require!(
+        clock.unix_timestamp <= expires_at,
+        VaultError::WithdrawExpired
+    );
 
     // Verify Ed25519 signature via precompile instruction
-    let signed_message =
-        verify_ed25519_signature(&ctx.accounts.instructions_sysvar, &vault.vault_signer_pubkey)?;
+    let signed_message = verify_ed25519_signature(
+        &ctx.accounts.instructions_sysvar,
+        &vault.vault_signer_pubkey,
+    )?;
 
     // Verify message content matches WithdrawAuthorization:
     // client (32) + recipient_ata (32) + amount (8) + withdraw_nonce (8) + expires_at (8) + vault_config (32) = 120 bytes

@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-a402_vault = "GjxYKTUpPFhBectiPfKJkUKJnP7MaZU3kEG5kAFyMj3E"
+a402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
 
 [registry]
 url = "https://api.apr.dev"

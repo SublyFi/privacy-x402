@@ -151,7 +151,8 @@ export class AuditTool {
    * The exported key can decrypt only that provider's audit records.
    */
   async exportProviderKey(providerAddress: PublicKey): Promise<Uint8Array> {
-    return this.deriveProviderSecret(providerAddress);
+    const keyMaterial = await this.deriveProviderSecret(providerAddress);
+    return scalarToBytes(bytesToScalar(keyMaterial));
   }
 
   /**
@@ -375,6 +376,16 @@ function bytesToScalar(bytes: Uint8Array): bigint {
   }
 
   return n % l;
+}
+
+function scalarToBytes(scalar: bigint): Uint8Array {
+  const out = new Uint8Array(32);
+  let value = scalar;
+  for (let i = 0; i < 32; i++) {
+    out[i] = Number(value & BigInt(0xff));
+    value >>= BigInt(8);
+  }
+  return out;
 }
 
 /**

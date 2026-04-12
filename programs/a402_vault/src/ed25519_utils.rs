@@ -9,9 +9,8 @@ pub fn verify_ed25519_signature(
     instructions_sysvar: &AccountInfo,
     expected_pubkey: &Pubkey,
 ) -> Result<Vec<u8>> {
-    let current_index =
-        sysvar_instructions::load_current_index_checked(instructions_sysvar)
-            .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
+    let current_index = sysvar_instructions::load_current_index_checked(instructions_sysvar)
+        .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
 
     require!(current_index > 0, VaultError::InvalidEd25519Instruction);
 

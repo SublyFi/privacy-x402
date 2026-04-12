@@ -37,6 +37,9 @@ pub enum EnclaveError {
     #[error("Vault not active")]
     VaultNotActive,
 
+    #[error("Deposit synchronization in progress")]
+    DepositSyncInProgress,
+
     #[error("Request hash mismatch")]
     RequestHashMismatch,
 
@@ -53,19 +56,30 @@ pub enum EnclaveError {
 impl IntoResponse for EnclaveError {
     fn into_response(self) -> Response {
         let (status, error_code) = match &self {
-            EnclaveError::InsufficientBalance => (StatusCode::PAYMENT_REQUIRED, "insufficient_balance"),
+            EnclaveError::InsufficientBalance => {
+                (StatusCode::PAYMENT_REQUIRED, "insufficient_balance")
+            }
             EnclaveError::ClientNotFound => (StatusCode::BAD_REQUEST, "client_not_found"),
             EnclaveError::ProviderNotFound => (StatusCode::BAD_REQUEST, "provider_not_found"),
             EnclaveError::ProviderAuthFailed => (StatusCode::UNAUTHORIZED, "provider_auth_failed"),
             EnclaveError::InvalidScheme => (StatusCode::BAD_REQUEST, "invalid_scheme"),
-            EnclaveError::InvalidClientSignature => (StatusCode::BAD_REQUEST, "invalid_client_signature"),
+            EnclaveError::InvalidClientSignature => {
+                (StatusCode::BAD_REQUEST, "invalid_client_signature")
+            }
             EnclaveError::PaymentExpired => (StatusCode::BAD_REQUEST, "payment_expired"),
             EnclaveError::PaymentIdReused => (StatusCode::CONFLICT, "payment_id_reused"),
             EnclaveError::ReservationNotFound => (StatusCode::NOT_FOUND, "reservation_not_found"),
-            EnclaveError::InvalidReservationStatus(ref _s) => (StatusCode::CONFLICT, "invalid_reservation_status"),
+            EnclaveError::InvalidReservationStatus(ref _s) => {
+                (StatusCode::CONFLICT, "invalid_reservation_status")
+            }
             EnclaveError::VaultNotActive => (StatusCode::SERVICE_UNAVAILABLE, "vault_not_active"),
+            EnclaveError::DepositSyncInProgress => {
+                (StatusCode::SERVICE_UNAVAILABLE, "deposit_sync_in_progress")
+            }
             EnclaveError::RequestHashMismatch => (StatusCode::BAD_REQUEST, "request_hash_mismatch"),
-            EnclaveError::PaymentDetailsHashMismatch => (StatusCode::BAD_REQUEST, "payment_details_hash_mismatch"),
+            EnclaveError::PaymentDetailsHashMismatch => {
+                (StatusCode::BAD_REQUEST, "payment_details_hash_mismatch")
+            }
             EnclaveError::ProviderIdMismatch => (StatusCode::FORBIDDEN, "provider_id_mismatch"),
             EnclaveError::Internal(ref _s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };

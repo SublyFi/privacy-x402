@@ -86,9 +86,7 @@ impl Wal {
 
     /// Durably append a WAL entry. Returns only after write is flushed.
     pub async fn append(&self, entry: WalEntry) -> Result<u64, std::io::Error> {
-        let seqno = self
-            .seqno
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seqno = self.seqno.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let now = chrono::Utc::now().timestamp();
 
         let record = WalRecord {
@@ -97,9 +95,8 @@ impl Wal {
             entry,
         };
 
-        let mut line = serde_json::to_string(&record).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-        })?;
+        let mut line = serde_json::to_string(&record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         line.push('\n');
 
         let mut file = OpenOptions::new()

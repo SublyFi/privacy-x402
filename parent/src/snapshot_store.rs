@@ -93,10 +93,7 @@ async fn handle_snapshot_request(
     }
 }
 
-async fn handle_put(
-    stream: &mut tokio::net::TcpStream,
-    base_dir: &Path,
-) -> io::Result<()> {
+async fn handle_put(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
     let key = read_key(stream).await?;
     let data = read_blob(stream).await?;
 
@@ -114,10 +111,7 @@ async fn handle_put(
     send_ok(stream, &[]).await
 }
 
-async fn handle_get(
-    stream: &mut tokio::net::TcpStream,
-    base_dir: &Path,
-) -> io::Result<()> {
+async fn handle_get(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
     let key = read_key(stream).await?;
     let file_path = key_to_path(base_dir, &key);
 
@@ -126,33 +120,27 @@ async fn handle_get(
             info!("Snapshot GET: {} ({} bytes)", key, data.len());
             send_ok(stream, &data).await
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            send_not_found(stream).await
-        }
-        Err(e) => {
-            send_error(stream, &format!("read error: {e}")).await
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => send_not_found(stream).await,
+        Err(e) => send_error(stream, &format!("read error: {e}")).await,
     }
 }
 
-async fn handle_list(
-    stream: &mut tokio::net::TcpStream,
-    base_dir: &Path,
-) -> io::Result<()> {
+async fn handle_list(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
     let prefix = read_key(stream).await?;
 
     let mut entries = Vec::new();
     collect_entries(base_dir, base_dir, &prefix, &mut entries).await?;
 
     let result = serde_json::to_vec(&entries).unwrap_or_default();
-    info!("Snapshot LIST: prefix='{}' → {} entries", prefix, entries.len());
+    info!(
+        "Snapshot LIST: prefix='{}' → {} entries",
+        prefix,
+        entries.len()
+    );
     send_ok(stream, &result).await
 }
 
-async fn handle_delete(
-    stream: &mut tokio::net::TcpStream,
-    base_dir: &Path,
-) -> io::Result<()> {
+async fn handle_delete(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
     let key = read_key(stream).await?;
     let file_path = key_to_path(base_dir, &key);
 
@@ -161,12 +149,8 @@ async fn handle_delete(
             info!("Snapshot DELETE: {}", key);
             send_ok(stream, &[]).await
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            send_not_found(stream).await
-        }
-        Err(e) => {
-            send_error(stream, &format!("delete error: {e}")).await
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => send_not_found(stream).await,
+        Err(e) => send_error(stream, &format!("delete error: {e}")).await,
     }
 }
 
@@ -214,10 +198,7 @@ fn key_to_path(base_dir: &Path, key: &str) -> PathBuf {
 async fn read_key(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
     let len = stream.read_u32_le().await? as usize;
     if len > MAX_KEY_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "key too large",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "key too large"));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
@@ -227,10 +208,7 @@ async fn read_key(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
 async fn read_blob(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> {
     let len = stream.read_u32_le().await? as usize;
     if len > MAX_BLOB_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "blob too large",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "blob too large"));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;

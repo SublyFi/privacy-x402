@@ -80,14 +80,10 @@ async fn handle_kms_request(
     stream.read_exact(&mut buf).await?;
 
     // Parse the request to validate it's an allowed KMS action
-    let request: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {e}"))
-    })?;
+    let request: serde_json::Value = serde_json::from_slice(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {e}")))?;
 
-    let action = request
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let action = request.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
     if !ALLOWED_KMS_ACTIONS.iter().any(|a| *a == action) {
         warn!("KMS proxy: blocked disallowed action '{action}'");
@@ -125,10 +121,7 @@ async fn handle_kms_request(
 }
 
 /// Write a length-prefixed response back to the enclave.
-async fn write_response(
-    stream: &mut tokio::net::TcpStream,
-    data: &[u8],
-) -> io::Result<()> {
+async fn write_response(stream: &mut tokio::net::TcpStream, data: &[u8]) -> io::Result<()> {
     stream.write_u32_le(data.len() as u32).await?;
     stream.write_all(data).await?;
     stream.flush().await?;

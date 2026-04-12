@@ -31,5 +31,5 @@ impl ForceSettleRequest {
         + 64  // receipt_signature
         + 8   // initiated_at
         + 8   // dispute_deadline
-        + 1;  // is_resolved
+        + 1; // is_resolved
 }

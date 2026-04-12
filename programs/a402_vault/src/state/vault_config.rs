@@ -35,5 +35,5 @@ impl VaultConfig {
         + 8   // exit_deadline
         + 8   // lifetime_deposited
         + 8   // lifetime_withdrawn
-        + 8;  // lifetime_settled
+        + 8; // lifetime_settled
 }

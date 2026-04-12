@@ -81,6 +81,15 @@ pub struct ProviderCredit {
     pub settlement_ids: Vec<String>,
 }
 
+/// Solana RPC + account configuration required for on-chain operations.
+#[derive(Debug, Clone)]
+pub struct SolanaRuntimeConfig {
+    pub program_id: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub rpc_url: String,
+    pub ws_url: String,
+}
+
 /// Core enclave vault state
 pub struct VaultState {
     pub vault_config: Pubkey,
@@ -88,6 +97,7 @@ pub struct VaultState {
     pub vault_signer_pubkey: Pubkey,
     pub usdc_mint: Pubkey,
     pub attestation_policy_hash: [u8; 32],
+    pub solana: SolanaRuntimeConfig,
     /// Auditor master secret for ElGamal encryption (Phase 2)
     pub auditor_master_secret: RwLock<[u8; 32]>,
     /// Current auditor epoch (u32 to match on-chain AuditRecord.auditor_epoch)
@@ -122,6 +132,7 @@ impl VaultState {
         signing_key: SigningKey,
         usdc_mint: Pubkey,
         attestation_policy_hash: [u8; 32],
+        solana: SolanaRuntimeConfig,
     ) -> Self {
         let verifying_key = signing_key.verifying_key();
         let vault_signer_pubkey = Pubkey::new_from_array(verifying_key.to_bytes());
@@ -132,6 +143,7 @@ impl VaultState {
             vault_signer_pubkey,
             usdc_mint,
             attestation_policy_hash,
+            solana,
             auditor_master_secret: RwLock::new([0u8; 32]),
             auditor_epoch: AtomicU32::new(0),
             client_balances: DashMap::new(),
@@ -164,11 +176,7 @@ impl VaultState {
     }
 
     /// Reserve funds for a payment
-    pub fn reserve_balance(
-        &self,
-        client: &Pubkey,
-        amount: u64,
-    ) -> Result<(), EnclaveError> {
+    pub fn reserve_balance(&self, client: &Pubkey, amount: u64) -> Result<(), EnclaveError> {
         let mut balance = self
             .client_balances
             .get_mut(client)
@@ -182,11 +190,7 @@ impl VaultState {
     }
 
     /// Release reserved funds (on cancel/expiry)
-    pub fn release_balance(
-        &self,
-        client: &Pubkey,
-        amount: u64,
-    ) -> Result<(), EnclaveError> {
+    pub fn release_balance(&self, client: &Pubkey, amount: u64) -> Result<(), EnclaveError> {
         let mut balance = self
             .client_balances
             .get_mut(client)
