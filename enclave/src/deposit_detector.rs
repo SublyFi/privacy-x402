@@ -282,10 +282,8 @@ async fn fetch_deposit_events(
     detector: &Arc<DepositDetector>,
     catch_up: bool,
 ) -> Result<Vec<DepositEvent>, Box<dyn std::error::Error + Send + Sync>> {
-    let rpc = RpcClient::new_with_commitment(
-        detector.rpc_url.clone(),
-        CommitmentConfig::finalized(),
-    );
+    let rpc =
+        RpcClient::new_with_commitment(detector.rpc_url.clone(), CommitmentConfig::finalized());
     let until_signature = if catch_up {
         detector
             .last_processed_signature
@@ -314,7 +312,9 @@ async fn fetch_deposit_events(
             break;
         }
 
-        before = page.last().and_then(|item| Signature::from_str(&item.signature).ok());
+        before = page
+            .last()
+            .and_then(|item| Signature::from_str(&item.signature).ok());
         let page_len = page.len();
         signature_infos.extend(page);
 
@@ -341,7 +341,8 @@ async fn fetch_deposit_events(
             )
             .await?;
 
-        if let Some(deposit) = parse_deposit_transaction(detector, &tx, &signature_info.signature)? {
+        if let Some(deposit) = parse_deposit_transaction(detector, &tx, &signature_info.signature)?
+        {
             deposits.push(deposit);
         }
     }
@@ -364,18 +365,20 @@ fn parse_deposit_transaction(
         return Ok(None);
     }
 
-    let transaction = tx
-        .transaction
-        .transaction
-        .decode()
-        .ok_or_else(|| format!("failed to decode transaction for deposit signature {signature}"))?;
+    let transaction =
+        tx.transaction.transaction.decode().ok_or_else(|| {
+            format!("failed to decode transaction for deposit signature {signature}")
+        })?;
 
     let loaded_addresses = tx
         .transaction
         .meta
         .as_ref()
         .and_then(parse_loaded_addresses);
-    let account_keys = AccountKeys::new(transaction.message.static_account_keys(), loaded_addresses.as_ref());
+    let account_keys = AccountKeys::new(
+        transaction.message.static_account_keys(),
+        loaded_addresses.as_ref(),
+    );
     let deposit_discriminator = instruction_discriminator("deposit");
 
     for instruction in transaction.message.instructions() {

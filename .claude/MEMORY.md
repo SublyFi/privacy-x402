@@ -152,3 +152,88 @@ Anchor program implemented and all tests passing.
 - Provider TEE integration
 - ASC state management (A402 Algorithm 1)
 - Batch submission to on-chain settle_vault (enclave → Solana RPC)
+
+## Phase 1/2 Hardening + Verification (2026-04-12) ✅
+
+### Why this pass was needed
+- The previous "Phase 2 complete" state was not verified end-to-end.
+- `a402_vault` did not compile because of `record_audit` lifetime/import issues.
+- `settle_vault` still allowed standalone execution, so audit coverage was not enforced.
+- Multi-chunk audit batches reused `(batch_id, index)` from zero and would collide on AuditRecord PDAs.
+- The enclave batch planner could clear pending state even though no on-chain batch transaction had been submitted.
+
+### On-chain fixes
+- `settle_vault` now requires a paired `record_audit` instruction in the same transaction via `sysvar::instructions`.
+- `record_audit` still rejects standalone execution and now also validates provider ordering against the paired `settle_vault`.
+- Added `SettleVaultWithoutAudit` error for the missing reverse-pairing case.
+- `record_audit` now derives the audit PDA index from the provided PDA, so the same `batch_id` can span multiple atomic chunks without index collisions.
+
+### Enclave fixes
+- Batch preparation now builds 1 settlement entry ↔ 1 audit record, matching the design doc.
+- Pending provider credits are no longer cleared before successful submission.
+- Added unit coverage for chunk index offsets and deterministic chunk hashing.
+- Automatic RPC submission is still a separate runtime integration task; the code now keeps settlements queued instead of dropping them.
+
+### SDK fixes
+- `AuditTool.exportProviderKey()` now returns the same 32-byte reduced scalar form as the Rust enclave export path.
+- Added SDK tests that verify exported-key shape and successful decryption with the exported provider key.
+
+### Verified commands
+- `cargo test -p a402_vault`
+- `cargo test -p a402-enclave`
+- `anchor test`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/audit_tool.ts`
+
+## Surfpool E2E + Program ID Sync (2026-04-12) ✅
+
+### Why this pass was needed
+- The previous verification stopped at Anchor/local runtime tests and did not prove the enclave could submit `settle_vault + record_audit` over a real local RPC.
+- The workspace also had a program ID split: `Anchor.toml` / `declare_id!` used `Gjx...`, while `target/deploy/a402_vault-keypair.json` and `target/idl/a402_vault.json` used `DeE...`.
+- `anchor deploy` against surfpool stalled because TPU-based deploy flow did not cooperate with surfpool; RPC-based program deploy worked.
+
+### Runtime fixes
+- `enclave` now accepts runtime Solana config via env:
+  - `A402_PROGRAM_ID`
+  - `A402_VAULT_CONFIG`
+  - `A402_VAULT_TOKEN_ACCOUNT`
+  - `A402_USDC_MINT`
+  - `A402_SOLANA_RPC_URL`
+  - `A402_SOLANA_WS_URL`
+  - `A402_VAULT_SIGNER_SECRET_KEY_B64`
+  - `A402_WAL_PATH`
+- Added `SolanaRuntimeConfig` to `VaultState`.
+- `batch.rs` now performs real atomic submission by building `settle_vault` + `record_audit` instructions from the Anchor-generated `a402_vault` types and sending them via `anchor-client`.
+- Successful chunks now update provider credits, settlement history, reservation status, `last_batch_at`, and WAL only after confirmed submission.
+- Added `POST /v1/admin/fire-batch` for local dev / E2E triggering.
+- Moved the actual Anchor client submission onto `spawn_blocking` because the blocking client cannot run directly inside the enclave's tokio runtime.
+
+### Program ID sync
+- Synced `Anchor.toml` and `programs/a402_vault/src/lib.rs` to the real deploy keypair / IDL address:
+  - `DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR`
+
+### New verification
+- Added `tests/enclave_surfpool_e2e.ts`.
+- Verified flow on surfpool:
+  1. start surfpool
+  2. deploy `a402_vault` with `solana program deploy --use-rpc`
+  3. start enclave with deterministic signer + runtime env
+  4. initialize vault on-chain
+  5. deposit USDC on-chain
+  6. `/verify`
+  7. `/settle`
+  8. `/v1/admin/fire-batch`
+  9. confirm provider token account received funds on-chain
+  10. decrypt the on-chain `AuditRecord` via `AuditTool`
+
+### Verified commands
+- `NO_DNA=1 surfpool start --legacy-anchor-compatibility --ci`
+- `solana program deploy --url http://127.0.0.1:8899 --use-rpc --program-id target/deploy/a402_vault-keypair.json --fee-payer ~/.config/solana/id.json --upgrade-authority ~/.config/solana/id.json target/deploy/a402_vault.so`
+- `yarn ts-mocha -p ./tsconfig.json -t 180000 tests/enclave_surfpool_e2e.ts`
+- `cargo test -p a402-enclave`
+- `cargo test -p a402_vault`
+- `anchor test`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/audit_tool.ts`
+
+### Remaining gap after this pass
+- Deposit detection is still local-dev stub / polling skeleton; the surfpool E2E seeds enclave balances via `/v1/admin/seed-balance` after the on-chain deposit because automatic deposit ingestion is not implemented yet.

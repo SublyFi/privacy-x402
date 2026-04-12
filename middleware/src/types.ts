@@ -26,6 +26,35 @@ export interface A402ProviderConfig {
   attestationPolicyHash: string;
 }
 
+/** Inputs required to produce an ASC delivery artifact */
+export interface AscDeliveryInput {
+  channelId: string;
+  requestId: string;
+  amount: string | number;
+  requestHash: string;
+  result: Uint8Array | Buffer | string;
+  providerSecretKey?: Uint8Array | string;
+  adaptorSecret?: Uint8Array | string;
+}
+
+/** Provider-generated ASC delivery payload */
+export interface AscDeliveryArtifact {
+  adaptorPoint: string;
+  preSigRPrime: string;
+  preSigSPrime: string;
+  encryptedResult: string;
+  resultHash: string;
+  providerPubkey: string;
+  adaptorSecret: string;
+}
+
+/** Facilitator /v1/channel/deliver response */
+export interface AscDeliverResponse {
+  ok: boolean;
+  channelId: string;
+  status: string;
+}
+
 /** Pricing function: given a request, return the price in atomic units (or null if free) */
 export type PricingFn = (req: Request) => string | null;
 

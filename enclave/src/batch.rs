@@ -203,8 +203,12 @@ async fn fire_batch_at(state: &Arc<AppState>, now: i64) -> Result<BatchSubmitRes
             )
         })
         .await
-        .map_err(|error| format!("chunk {chunk_idx} task join failed for batch {batch_id}: {error}"))?
-        .map_err(|error| format!("chunk {chunk_idx} submission failed for batch {batch_id}: {error}"))?;
+        .map_err(|error| {
+            format!("chunk {chunk_idx} task join failed for batch {batch_id}: {error}")
+        })?
+        .map_err(|error| {
+            format!("chunk {chunk_idx} submission failed for batch {batch_id}: {error}")
+        })?;
 
         apply_submitted_chunk(state, &chunk, now).await;
         state
@@ -450,8 +454,12 @@ async fn apply_submitted_chunk(state: &Arc<AppState>, chunk: &BatchChunk, now: i
         state.vault.settlement_history.remove(&entry.settlement_id);
 
         if let Some(mut credit) = state.vault.provider_credits.get_mut(&entry.provider_id) {
-            credit.credited_amount = credit.credited_amount.saturating_sub(entry.settlement.amount);
-            credit.settlement_ids.retain(|sid| sid != &entry.settlement_id);
+            credit.credited_amount = credit
+                .credited_amount
+                .saturating_sub(entry.settlement.amount);
+            credit
+                .settlement_ids
+                .retain(|sid| sid != &entry.settlement_id);
         }
     }
 
@@ -590,6 +598,9 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
                 "Cleaned up stale settlement_history entries"
             );
         }
+
+        // Expire stale ASC channel requests (Phase 3)
+        crate::asc_manager::expire_stale_requests(&state.vault);
     }
 }
 

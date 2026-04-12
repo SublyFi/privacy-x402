@@ -2,11 +2,77 @@ use dashmap::DashMap;
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::adaptor_sig::AdaptorPreSignature;
 use crate::error::EnclaveError;
+
+// ── ASC Types (Phase 3) ──
+
+/// Unique channel identifier
+pub type ChannelId = String;
+
+/// ASC channel status (A402 Algorithm 1)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelStatus {
+    /// Channel open, accepting requests
+    Open,
+    /// Request in progress, funds locked, awaiting adaptor signature
+    Locked,
+    /// Adaptor pre-signature verified, conditional payment issued
+    Pending,
+    /// Channel settled and closed
+    Closed,
+}
+
+/// ASC channel balance triple
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBalance {
+    pub client_free: u64,
+    pub client_locked: u64,
+    pub provider_earned: u64,
+}
+
+/// Active Service Channel state (enclave-only, per design doc §5.4)
+#[derive(Debug, Clone)]
+pub struct ChannelState {
+    pub channel_id: ChannelId,
+    pub client: Pubkey,
+    pub provider_id: String,
+    pub balance: ChannelBalance,
+    pub status: ChannelStatus,
+    /// Monotonic state counter
+    pub nonce: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Request IDs already consumed by this channel (replay protection)
+    pub used_request_ids: HashSet<String>,
+    /// Current request being processed (if status == Locked or Pending)
+    pub active_request: Option<ChannelRequest>,
+}
+
+/// A single request within an ASC
+#[derive(Debug, Clone)]
+pub struct ChannelRequest {
+    pub request_id: String,
+    pub amount: u64,
+    pub request_hash: [u8; 32],
+    /// Provider TEE signing key used for this request
+    pub provider_pubkey: Option<[u8; 32]>,
+    /// Adaptor point T = t·G from provider TEE
+    pub adaptor_point: Option<[u8; 32]>,
+    /// Provider's adaptor pre-signature σ̂_S
+    pub provider_pre_sig: Option<AdaptorPreSignature>,
+    /// Encrypted result from provider TEE
+    pub encrypted_result: Option<Vec<u8>>,
+    /// Result hash h = H(res)
+    pub result_hash: Option<[u8; 32]>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
 
 /// Payment reservation state
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +175,8 @@ pub struct VaultState {
     pub providers: DashMap<String, ProviderRegistration>,
     /// Settlement history for audit record generation
     pub settlement_history: DashMap<String, SettlementRecord>,
+    /// Active Service Channels (Phase 3 ASC)
+    pub active_channels: DashMap<ChannelId, ChannelState>,
     pub receipt_nonce: AtomicU64,
     pub withdraw_nonce: AtomicU64,
     pub snapshot_seqno: AtomicU64,
@@ -152,6 +220,7 @@ impl VaultState {
             provider_credits: DashMap::new(),
             providers: DashMap::new(),
             settlement_history: DashMap::new(),
+            active_channels: DashMap::new(),
             receipt_nonce: AtomicU64::new(1),
             withdraw_nonce: AtomicU64::new(1),
             snapshot_seqno: AtomicU64::new(0),

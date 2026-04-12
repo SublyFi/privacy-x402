@@ -27,6 +27,10 @@ import {
   A402ClientConfig,
   AttestationResponse,
   BalanceResponse,
+  ChannelFinalizeResponse,
+  ChannelRequestResponse,
+  CloseChannelResponse,
+  OpenChannelResponse,
   ParticipantReceiptResponse,
   PaymentDetails,
   PaymentPayload,
@@ -36,6 +40,14 @@ import {
   VerifyResponse,
   WithdrawAuthResponse,
 } from "./types";
+
+type ErrorResponse = {
+  message?: string;
+};
+
+async function readJson<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
 
 /**
  * A402 Client SDK — deposit, withdraw, and x402-compatible fetch.
@@ -65,7 +77,7 @@ export class A402Client {
     if (!res.ok) {
       throw new Error(`Attestation fetch failed: ${res.status}`);
     }
-    const attestation: AttestationResponse = await res.json();
+    const attestation = await readJson<AttestationResponse>(res);
 
     // Phase 1 local dev: basic validation only
     // Production: verify AWS Nitro attestation document, PCR values, etc.
@@ -101,7 +113,7 @@ export class A402Client {
 
     const txSig = await program.methods
       .deposit(new BN(amount))
-      .accounts({
+      .accountsPartial({
         client: this.wallet.publicKey,
         vaultConfig: this.vaultAddress,
         clientTokenAccount: clientAta,
@@ -145,11 +157,11 @@ export class A402Client {
     );
 
     if (!authRes.ok) {
-      const err = await authRes.json();
+      const err = await readJson<ErrorResponse>(authRes);
       throw new Error(`Withdraw auth failed: ${err.message}`);
     }
 
-    const auth: WithdrawAuthResponse = await authRes.json();
+    const auth = await readJson<WithdrawAuthResponse>(authRes);
 
     const [usedNoncePda] = PublicKey.findProgramAddressSync(
       [
@@ -165,7 +177,8 @@ export class A402Client {
     const messageBytes = Buffer.from(auth.message, "base64");
 
     // Build Ed25519 precompile instruction
-    const attestation = this.cachedAttestation || (await this.verifyAttestation());
+    const attestation =
+      this.cachedAttestation || (await this.verifyAttestation());
     const vaultSignerPubkey = new PublicKey(attestation.vaultSigner);
 
     const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
@@ -181,7 +194,7 @@ export class A402Client {
         new BN(auth.expiresAt),
         Array.from(signatureBytes) as any
       )
-      .accounts({
+      .accountsPartial({
         client: this.wallet.publicKey,
         vaultConfig: this.vaultAddress,
         vaultTokenAccount: PublicKey.findProgramAddressSync(
@@ -231,11 +244,11 @@ export class A402Client {
     });
 
     if (!res.ok) {
-      const err = await res.json();
+      const err = await readJson<ErrorResponse>(res);
       throw new Error(`Balance query failed: ${err.message || res.status}`);
     }
 
-    return res.json();
+    return readJson<BalanceResponse>(res);
   }
 
   // ── Receipt ──
@@ -260,11 +273,11 @@ export class A402Client {
     });
 
     if (!res.ok) {
-      const err = await res.json();
+      const err = await readJson<ErrorResponse>(res);
       throw new Error(`Receipt request failed: ${err.message || res.status}`);
     }
 
-    return res.json();
+    return readJson<ParticipantReceiptResponse>(res);
   }
 
   // ── Force Settle ──
@@ -315,7 +328,7 @@ export class A402Client {
         Array.from(signatureBytes) as any,
         Array.from(messageBytes)
       )
-      .accounts({
+      .accountsPartial({
         participant: this.wallet.publicKey,
         vaultConfig: this.vaultAddress,
         forceSettleRequest: forceSettlePda,
@@ -351,10 +364,7 @@ export class A402Client {
    * Fetch a URL with automatic x402 payment handling.
    * If the server returns 402, constructs and sends payment signature.
    */
-  async fetch(
-    url: string,
-    options?: RequestInit
-  ): Promise<Response> {
+  async fetch(url: string, options?: RequestInit): Promise<Response> {
     // First request (no payment)
     const initialRes = await globalThis.fetch(url, options);
 
@@ -363,10 +373,8 @@ export class A402Client {
     }
 
     // Parse 402 response
-    const body: PaymentRequiredResponse = await initialRes.json();
-    const details = body.accepts?.find(
-      (a) => a.scheme === "a402-svm-v1"
-    );
+    const body = await readJson<PaymentRequiredResponse>(initialRes);
+    const details = body.accepts?.find((a) => a.scheme === "a402-svm-v1");
 
     if (!details) {
       throw new Error("No a402-svm-v1 payment option in 402 response");
@@ -397,6 +405,137 @@ export class A402Client {
     return retryRes;
   }
 
+  // ── Phase 3: Atomic Service Channel ──
+
+  /**
+   * Open an Atomic Service Channel with a provider.
+   * @param providerId Provider identifier
+   * @param initialDeposit Amount to lock in the channel (atomic units)
+   */
+  async openChannel(
+    providerId: string,
+    initialDeposit: number
+  ): Promise<OpenChannelResponse> {
+    const message =
+      `A402-CHANNEL-OPEN\n` +
+      `${this.wallet.publicKey.toBase58()}\n` +
+      `${providerId}\n` +
+      `${initialDeposit}\n`;
+    const clientSig = this.signTextMessage(message);
+
+    const res = await globalThis.fetch(`${this.enclaveUrl}/v1/channel/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client: this.wallet.publicKey.toBase58(),
+        providerId,
+        initialDeposit,
+        clientSig,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = (await res.json()) as { message?: string };
+      throw new Error(`Channel open failed: ${err.message || res.status}`);
+    }
+
+    return (await res.json()) as OpenChannelResponse;
+  }
+
+  /**
+   * Submit a request within an open channel (locks funds for this request).
+   */
+  async channelRequest(
+    channelId: string,
+    requestId: string,
+    amount: number,
+    requestHash: string
+  ): Promise<ChannelRequestResponse> {
+    const message =
+      `A402-CHANNEL-REQUEST\n` +
+      `${channelId}\n` +
+      `${requestId}\n` +
+      `${amount}\n` +
+      `${requestHash}\n`;
+    const clientSig = this.signTextMessage(message);
+
+    const res = await globalThis.fetch(
+      `${this.enclaveUrl}/v1/channel/request`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId,
+          requestId,
+          amount,
+          requestHash,
+          clientSig,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = (await res.json()) as { message?: string };
+      throw new Error(`Channel request failed: ${err.message || res.status}`);
+    }
+
+    return (await res.json()) as ChannelRequestResponse;
+  }
+
+  /**
+   * Finalize an off-chain exchange by providing the adaptor secret.
+   * Returns the decrypted result.
+   */
+  async channelFinalize(
+    channelId: string,
+    adaptorSecret: string
+  ): Promise<ChannelFinalizeResponse> {
+    const message =
+      `A402-CHANNEL-FINALIZE\n` + `${channelId}\n` + `${adaptorSecret}\n`;
+    const clientSig = this.signTextMessage(message);
+
+    const res = await globalThis.fetch(
+      `${this.enclaveUrl}/v1/channel/finalize`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId,
+          adaptorSecret,
+          clientSig,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = (await res.json()) as { message?: string };
+      throw new Error(`Channel finalize failed: ${err.message || res.status}`);
+    }
+
+    return (await res.json()) as ChannelFinalizeResponse;
+  }
+
+  /**
+   * Close an ASC and settle accumulated provider earnings.
+   */
+  async closeChannel(channelId: string): Promise<CloseChannelResponse> {
+    const message = `A402-CHANNEL-CLOSE\n${channelId}\n`;
+    const clientSig = this.signTextMessage(message);
+
+    const res = await globalThis.fetch(`${this.enclaveUrl}/v1/channel/close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelId, clientSig }),
+    });
+
+    if (!res.ok) {
+      const err = (await res.json()) as { message?: string };
+      throw new Error(`Channel close failed: ${err.message || res.status}`);
+    }
+
+    return (await res.json()) as CloseChannelResponse;
+  }
+
   // ── Internal helpers ──
 
   private async buildPaymentPayload(
@@ -422,9 +561,7 @@ export class A402Client {
 
     const paymentId = `pay_${crypto.randomUUID()}`;
     const nonce = Date.now().toString();
-    const expiresAt = new Date(
-      Date.now() + 30 * 60 * 1000
-    ).toISOString();
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
 
     const sigMessage = buildSignatureMessage({
       version: 1,
@@ -463,5 +600,11 @@ export class A402Client {
       nonce,
       clientSig,
     };
+  }
+
+  private signTextMessage(message: string): string {
+    const messageBytes = new TextEncoder().encode(message);
+    const signature = ed25519Sign(messageBytes, this.wallet.secretKey);
+    return Buffer.from(signature).toString("base64");
   }
 }

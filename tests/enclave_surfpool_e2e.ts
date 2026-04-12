@@ -7,10 +7,7 @@ import {
   mintTo,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import {
-  ChildProcessWithoutNullStreams,
-  spawn,
-} from "child_process";
+import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { randomBytes, randomUUID, createHash } from "crypto";
 import { once } from "events";
 import { homedir } from "os";
@@ -49,6 +46,33 @@ type PaymentPayload = {
   expiresAt: string;
   nonce: string;
   clientSig: string;
+};
+
+type AttestationResponse = {
+  vaultConfig: string;
+  vaultSigner: string;
+};
+
+type BalanceResponse = {
+  free: number;
+  totalDeposited: number;
+};
+
+type VerifyResponse = {
+  ok: boolean;
+  verificationId: string;
+};
+
+type SettleResponse = {
+  ok: boolean;
+};
+
+type FireBatchResponse = {
+  ok: boolean;
+  submitted: boolean;
+  batchId: number;
+  settlementCount: number;
+  txSignatures: string[];
 };
 
 function sha256Hex(input: string): string {
@@ -110,12 +134,16 @@ async function postJson(path: string, body: unknown) {
   });
 }
 
+async function readJson<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
+
 async function waitForAttestation(maxAttempts = 120) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const response = await fetch(`${ENCLAVE_URL}/v1/attestation`);
       if (response.ok) {
-        return response.json();
+        return readJson<AttestationResponse>(response);
       }
     } catch (_error) {
       // Server not ready yet.
@@ -131,11 +159,13 @@ async function waitForClientBalance(
   client: PublicKey,
   expectedFree: number,
   maxAttempts = 90
-) {
+): Promise<BalanceResponse> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const response = await postJson("/v1/balance", { client: client.toBase58() });
+    const response = await postJson("/v1/balance", {
+      client: client.toBase58(),
+    });
     if (response.ok) {
-      const body = await response.json();
+      const body = await readJson<BalanceResponse>(response);
       if (body.free === expectedFree) {
         return body;
       }
@@ -198,7 +228,9 @@ describe("enclave_surfpool_e2e", function () {
     try {
       await provider.connection.getVersion();
 
-      const programInfo = await provider.connection.getAccountInfo(program.programId);
+      const programInfo = await provider.connection.getAccountInfo(
+        program.programId
+      );
       if (!programInfo) {
         throw new Error(
           `Program ${program.programId.toBase58()} is not deployed. Run 'NO_DNA=1 anchor deploy --provider.cluster localnet' first.`
@@ -263,7 +295,9 @@ describe("enclave_surfpool_e2e", function () {
 
       const attestation = await waitForAttestation();
       expect(attestation.vaultConfig).to.equal(vaultConfigPda.toBase58());
-      expect(attestation.vaultSigner).to.equal(enclaveSigner.publicKey.toBase58());
+      expect(attestation.vaultSigner).to.equal(
+        enclaveSigner.publicKey.toBase58()
+      );
 
       const signerAirdrop = await provider.connection.requestAirdrop(
         enclaveSigner.publicKey,
@@ -278,7 +312,7 @@ describe("enclave_surfpool_e2e", function () {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: vaultConfigPda,
           usdcMint,
@@ -313,7 +347,7 @@ describe("enclave_surfpool_e2e", function () {
 
       await program.methods
         .deposit(new BN(depositAmount))
-        .accounts({
+        .accountsPartial({
           client: client.publicKey,
           vaultConfig: vaultConfigPda,
           clientTokenAccount,
@@ -328,7 +362,10 @@ describe("enclave_surfpool_e2e", function () {
         providerOwner.publicKey,
         anchor.web3.LAMPORTS_PER_SOL
       );
-      await provider.connection.confirmTransaction(providerOwnerAirdrop, "confirmed");
+      await provider.connection.confirmTransaction(
+        providerOwnerAirdrop,
+        "confirmed"
+      );
 
       const providerTokenAccount = await createAccount(
         provider.connection,
@@ -363,7 +400,10 @@ describe("enclave_surfpool_e2e", function () {
         bodySha256: sha256Hex(JSON.stringify({ ok: true })),
       };
       const paymentDetailsHash = sha256Hex("surfpool-e2e-payment");
-      const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
+      const requestHash = computeRequestHash(
+        requestContext,
+        paymentDetailsHash
+      );
       const unsignedPayload: Omit<PaymentPayload, "clientSig"> = {
         version: 1,
         scheme: "a402-svm-v1",
@@ -390,7 +430,7 @@ describe("enclave_surfpool_e2e", function () {
         requestContext,
       });
       expect(verifyRes.status).to.equal(200);
-      const verifyBody = await verifyRes.json();
+      const verifyBody = await readJson<VerifyResponse>(verifyRes);
       expect(verifyBody.ok).to.equal(true);
 
       const settleRes = await postJson("/v1/settle", {
@@ -399,19 +439,22 @@ describe("enclave_surfpool_e2e", function () {
         statusCode: 200,
       });
       expect(settleRes.status).to.equal(200);
-      const settleBody = await settleRes.json();
+      const settleBody = await readJson<SettleResponse>(settleRes);
       expect(settleBody.ok).to.equal(true);
 
       const fireBatchRes = await postJson("/v1/admin/fire-batch", {});
       expect(fireBatchRes.status).to.equal(200);
-      const fireBatchBody = await fireBatchRes.json();
+      const fireBatchBody = await readJson<FireBatchResponse>(fireBatchRes);
       expect(fireBatchBody.ok).to.equal(true);
       expect(fireBatchBody.submitted).to.equal(true);
       expect(fireBatchBody.batchId).to.be.a("number");
       expect(fireBatchBody.settlementCount).to.equal(1);
       expect(fireBatchBody.txSignatures).to.have.length(1);
 
-      const providerAccount = await getAccount(provider.connection, providerTokenAccount);
+      const providerAccount = await getAccount(
+        provider.connection,
+        providerTokenAccount
+      );
       expect(Number(providerAccount.amount)).to.equal(paymentAmount);
 
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);

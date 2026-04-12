@@ -38,6 +38,52 @@ type PaymentPayload = {
   clientSig: string;
 };
 
+type AttestationResponse = {
+  vaultConfig: string;
+  vaultSigner: string;
+  attestationPolicyHash: string;
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type VerifyResponse = {
+  ok: boolean;
+  verificationId: string;
+  providerId: string;
+  amount: string;
+};
+
+type BalanceResponse = {
+  free: number;
+  locked: number;
+};
+
+type SettleResponse = {
+  ok: boolean;
+  settlementId: string;
+  providerCreditAmount: string;
+  participantReceipt: string;
+};
+
+type WithdrawAuthResponse = {
+  ok: boolean;
+  signature: string;
+  message: string;
+};
+
+type ReceiptResponse = {
+  ok: boolean;
+  participant: string;
+  freeBalance: number;
+  lockedBalance: number;
+  signature: string;
+};
+
+type ErrorResponse = {
+  error: string;
+  message?: string;
+};
+
 function sha256Hex(input: string): string {
   const hash = createHash("sha256");
   hash.update(input);
@@ -84,10 +130,7 @@ function signPaymentPayload(
     `${payload.expiresAt}\n` +
     `${payload.nonce}\n`;
 
-  const signature = nacl.sign.detached(
-    Buffer.from(message),
-    client.secretKey
-  );
+  const signature = nacl.sign.detached(Buffer.from(message), client.secretKey);
   return Buffer.from(signature).toString("base64");
 }
 
@@ -99,14 +142,18 @@ async function postJson(path: string, body: unknown) {
   });
 }
 
+async function readJson<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
+
 describe("enclave_api", () => {
-  let attestation: any;
+  let attestation: AttestationResponse;
 
   it("returns attestation document", async () => {
     const res = await fetch(`${ENCLAVE_URL}/v1/attestation`);
     expect(res.status).to.equal(200);
 
-    attestation = await res.json();
+    attestation = await readJson<AttestationResponse>(res);
     expect(attestation.vaultConfig).to.be.a("string");
     expect(attestation.vaultSigner).to.be.a("string");
     expect(attestation.attestationPolicyHash).to.be.a("string");
@@ -175,7 +222,7 @@ describe("enclave_api", () => {
       requestContext,
     });
     expect(verifyRes.status).to.equal(200);
-    const verifyBody = await verifyRes.json();
+    const verifyBody = await readJson<VerifyResponse>(verifyRes);
     expect(verifyBody.ok).to.equal(true);
     expect(verifyBody.providerId).to.equal(providerId);
     expect(verifyBody.amount).to.equal(paymentAmount.toString());
@@ -184,7 +231,9 @@ describe("enclave_api", () => {
       client: client.publicKey.toBase58(),
     });
     expect(balanceAfterVerifyRes.status).to.equal(200);
-    const balanceAfterVerify = await balanceAfterVerifyRes.json();
+    const balanceAfterVerify = await readJson<BalanceResponse>(
+      balanceAfterVerifyRes
+    );
     expect(balanceAfterVerify.free).to.equal(1_400_000);
     expect(balanceAfterVerify.locked).to.equal(paymentAmount);
 
@@ -194,7 +243,7 @@ describe("enclave_api", () => {
       statusCode: 200,
     });
     expect(settleRes.status).to.equal(200);
-    const settleBody = await settleRes.json();
+    const settleBody = await readJson<SettleResponse>(settleRes);
     expect(settleBody.ok).to.equal(true);
     expect(settleBody.settlementId).to.match(/^set_/);
     expect(settleBody.providerCreditAmount).to.equal(paymentAmount.toString());
@@ -206,14 +255,16 @@ describe("enclave_api", () => {
       statusCode: 200,
     });
     expect(settleRetryRes.status).to.equal(200);
-    const settleRetryBody = await settleRetryRes.json();
+    const settleRetryBody = await readJson<SettleResponse>(settleRetryRes);
     expect(settleRetryBody.settlementId).to.equal(settleBody.settlementId);
 
     const balanceAfterSettleRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
     });
     expect(balanceAfterSettleRes.status).to.equal(200);
-    const balanceAfterSettle = await balanceAfterSettleRes.json();
+    const balanceAfterSettle = await readJson<BalanceResponse>(
+      balanceAfterSettleRes
+    );
     expect(balanceAfterSettle.free).to.equal(1_400_000);
     expect(balanceAfterSettle.locked).to.equal(0);
 
@@ -223,7 +274,9 @@ describe("enclave_api", () => {
       amount: 500_000,
     });
     expect(withdrawAuthRes.status).to.equal(200);
-    const withdrawAuthBody = await withdrawAuthRes.json();
+    const withdrawAuthBody = await readJson<WithdrawAuthResponse>(
+      withdrawAuthRes
+    );
     expect(withdrawAuthBody.ok).to.equal(true);
     expect(withdrawAuthBody.signature).to.be.a("string").and.not.equal("");
     expect(withdrawAuthBody.message).to.be.a("string").and.not.equal("");
@@ -233,7 +286,7 @@ describe("enclave_api", () => {
       recipientAta: Keypair.generate().publicKey.toBase58(),
     });
     expect(receiptRes.status).to.equal(200);
-    const receiptBody = await receiptRes.json();
+    const receiptBody = await readJson<ReceiptResponse>(receiptRes);
     expect(receiptBody.ok).to.equal(true);
     expect(receiptBody.participant).to.equal(client.publicKey.toBase58());
     expect(receiptBody.freeBalance).to.equal(1_400_000);
@@ -268,7 +321,9 @@ describe("enclave_api", () => {
       },
     });
     expect(invalidSchemeRes.status).to.equal(400);
-    expect((await invalidSchemeRes.json()).error).to.equal("invalid_scheme");
+    expect((await readJson<ErrorResponse>(invalidSchemeRes)).error).to.equal(
+      "invalid_scheme"
+    );
 
     const unknownProviderRes = await postJson("/v1/verify", {
       paymentPayload: {
@@ -296,7 +351,9 @@ describe("enclave_api", () => {
       },
     });
     expect(unknownProviderRes.status).to.equal(400);
-    expect((await unknownProviderRes.json()).error).to.equal("provider_not_found");
+    expect((await readJson<ErrorResponse>(unknownProviderRes)).error).to.equal(
+      "provider_not_found"
+    );
 
     const settleRes = await postJson("/v1/settle", {
       verificationId: "ver_nonexistent",
@@ -304,14 +361,18 @@ describe("enclave_api", () => {
       statusCode: 200,
     });
     expect(settleRes.status).to.equal(404);
-    expect((await settleRes.json()).error).to.equal("reservation_not_found");
+    expect((await readJson<ErrorResponse>(settleRes)).error).to.equal(
+      "reservation_not_found"
+    );
 
     const cancelRes = await postJson("/v1/cancel", {
       verificationId: "ver_nonexistent",
       reason: "test",
     });
     expect(cancelRes.status).to.equal(404);
-    expect((await cancelRes.json()).error).to.equal("reservation_not_found");
+    expect((await readJson<ErrorResponse>(cancelRes)).error).to.equal(
+      "reservation_not_found"
+    );
 
     const withdrawRes = await postJson("/v1/withdraw-auth", {
       client: Keypair.generate().publicKey.toBase58(),
@@ -319,6 +380,8 @@ describe("enclave_api", () => {
       amount: 1000000,
     });
     expect(withdrawRes.status).to.equal(400);
-    expect((await withdrawRes.json()).error).to.equal("client_not_found");
+    expect((await readJson<ErrorResponse>(withdrawRes)).error).to.equal(
+      "client_not_found"
+    );
   });
 });

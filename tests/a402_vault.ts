@@ -91,7 +91,11 @@ describe("a402_vault", () => {
     )[0];
   }
 
-  function buildAuditRecord(providerTokenAccount: PublicKey, seed: number, timestamp?: number) {
+  function buildAuditRecord(
+    providerTokenAccount: PublicKey,
+    seed: number,
+    timestamp?: number
+  ) {
     return {
       encryptedSender: new Array(64).fill(seed & 0xff),
       encryptedAmount: new Array(64).fill((seed + 1) & 0xff),
@@ -204,7 +208,9 @@ describe("a402_vault", () => {
     offset += 64;
     const encryptedAmount = data.subarray(offset, offset + 64);
     offset += 64;
-    const providerTokenAccount = new PublicKey(data.subarray(offset, offset + 32));
+    const providerTokenAccount = new PublicKey(
+      data.subarray(offset, offset + 32)
+    );
     offset += 32;
     const timestamp = Number(data.readBigInt64LE(offset));
     offset += 8;
@@ -233,7 +239,7 @@ describe("a402_vault", () => {
   ) {
     const settleIx = await program.methods
       .settleVault(batchId, batchChunkHash, settlements)
-      .accounts({
+      .accountsPartial({
         vaultSigner: vaultSignerKeypair.publicKey,
         vaultConfig: vaultConfigPda,
         vaultTokenAccount: vaultTokenAccountPda,
@@ -251,7 +257,7 @@ describe("a402_vault", () => {
 
     const auditIx = await program.methods
       .recordAudit(batchId, batchChunkHash, auditRecords)
-      .accounts({
+      .accountsPartial({
         vaultSigner: vaultSignerKeypair.publicKey,
         vaultConfig: vaultConfigPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -295,7 +301,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: vaultConfigPda,
           usdcMint: usdcMint,
@@ -308,7 +314,9 @@ describe("a402_vault", () => {
 
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
       expect(vault.vaultId.toNumber()).to.equal(1);
-      expect(vault.governance.toBase58()).to.equal(governance.publicKey.toBase58());
+      expect(vault.governance.toBase58()).to.equal(
+        governance.publicKey.toBase58()
+      );
       expect(vault.status).to.equal(0); // Active
       expect(vault.vaultSignerPubkey.toBase58()).to.equal(
         vaultSignerKeypair.publicKey.toBase58()
@@ -358,7 +366,7 @@ describe("a402_vault", () => {
     it("deposits USDC into vault", async () => {
       await program.methods
         .deposit(new BN(depositAmount))
-        .accounts({
+        .accountsPartial({
           client: clientKeypair.publicKey,
           vaultConfig: vaultConfigPda,
           clientTokenAccount: clientTokenAccount,
@@ -368,7 +376,10 @@ describe("a402_vault", () => {
         .signers([clientKeypair])
         .rpc();
 
-      const vaultToken = await getAccount(provider.connection, vaultTokenAccountPda);
+      const vaultToken = await getAccount(
+        provider.connection,
+        vaultTokenAccountPda
+      );
       expect(Number(vaultToken.amount)).to.equal(depositAmount);
 
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
@@ -379,7 +390,7 @@ describe("a402_vault", () => {
       try {
         await program.methods
           .deposit(new BN(0))
-          .accounts({
+          .accountsPartial({
             client: clientKeypair.publicKey,
             vaultConfig: vaultConfigPda,
             clientTokenAccount: clientTokenAccount,
@@ -434,7 +445,7 @@ describe("a402_vault", () => {
       );
       await program.methods
         .deposit(new BN(2_000_000))
-        .accounts({
+        .accountsPartial({
           client: withdrawClient.publicKey,
           vaultConfig: vaultConfigPda,
           clientTokenAccount: depositTokenAccount,
@@ -455,11 +466,16 @@ describe("a402_vault", () => {
     ): Buffer {
       const buf = Buffer.alloc(120);
       let offset = 0;
-      buf.set(client.toBuffer(), offset); offset += 32;
-      buf.set(recipientAta.toBuffer(), offset); offset += 32;
-      buf.writeBigUInt64LE(BigInt(amount), offset); offset += 8;
-      buf.writeBigUInt64LE(BigInt(withdrawNonce), offset); offset += 8;
-      buf.writeBigInt64LE(BigInt(expiresAt), offset); offset += 8;
+      buf.set(client.toBuffer(), offset);
+      offset += 32;
+      buf.set(recipientAta.toBuffer(), offset);
+      offset += 32;
+      buf.writeBigUInt64LE(BigInt(amount), offset);
+      offset += 8;
+      buf.writeBigUInt64LE(BigInt(withdrawNonce), offset);
+      offset += 8;
+      buf.writeBigInt64LE(BigInt(expiresAt), offset);
+      offset += 8;
       buf.set(vaultConfig.toBuffer(), offset);
       return buf;
     }
@@ -506,7 +522,7 @@ describe("a402_vault", () => {
           new BN(expiresAt),
           Array.from(signature) as any
         )
-        .accounts({
+        .accountsPartial({
           client: withdrawClient.publicKey,
           vaultConfig: vaultConfigPda,
           vaultTokenAccount: vaultTokenAccountPda,
@@ -584,7 +600,7 @@ describe("a402_vault", () => {
           new BN(expiresAt),
           Array.from(signature) as any
         )
-        .accounts({
+        .accountsPartial({
           client: withdrawClient.publicKey,
           vaultConfig: vaultConfigPda,
           vaultTokenAccount: vaultTokenAccountPda,
@@ -637,7 +653,10 @@ describe("a402_vault", () => {
         message: wrongMessage,
       });
 
-      const signature = nacl.sign.detached(wrongMessage, vaultSignerKeypair.secretKey);
+      const signature = nacl.sign.detached(
+        wrongMessage,
+        vaultSignerKeypair.secretKey
+      );
 
       const [usedNoncePda] = PublicKey.findProgramAddressSync(
         [
@@ -656,7 +675,7 @@ describe("a402_vault", () => {
           new BN(expiresAt),
           Array.from(signature) as any
         )
-        .accounts({
+        .accountsPartial({
           client: withdrawClient.publicKey,
           vaultConfig: vaultConfigPda,
           vaultTokenAccount: vaultTokenAccountPda,
@@ -708,7 +727,10 @@ describe("a402_vault", () => {
         message: message,
       });
 
-      const signature = nacl.sign.detached(message, vaultSignerKeypair.secretKey);
+      const signature = nacl.sign.detached(
+        message,
+        vaultSignerKeypair.secretKey
+      );
 
       const [usedNoncePda] = PublicKey.findProgramAddressSync(
         [
@@ -727,7 +749,7 @@ describe("a402_vault", () => {
           new BN(expiresAt),
           Array.from(signature) as any
         )
-        .accounts({
+        .accountsPartial({
           client: withdrawClient.publicKey,
           vaultConfig: vaultConfigPda,
           vaultTokenAccount: vaultTokenAccountPda,
@@ -809,7 +831,7 @@ describe("a402_vault", () => {
 
       await program.methods
         .deposit(new BN(5_000_000))
-        .accounts({
+        .accountsPartial({
           client: clientKeypair.publicKey,
           vaultConfig: vaultConfigPda,
           clientTokenAccount: clientTokenAccount,
@@ -864,7 +886,9 @@ describe("a402_vault", () => {
       const amount1 = 50_000;
       const amount2 = 75_000;
 
-      const vaultBefore = await program.account.vaultConfig.fetch(vaultConfigPda);
+      const vaultBefore = await program.account.vaultConfig.fetch(
+        vaultConfigPda
+      );
       const settledBefore = vaultBefore.lifetimeSettled.toNumber();
 
       await sendAtomicSettleAndAudit(
@@ -886,10 +910,15 @@ describe("a402_vault", () => {
         ]
       );
 
-      const p2Token = await getAccount(provider.connection, provider2TokenAccount);
+      const p2Token = await getAccount(
+        provider.connection,
+        provider2TokenAccount
+      );
       expect(Number(p2Token.amount)).to.equal(amount2);
 
-      const vaultAfter = await program.account.vaultConfig.fetch(vaultConfigPda);
+      const vaultAfter = await program.account.vaultConfig.fetch(
+        vaultConfigPda
+      );
       expect(vaultAfter.lifetimeSettled.toNumber()).to.equal(
         settledBefore + amount1 + amount2
       );
@@ -911,7 +940,7 @@ describe("a402_vault", () => {
               amount: new BN(1000),
             },
           ])
-          .accounts({
+          .accountsPartial({
             vaultSigner: fakeSigner.publicKey,
             vaultConfig: vaultConfigPda,
             vaultTokenAccount: vaultTokenAccountPda,
@@ -942,7 +971,7 @@ describe("a402_vault", () => {
               amount: new BN(5_000),
             },
           ])
-          .accounts({
+          .accountsPartial({
             vaultSigner: vaultSignerKeypair.publicKey,
             vaultConfig: vaultConfigPda,
             vaultTokenAccount: vaultTokenAccountPda,
@@ -992,7 +1021,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: pauseVaultConfigPda,
           usdcMint: usdcMint,
@@ -1007,13 +1036,15 @@ describe("a402_vault", () => {
     it("pauses an active vault", async () => {
       await program.methods
         .pauseVault()
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: pauseVaultConfigPda,
         })
         .rpc();
 
-      const vault = await program.account.vaultConfig.fetch(pauseVaultConfigPda);
+      const vault = await program.account.vaultConfig.fetch(
+        pauseVaultConfigPda
+      );
       expect(vault.status).to.equal(1); // Paused
     });
 
@@ -1044,7 +1075,7 @@ describe("a402_vault", () => {
       try {
         await program.methods
           .deposit(new BN(1_000_000))
-          .accounts({
+          .accountsPartial({
             client: clientKeypair.publicKey,
             vaultConfig: pauseVaultConfigPda,
             clientTokenAccount: clientTokenAccount,
@@ -1087,7 +1118,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: migrateVaultConfigPda,
           usdcMint: usdcMint,
@@ -1106,15 +1137,19 @@ describe("a402_vault", () => {
 
       await program.methods
         .announceMigration(successorVault, exitDeadline)
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: migrateVaultConfigPda,
         })
         .rpc();
 
-      const vault = await program.account.vaultConfig.fetch(migrateVaultConfigPda);
+      const vault = await program.account.vaultConfig.fetch(
+        migrateVaultConfigPda
+      );
       expect(vault.status).to.equal(2); // Migrating
-      expect(vault.successorVault.toBase58()).to.equal(successorVault.toBase58());
+      expect(vault.successorVault.toBase58()).to.equal(
+        successorVault.toBase58()
+      );
     });
   });
 
@@ -1164,7 +1199,7 @@ describe("a402_vault", () => {
 
       await program.methods
         .rotateAuditor(newAuditorPubkey)
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: vaultConfigPda,
         })
@@ -1264,7 +1299,7 @@ describe("a402_vault", () => {
       try {
         await program.methods
           .recordAudit(new BN(1), new Array(32).fill(0), [])
-          .accounts({
+          .accountsPartial({
             vaultSigner: fakeSigner.publicKey,
             vaultConfig: vaultConfigPda,
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -1291,7 +1326,7 @@ describe("a402_vault", () => {
       try {
         await program.methods
           .recordAudit(batchId, batchChunkHash, [fakeAuditRecord])
-          .accounts({
+          .accountsPartial({
             vaultSigner: vaultSignerKeypair.publicKey,
             vaultConfig: vaultConfigPda,
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -1333,7 +1368,11 @@ describe("a402_vault", () => {
       const batchChunkHash = new Array(32).fill(0);
       const settleAmount = 10_000;
       const now = Math.floor(Date.now() / 1000);
-      const auditRecord = buildAuditRecord(auditProviderTokenAccount, 0xab, now);
+      const auditRecord = buildAuditRecord(
+        auditProviderTokenAccount,
+        0xab,
+        now
+      );
       const auditPda = findAuditPda(batchId, 0);
 
       await sendAtomicSettleAndAudit(
@@ -1382,8 +1421,14 @@ describe("a402_vault", () => {
         batchId,
         new Array(32).fill(7),
         [
-          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(1_000) },
-          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(2_000) },
+          {
+            providerTokenAccount: multiChunkProviderTokenAccount,
+            amount: new BN(1_000),
+          },
+          {
+            providerTokenAccount: multiChunkProviderTokenAccount,
+            amount: new BN(2_000),
+          },
         ],
         [
           buildAuditRecord(multiChunkProviderTokenAccount, 51),
@@ -1396,8 +1441,14 @@ describe("a402_vault", () => {
         batchId,
         new Array(32).fill(8),
         [
-          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(3_000) },
-          { providerTokenAccount: multiChunkProviderTokenAccount, amount: new BN(4_000) },
+          {
+            providerTokenAccount: multiChunkProviderTokenAccount,
+            amount: new BN(3_000),
+          },
+          {
+            providerTokenAccount: multiChunkProviderTokenAccount,
+            amount: new BN(4_000),
+          },
         ],
         [
           buildAuditRecord(multiChunkProviderTokenAccount, 53),
@@ -1411,8 +1462,12 @@ describe("a402_vault", () => {
 
       expect(auditTwo.index).to.equal(2);
       expect(auditThree.index).to.equal(3);
-      expect(auditTwo.provider.toBase58()).to.equal(multiChunkProviderTokenAccount.toBase58());
-      expect(auditThree.provider.toBase58()).to.equal(multiChunkProviderTokenAccount.toBase58());
+      expect(auditTwo.provider.toBase58()).to.equal(
+        multiChunkProviderTokenAccount.toBase58()
+      );
+      expect(auditThree.provider.toBase58()).to.equal(
+        multiChunkProviderTokenAccount.toBase58()
+      );
     });
   });
 
@@ -1442,7 +1497,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: retireVaultConfigPda,
           usdcMint: usdcMint,
@@ -1458,7 +1513,7 @@ describe("a402_vault", () => {
       // First pause
       await program.methods
         .pauseVault()
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: retireVaultConfigPda,
         })
@@ -1467,13 +1522,15 @@ describe("a402_vault", () => {
       // Then retire
       await program.methods
         .retireVault()
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: retireVaultConfigPda,
         })
         .rpc();
 
-      const vault = await program.account.vaultConfig.fetch(retireVaultConfigPda);
+      const vault = await program.account.vaultConfig.fetch(
+        retireVaultConfigPda
+      );
       expect(vault.status).to.equal(3); // Retired
     });
 
@@ -1500,7 +1557,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: activeVaultPda,
           usdcMint: usdcMint,
@@ -1514,7 +1571,7 @@ describe("a402_vault", () => {
       try {
         await program.methods
           .retireVault()
-          .accounts({
+          .accountsPartial({
             governance: governance.publicKey,
             vaultConfig: activeVaultPda,
           })
@@ -1556,15 +1613,24 @@ describe("a402_vault", () => {
     ): Buffer {
       const buf = Buffer.alloc(153);
       let offset = 0;
-      buf.set(participant.toBuffer(), offset); offset += 32;
-      buf.writeUInt8(participantKind, offset); offset += 1;
-      buf.set(recipientAta.toBuffer(), offset); offset += 32;
-      buf.writeBigUInt64LE(BigInt(freeBalance), offset); offset += 8;
-      buf.writeBigUInt64LE(BigInt(lockedBalance), offset); offset += 8;
-      buf.writeBigInt64LE(BigInt(maxLockExpiresAt), offset); offset += 8;
-      buf.writeBigUInt64LE(BigInt(nonce), offset); offset += 8;
-      buf.writeBigInt64LE(BigInt(timestamp), offset); offset += 8;
-      buf.writeBigUInt64LE(BigInt(snapshotSeqno), offset); offset += 8;
+      buf.set(participant.toBuffer(), offset);
+      offset += 32;
+      buf.writeUInt8(participantKind, offset);
+      offset += 1;
+      buf.set(recipientAta.toBuffer(), offset);
+      offset += 32;
+      buf.writeBigUInt64LE(BigInt(freeBalance), offset);
+      offset += 8;
+      buf.writeBigUInt64LE(BigInt(lockedBalance), offset);
+      offset += 8;
+      buf.writeBigInt64LE(BigInt(maxLockExpiresAt), offset);
+      offset += 8;
+      buf.writeBigUInt64LE(BigInt(nonce), offset);
+      offset += 8;
+      buf.writeBigInt64LE(BigInt(timestamp), offset);
+      offset += 8;
+      buf.writeBigUInt64LE(BigInt(snapshotSeqno), offset);
+      offset += 8;
       buf.set(vaultConfig.toBuffer(), offset);
       return buf;
     }
@@ -1591,7 +1657,7 @@ describe("a402_vault", () => {
           auditorMasterPubkey,
           attestationPolicyHash
         )
-        .accounts({
+        .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: fsVaultConfigPda,
           usdcMint: usdcMint,
@@ -1628,7 +1694,7 @@ describe("a402_vault", () => {
 
       await program.methods
         .deposit(new BN(fsDepositAmount))
-        .accounts({
+        .accountsPartial({
           client: fsClient.publicKey,
           vaultConfig: fsVaultConfigPda,
           clientTokenAccount: fsClientTokenAccount,
@@ -1695,7 +1761,7 @@ describe("a402_vault", () => {
             Array.from(receiptSignature) as any,
             receiptMessage
           )
-          .accounts({
+          .accountsPartial({
             participant: fsClient.publicKey,
             vaultConfig: fsVaultConfigPda,
             forceSettleRequest: forceSettlePda,
@@ -1764,7 +1830,7 @@ describe("a402_vault", () => {
             auditorMasterPubkey,
             attestationPolicyHash
           )
-          .accounts({
+          .accountsPartial({
             governance: governance.publicKey,
             vaultConfig: fsVaultConfigPda2,
             usdcMint: usdcMint,
@@ -1823,7 +1889,7 @@ describe("a402_vault", () => {
             Array.from(receiptSignature) as any,
             receiptMessage
           )
-          .accounts({
+          .accountsPartial({
             participant: fsClient.publicKey,
             vaultConfig: fsVaultConfigPda2,
             forceSettleRequest: forceSettlePda,
@@ -1915,7 +1981,7 @@ describe("a402_vault", () => {
             Array.from(newerSignature) as any,
             newerReceiptMessage
           )
-          .accounts({
+          .accountsPartial({
             challenger: challenger.publicKey,
             vaultConfig: fsVaultConfigPda,
             forceSettleRequest: forceSettlePda,
@@ -1945,7 +2011,9 @@ describe("a402_vault", () => {
           forceSettlePda
         );
         expect(request.freeBalanceDue.toNumber()).to.equal(newerFreeBalance);
-        expect(request.lockedBalanceDue.toNumber()).to.equal(newerLockedBalance);
+        expect(request.lockedBalanceDue.toNumber()).to.equal(
+          newerLockedBalance
+        );
         expect(request.receiptNonce.toNumber()).to.equal(newerReceiptNonce);
         expect(request.isResolved).to.equal(false);
       });
@@ -2005,7 +2073,7 @@ describe("a402_vault", () => {
             Array.from(staleSignature) as any,
             staleReceiptMessage
           )
-          .accounts({
+          .accountsPartial({
             challenger: challenger.publicKey,
             vaultConfig: fsVaultConfigPda,
             forceSettleRequest: forceSettlePda,
@@ -2050,7 +2118,7 @@ describe("a402_vault", () => {
         try {
           await program.methods
             .forceSettleFinalize()
-            .accounts({
+            .accountsPartial({
               caller: fsClient.publicKey,
               vaultConfig: fsVaultConfigPda,
               forceSettleRequest: forceSettlePda,

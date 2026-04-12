@@ -127,6 +127,53 @@ export interface ParticipantReceiptResponse {
   message: string;
 }
 
+// ── Phase 3: Atomic Service Channel Types ──
+
+/** Channel status */
+export type ChannelStatus = "open" | "locked" | "pending" | "closed";
+
+/** Facilitator /v1/channel/open response */
+export interface OpenChannelResponse {
+  ok: boolean;
+  channelId: string;
+  clientFree: number;
+  clientLocked: number;
+}
+
+/** Facilitator /v1/channel/request response */
+export interface ChannelRequestResponse {
+  ok: boolean;
+  channelId: string;
+  requestId: string;
+  status: ChannelStatus;
+}
+
+/** Facilitator /v1/channel/deliver response */
+export interface ChannelDeliverResponse {
+  ok: boolean;
+  channelId: string;
+  status: ChannelStatus;
+}
+
+/** Facilitator /v1/channel/finalize response */
+export interface ChannelFinalizeResponse {
+  ok: boolean;
+  channelId: string;
+  result: string; // base64 encoded
+  amountPaid: number;
+  status: ChannelStatus;
+}
+
+/** Facilitator /v1/channel/close response */
+export interface CloseChannelResponse {
+  ok: boolean;
+  channelId: string;
+  client: string;
+  providerId: string;
+  returnedToClient: number;
+  providerEarned: number;
+}
+
 /** A402Client configuration */
 export interface A402ClientConfig {
   /** Client wallet keypair */

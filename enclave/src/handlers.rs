@@ -1,4 +1,5 @@
 use axum::extract::State;
+use axum::http::{header::AUTHORIZATION, HeaderMap};
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -9,8 +10,11 @@ use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::adaptor_sig::AdaptorPreSignature;
+use crate::asc_manager;
 use crate::batch;
 use crate::deposit_detector::DepositDetector;
 use crate::error::EnclaveError;
@@ -21,6 +25,9 @@ pub struct AppState {
     pub vault: Arc<VaultState>,
     pub wal: Arc<Wal>,
     pub deposit_detector: Arc<DepositDetector>,
+    pub asc_ops_lock: Mutex<()>,
+    /// Watchtower URL for receipt replication (Phase 4). None = disabled.
+    pub watchtower_url: Option<String>,
 }
 
 // ── Attestation ──
@@ -634,6 +641,34 @@ pub async fn post_receipt(
 
     info!(client = %req.client, nonce, "ParticipantReceipt issued");
 
+    let sig_b64 = BASE64.encode(&signature);
+    let msg_b64 = BASE64.encode(&receipt_message);
+
+    // Replicate to watchtower (fire-and-forget, non-blocking)
+    if let Some(ref watchtower_url) = state.watchtower_url {
+        let url = format!("{}/v1/receipt/store", watchtower_url);
+        let body = serde_json::json!({
+            "participant": req.client,
+            "participantKind": 0,
+            "recipientAta": req.recipient_ata,
+            "freeBalance": balance.free,
+            "lockedBalance": balance.locked,
+            "maxLockExpiresAt": balance.max_lock_expires_at,
+            "nonce": nonce,
+            "timestamp": now,
+            "snapshotSeqno": snapshot_seqno,
+            "vaultConfig": state.vault.vault_config.to_string(),
+            "signature": sig_b64.clone(),
+            "message": msg_b64.clone(),
+        });
+        tokio::spawn(async move {
+            match reqwest::Client::new().post(&url).json(&body).send().await {
+                Ok(_) => info!(nonce, "Receipt replicated to watchtower"),
+                Err(e) => tracing::warn!(error = %e, "Failed to replicate receipt to watchtower"),
+            }
+        });
+    }
+
     Ok(Json(ReceiptResponse {
         ok: true,
         participant: req.client,
@@ -646,8 +681,8 @@ pub async fn post_receipt(
         timestamp: now,
         snapshot_seqno,
         vault_config: state.vault.vault_config.to_string(),
-        signature: BASE64.encode(&signature),
-        message: BASE64.encode(&receipt_message),
+        signature: sig_b64,
+        message: msg_b64,
     }))
 }
 
@@ -697,6 +732,21 @@ pub async fn post_register_provider(
     };
 
     state
+        .wal
+        .append(WalEntry::ProviderRegistered {
+            provider_id: req.provider_id.clone(),
+            display_name: req.display_name.clone(),
+            settlement_token_account: req.settlement_token_account.clone(),
+            network: req.network.clone(),
+            asset_mint: req.asset_mint.clone(),
+            allowed_origins: req.allowed_origins.clone(),
+            auth_mode: req.auth_mode.clone(),
+            api_key_hash: req.api_key_hash.clone(),
+        })
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+    state
         .vault
         .providers
         .insert(req.provider_id.clone(), registration);
@@ -739,15 +789,33 @@ pub async fn post_seed_balance(
 ) -> Result<Json<SeedBalanceResponse>, EnclaveError> {
     let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
     let locked = req.locked.unwrap_or(0);
+    let max_lock_expires_at = req.max_lock_expires_at.unwrap_or(0);
+    let total_deposited = req
+        .total_deposited
+        .unwrap_or(req.free.saturating_add(locked));
+    let total_withdrawn = req.total_withdrawn.unwrap_or(0);
+
+    state
+        .wal
+        .append(WalEntry::ClientBalanceSeeded {
+            client: req.client.clone(),
+            free: req.free,
+            locked,
+            max_lock_expires_at,
+            total_deposited,
+            total_withdrawn,
+        })
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
     state.vault.client_balances.insert(
         client,
         crate::state::ClientBalance {
             free: req.free,
             locked,
-            max_lock_expires_at: req.max_lock_expires_at.unwrap_or(0),
-            total_deposited: req.total_deposited.unwrap_or(req.free.saturating_add(locked)),
-            total_withdrawn: req.total_withdrawn.unwrap_or(0),
+            max_lock_expires_at,
+            total_deposited,
+            total_withdrawn,
         },
     );
 
@@ -833,15 +901,28 @@ fn verify_client_signature(payload: &PaymentPayload) -> Result<(), EnclaveError>
     message.push_str(&format!("{}\n", payload.expires_at));
     message.push_str(&format!("{}\n", payload.nonce));
 
-    let client_pubkey_bytes: [u8; 32] = Pubkey::from_str(&payload.client)
-        .map_err(|_| EnclaveError::InvalidClientSignature)?
-        .to_bytes();
+    let client_pubkey =
+        Pubkey::from_str(&payload.client).map_err(|_| EnclaveError::InvalidClientSignature)?;
+    verify_ed25519_signature(&client_pubkey, message.as_bytes(), &payload.client_sig)
+}
 
-    let verifying_key = VerifyingKey::from_bytes(&client_pubkey_bytes)
+fn verify_channel_open_signature(req: &OpenChannelRequest) -> Result<(), EnclaveError> {
+    let client_pubkey =
+        Pubkey::from_str(&req.client).map_err(|_| EnclaveError::InvalidClientSignature)?;
+    let message = build_channel_open_message(&req.client, &req.provider_id, req.initial_deposit);
+    verify_ed25519_signature(&client_pubkey, message.as_bytes(), &req.client_sig)
+}
+
+fn verify_ed25519_signature(
+    signer: &Pubkey,
+    message: &[u8],
+    signature_b64: &str,
+) -> Result<(), EnclaveError> {
+    let verifying_key = VerifyingKey::from_bytes(&signer.to_bytes())
         .map_err(|_| EnclaveError::InvalidClientSignature)?;
 
     let sig_bytes = BASE64
-        .decode(&payload.client_sig)
+        .decode(signature_b64)
         .map_err(|_| EnclaveError::InvalidClientSignature)?;
 
     let signature = Signature::from_bytes(
@@ -852,8 +933,1043 @@ fn verify_client_signature(payload: &PaymentPayload) -> Result<(), EnclaveError>
     );
 
     verifying_key
-        .verify_strict(message.as_bytes(), &signature)
+        .verify_strict(message, &signature)
         .map_err(|_| EnclaveError::InvalidClientSignature)?;
 
     Ok(())
+}
+
+fn verify_channel_client_signature(
+    state: &AppState,
+    channel_id: &str,
+    message: &str,
+    client_sig: &str,
+) -> Result<(), EnclaveError> {
+    let client = state
+        .vault
+        .active_channels
+        .get(channel_id)
+        .map(|channel| channel.client)
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    verify_ed25519_signature(&client, message.as_bytes(), client_sig)
+}
+
+fn verify_channel_provider_auth(
+    state: &AppState,
+    channel_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), EnclaveError> {
+    let provider_id = state
+        .vault
+        .active_channels
+        .get(channel_id)
+        .map(|channel| channel.provider_id.clone())
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    let provider = state
+        .vault
+        .providers
+        .get(&provider_id)
+        .ok_or(EnclaveError::ProviderNotFound)?;
+
+    if provider.api_key_hash.len() != 32 {
+        return Err(EnclaveError::ProviderAuthFailed);
+    }
+    if provider.auth_mode != "api-key" && provider.auth_mode != "bearer" {
+        return Err(EnclaveError::ProviderAuthFailed);
+    }
+
+    let provider_secret = headers
+        .get("x-a402-provider-auth")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        })
+        .ok_or(EnclaveError::ProviderAuthFailed)?;
+
+    let computed_hash = Sha256::digest(provider_secret.as_bytes());
+    if computed_hash.as_slice() != provider.api_key_hash.as_slice() {
+        return Err(EnclaveError::ProviderAuthFailed);
+    }
+
+    Ok(())
+}
+
+fn build_channel_open_message(client: &str, provider_id: &str, initial_deposit: u64) -> String {
+    format!(
+        "A402-CHANNEL-OPEN\n{}\n{}\n{}\n",
+        client, provider_id, initial_deposit
+    )
+}
+
+fn build_channel_request_message(
+    channel_id: &str,
+    request_id: &str,
+    amount: u64,
+    request_hash: &str,
+) -> String {
+    format!(
+        "A402-CHANNEL-REQUEST\n{}\n{}\n{}\n{}\n",
+        channel_id, request_id, amount, request_hash
+    )
+}
+
+fn build_channel_finalize_message(channel_id: &str, adaptor_secret: &str) -> String {
+    format!(
+        "A402-CHANNEL-FINALIZE\n{}\n{}\n",
+        channel_id, adaptor_secret
+    )
+}
+
+fn build_channel_close_message(channel_id: &str) -> String {
+    format!("A402-CHANNEL-CLOSE\n{}\n", channel_id)
+}
+
+// ── Phase 3: Atomic Service Channel Endpoints ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenChannelRequest {
+    pub client: String,
+    pub provider_id: String,
+    pub initial_deposit: u64,
+    /// Ed25519 signature over "A402-CHANNEL-OPEN\n{client}\n{provider_id}\n{initial_deposit}\n"
+    pub client_sig: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenChannelResponse {
+    pub ok: bool,
+    pub channel_id: String,
+    pub client_free: u64,
+    pub client_locked: u64,
+}
+
+pub async fn post_channel_open(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<OpenChannelRequest>,
+) -> Result<Json<OpenChannelResponse>, EnclaveError> {
+    let _guard = state.asc_ops_lock.lock().await;
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
+
+    // Verify client signature
+    verify_channel_open_signature(&req)?;
+
+    let channel_id =
+        asc_manager::open_channel(&state.vault, &client, &req.provider_id, req.initial_deposit)?;
+
+    if let Err(error) = state
+        .wal
+        .append(WalEntry::ChannelOpened {
+            channel_id: channel_id.clone(),
+            client: req.client.clone(),
+            provider_id: req.provider_id.clone(),
+            initial_deposit: req.initial_deposit,
+        })
+        .await
+    {
+        let _ = asc_manager::rollback_open_channel(&state.vault, &channel_id);
+        return Err(EnclaveError::Internal(format!(
+            "WAL append failed: {error}"
+        )));
+    }
+
+    Ok(Json(OpenChannelResponse {
+        ok: true,
+        channel_id,
+        client_free: req.initial_deposit,
+        client_locked: 0,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelRequestReq {
+    pub channel_id: String,
+    pub request_id: String,
+    pub amount: u64,
+    pub request_hash: String,
+    pub client_sig: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelRequestResponse {
+    pub ok: bool,
+    pub channel_id: String,
+    pub request_id: String,
+    pub status: String,
+}
+
+pub async fn post_channel_request(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChannelRequestReq>,
+) -> Result<Json<ChannelRequestResponse>, EnclaveError> {
+    let _guard = state.asc_ops_lock.lock().await;
+    let message = build_channel_request_message(
+        &req.channel_id,
+        &req.request_id,
+        req.amount,
+        &req.request_hash,
+    );
+    verify_channel_client_signature(&state, &req.channel_id, &message, &req.client_sig)?;
+
+    let request_hash: [u8; 32] = hex::decode(&req.request_hash)
+        .map_err(|_| EnclaveError::RequestHashMismatch)?
+        .try_into()
+        .map_err(|_| EnclaveError::RequestHashMismatch)?;
+
+    asc_manager::submit_request(
+        &state.vault,
+        &req.channel_id,
+        &req.request_id,
+        req.amount,
+        request_hash,
+    )?;
+
+    if let Err(error) = state
+        .wal
+        .append(WalEntry::ChannelRequestSubmitted {
+            channel_id: req.channel_id.clone(),
+            request_id: req.request_id.clone(),
+            amount: req.amount,
+            request_hash: Some(req.request_hash.clone()),
+        })
+        .await
+    {
+        let _ =
+            asc_manager::rollback_submit_request(&state.vault, &req.channel_id, &req.request_id);
+        return Err(EnclaveError::Internal(format!(
+            "WAL append failed: {error}"
+        )));
+    }
+
+    Ok(Json(ChannelRequestResponse {
+        ok: true,
+        channel_id: req.channel_id,
+        request_id: req.request_id,
+        status: "locked".to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelDeliverRequest {
+    pub channel_id: String,
+    pub adaptor_point: String,
+    pub pre_sig_r_prime: String,
+    pub pre_sig_s_prime: String,
+    pub encrypted_result: String,
+    pub result_hash: String,
+    pub provider_pubkey: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelDeliverResponse {
+    pub ok: bool,
+    pub channel_id: String,
+    pub status: String,
+}
+
+pub async fn post_channel_deliver(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ChannelDeliverRequest>,
+) -> Result<Json<ChannelDeliverResponse>, EnclaveError> {
+    let _guard = state.asc_ops_lock.lock().await;
+    verify_channel_provider_auth(&state, &req.channel_id, &headers)?;
+
+    let adaptor_point: [u8; 32] = hex::decode(&req.adaptor_point)
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?
+        .try_into()
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?;
+
+    let r_prime: [u8; 32] = hex::decode(&req.pre_sig_r_prime)
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?
+        .try_into()
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?;
+
+    let s_prime: [u8; 32] = hex::decode(&req.pre_sig_s_prime)
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?
+        .try_into()
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?;
+
+    let pre_sig = AdaptorPreSignature { r_prime, s_prime };
+
+    let encrypted_result = BASE64
+        .decode(&req.encrypted_result)
+        .map_err(|_| EnclaveError::Internal("Invalid encrypted_result base64".into()))?;
+
+    let result_hash: [u8; 32] = hex::decode(&req.result_hash)
+        .map_err(|_| EnclaveError::Internal("Invalid result_hash hex".into()))?
+        .try_into()
+        .map_err(|_| EnclaveError::Internal("result_hash must be 32 bytes".into()))?;
+
+    let provider_pubkey: [u8; 32] = hex::decode(&req.provider_pubkey)
+        .map_err(|_| EnclaveError::Internal("Invalid provider_pubkey hex".into()))?
+        .try_into()
+        .map_err(|_| EnclaveError::Internal("provider_pubkey must be 32 bytes".into()))?;
+
+    let request_id = state
+        .vault
+        .active_channels
+        .get(&req.channel_id)
+        .and_then(|channel| {
+            channel
+                .active_request
+                .as_ref()
+                .map(|request| request.request_id.clone())
+        })
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    asc_manager::deliver_adaptor(
+        &state.vault,
+        &req.channel_id,
+        adaptor_point,
+        pre_sig,
+        encrypted_result,
+        result_hash,
+        &provider_pubkey,
+    )?;
+
+    if let Err(error) = state
+        .wal
+        .append(WalEntry::ChannelAdaptorDelivered {
+            channel_id: req.channel_id.clone(),
+            request_id: request_id.clone(),
+            adaptor_point: Some(req.adaptor_point.clone()),
+            pre_sig_r_prime: Some(req.pre_sig_r_prime.clone()),
+            pre_sig_s_prime: Some(req.pre_sig_s_prime.clone()),
+            encrypted_result: Some(req.encrypted_result.clone()),
+            result_hash: Some(req.result_hash.clone()),
+            provider_pubkey: Some(req.provider_pubkey.clone()),
+        })
+        .await
+    {
+        let _ = asc_manager::rollback_deliver_adaptor(&state.vault, &req.channel_id, &request_id);
+        return Err(EnclaveError::Internal(format!(
+            "WAL append failed: {error}"
+        )));
+    }
+
+    Ok(Json(ChannelDeliverResponse {
+        ok: true,
+        channel_id: req.channel_id,
+        status: "pending".to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFinalizeRequest {
+    pub channel_id: String,
+    pub adaptor_secret: String,
+    pub client_sig: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelFinalizeResponse {
+    pub ok: bool,
+    pub channel_id: String,
+    pub result: String,
+    pub amount_paid: u64,
+    pub status: String,
+}
+
+pub async fn post_channel_finalize(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChannelFinalizeRequest>,
+) -> Result<Json<ChannelFinalizeResponse>, EnclaveError> {
+    let _guard = state.asc_ops_lock.lock().await;
+    let message = build_channel_finalize_message(&req.channel_id, &req.adaptor_secret);
+    verify_channel_client_signature(&state, &req.channel_id, &message, &req.client_sig)?;
+
+    let adaptor_secret: [u8; 32] = hex::decode(&req.adaptor_secret)
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?
+        .try_into()
+        .map_err(|_| EnclaveError::InvalidAdaptorSignature)?;
+
+    let outcome = asc_manager::finalize_offchain(&state.vault, &req.channel_id, adaptor_secret)?;
+
+    if let Err(error) = state
+        .wal
+        .append(WalEntry::ChannelFinalized {
+            channel_id: req.channel_id.clone(),
+            request_id: outcome.request_id.clone(),
+            amount_paid: outcome.amount,
+        })
+        .await
+    {
+        let _ = asc_manager::rollback_finalize_offchain(
+            &state.vault,
+            &req.channel_id,
+            outcome.request.clone(),
+        );
+        return Err(EnclaveError::Internal(format!(
+            "WAL append failed: {error}"
+        )));
+    }
+
+    Ok(Json(ChannelFinalizeResponse {
+        ok: true,
+        channel_id: req.channel_id,
+        result: BASE64.encode(&outcome.result_bytes),
+        amount_paid: outcome.amount,
+        status: "open".to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseChannelRequest {
+    pub channel_id: String,
+    pub client_sig: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseChannelResponse {
+    pub ok: bool,
+    pub channel_id: String,
+    pub client: String,
+    pub provider_id: String,
+    pub returned_to_client: u64,
+    pub provider_earned: u64,
+}
+
+pub async fn post_channel_close(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CloseChannelRequest>,
+) -> Result<Json<CloseChannelResponse>, EnclaveError> {
+    let _guard = state.asc_ops_lock.lock().await;
+    let message = build_channel_close_message(&req.channel_id);
+    verify_channel_client_signature(&state, &req.channel_id, &message, &req.client_sig)?;
+
+    let outcome = asc_manager::close_channel(&state.vault, &req.channel_id)?;
+
+    if let Err(error) = state
+        .wal
+        .append(WalEntry::ChannelClosed {
+            channel_id: req.channel_id.clone(),
+            returned_to_client: outcome.returned_to_client,
+            provider_earned: outcome.provider_earned,
+            settlement_id: outcome.settlement_id.clone(),
+        })
+        .await
+    {
+        let _ = asc_manager::rollback_close_channel(&state.vault, outcome);
+        return Err(EnclaveError::Internal(format!(
+            "WAL append failed: {error}"
+        )));
+    }
+
+    Ok(Json(CloseChannelResponse {
+        ok: true,
+        channel_id: req.channel_id,
+        client: outcome.client.to_string(),
+        provider_id: outcome.provider_id,
+        returned_to_client: outcome.returned_to_client,
+        provider_earned: outcome.provider_earned,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adaptor_sig::{self, AdaptorKeyPair};
+    use crate::state::{SolanaRuntimeConfig, VaultState};
+    use crate::wal::{self, Wal};
+    use axum::http::{header::AUTHORIZATION, HeaderName, HeaderValue};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use solana_sdk::pubkey::Pubkey;
+    use std::path::PathBuf;
+
+    fn sign_text_message(signing_key: &SigningKey, message: &str) -> String {
+        use ed25519_dalek::Signer;
+        BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
+    }
+
+    async fn make_app_state() -> (Arc<AppState>, PathBuf) {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let usdc_mint = Pubkey::new_unique();
+        let solana = SolanaRuntimeConfig {
+            program_id: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            rpc_url: "http://localhost:8899".to_string(),
+            ws_url: "ws://localhost:8900".to_string(),
+        };
+        let vault = Arc::new(VaultState::new(
+            Pubkey::new_unique(),
+            signing_key,
+            usdc_mint,
+            [0u8; 32],
+            solana.clone(),
+        ));
+        let wal_path =
+            std::env::temp_dir().join(format!("a402-phase3-{}.jsonl", uuid::Uuid::now_v7()));
+        let wal = Arc::new(Wal::new(wal_path.clone()).await);
+        let detector = Arc::new(DepositDetector::new(
+            solana.vault_token_account,
+            solana.program_id,
+            solana.rpc_url,
+            solana.ws_url,
+        ));
+
+        (
+            Arc::new(AppState {
+                vault,
+                wal,
+                deposit_detector: detector,
+                asc_ops_lock: Mutex::new(()),
+                watchtower_url: None,
+            }),
+            wal_path,
+        )
+    }
+
+    #[tokio::test]
+    async fn channel_api_flow_requires_auth_and_records_request_id() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let provider_id = "provider-phase3".to_string();
+        let provider_api_key = "phase3-provider-secret";
+        let provider_api_key_hash = hex::encode(Sha256::digest(provider_api_key.as_bytes()));
+
+        let _ = post_register_provider(
+            State(state.clone()),
+            Json(RegisterProviderRequest {
+                provider_id: provider_id.clone(),
+                display_name: "Phase3 Provider".to_string(),
+                settlement_token_account: Pubkey::new_unique().to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique().to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "bearer".to_string(),
+                api_key_hash: provider_api_key_hash,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = post_seed_balance(
+            State(state.clone()),
+            Json(SeedBalanceRequest {
+                client: client.to_string(),
+                free: 5_000_000,
+                locked: Some(0),
+                max_lock_expires_at: Some(0),
+                total_deposited: Some(5_000_000),
+                total_withdrawn: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let open_message = build_channel_open_message(&client.to_string(), &provider_id, 3_000_000);
+        let open_res = post_channel_open(
+            State(state.clone()),
+            Json(OpenChannelRequest {
+                client: client.to_string(),
+                provider_id: provider_id.clone(),
+                initial_deposit: 3_000_000,
+                client_sig: sign_text_message(&client_signing_key, &open_message),
+            }),
+        )
+        .await
+        .unwrap();
+        let channel_id = open_res.0.channel_id.clone();
+
+        let request_hash_hex = "ab".repeat(32);
+        let request_message =
+            build_channel_request_message(&channel_id, "req-123", 1_250_000, &request_hash_hex);
+        let _ = post_channel_request(
+            State(state.clone()),
+            Json(ChannelRequestReq {
+                channel_id: channel_id.clone(),
+                request_id: "req-123".to_string(),
+                amount: 1_250_000,
+                request_hash: request_hash_hex.clone(),
+                client_sig: sign_text_message(&client_signing_key, &request_message),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let provider_signing_key = SigningKey::generate(&mut OsRng);
+        let provider_pubkey = provider_signing_key.verifying_key().to_bytes();
+        let adaptor = AdaptorKeyPair::generate();
+        let payment_message = format!(
+            "{}:{}:{}:{}",
+            channel_id, "req-123", 1_250_000, request_hash_hex
+        );
+        let pre_sig = adaptor_sig::pre_sign(
+            &provider_signing_key.to_bytes(),
+            payment_message.as_bytes(),
+            &adaptor.public,
+        );
+        let plaintext = br#"{"ok":true,"payload":"phase3"}"#.to_vec();
+        let encrypted_result =
+            crate::asc_manager::encrypt_with_scalar(&plaintext, &adaptor.secret.to_bytes());
+        let result_hash = hex::encode(Sha256::digest(&plaintext));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {provider_api_key}")).unwrap(),
+        );
+
+        let _ = post_channel_deliver(
+            State(state.clone()),
+            headers,
+            Json(ChannelDeliverRequest {
+                channel_id: channel_id.clone(),
+                adaptor_point: hex::encode(adaptor.public_compressed),
+                pre_sig_r_prime: hex::encode(pre_sig.r_prime),
+                pre_sig_s_prime: hex::encode(pre_sig.s_prime),
+                encrypted_result: BASE64.encode(&encrypted_result),
+                result_hash,
+                provider_pubkey: hex::encode(provider_pubkey),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let finalize_secret = hex::encode(adaptor.secret.to_bytes());
+        let finalize_message = build_channel_finalize_message(&channel_id, &finalize_secret);
+        let finalize_res = post_channel_finalize(
+            State(state.clone()),
+            Json(ChannelFinalizeRequest {
+                channel_id: channel_id.clone(),
+                adaptor_secret: finalize_secret,
+                client_sig: sign_text_message(&client_signing_key, &finalize_message),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(BASE64.decode(finalize_res.0.result).unwrap(), plaintext);
+        assert_eq!(finalize_res.0.amount_paid, 1_250_000);
+
+        let close_message = build_channel_close_message(&channel_id);
+        let close_res = post_channel_close(
+            State(state.clone()),
+            Json(CloseChannelRequest {
+                channel_id: channel_id.clone(),
+                client_sig: sign_text_message(&client_signing_key, &close_message),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(close_res.0.returned_to_client, 1_750_000);
+        assert_eq!(close_res.0.provider_earned, 1_250_000);
+
+        let wal_contents = tokio::fs::read_to_string(&wal_path).await.unwrap();
+        assert!(wal_contents.contains(r#""type":"ChannelFinalized""#));
+        assert!(wal_contents.contains(r#""request_id":"req-123""#));
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn channel_request_id_cannot_be_reused_after_finalize() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let provider_id = "provider-phase3-reuse".to_string();
+        let provider_api_key = "phase3-provider-secret";
+        let provider_api_key_hash = hex::encode(Sha256::digest(provider_api_key.as_bytes()));
+
+        let _ = post_register_provider(
+            State(state.clone()),
+            Json(RegisterProviderRequest {
+                provider_id: provider_id.clone(),
+                display_name: "Phase3 Provider".to_string(),
+                settlement_token_account: Pubkey::new_unique().to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique().to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "api-key".to_string(),
+                api_key_hash: provider_api_key_hash,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = post_seed_balance(
+            State(state.clone()),
+            Json(SeedBalanceRequest {
+                client: client.to_string(),
+                free: 5_000_000,
+                locked: Some(0),
+                max_lock_expires_at: Some(0),
+                total_deposited: Some(5_000_000),
+                total_withdrawn: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let open_message = build_channel_open_message(&client.to_string(), &provider_id, 3_000_000);
+        let open_res = post_channel_open(
+            State(state.clone()),
+            Json(OpenChannelRequest {
+                client: client.to_string(),
+                provider_id: provider_id.clone(),
+                initial_deposit: 3_000_000,
+                client_sig: sign_text_message(&client_signing_key, &open_message),
+            }),
+        )
+        .await
+        .unwrap();
+        let channel_id = open_res.0.channel_id;
+
+        let request_hash_hex = "cd".repeat(32);
+        let request_message =
+            build_channel_request_message(&channel_id, "req-reuse", 1_000_000, &request_hash_hex);
+        let _ = post_channel_request(
+            State(state.clone()),
+            Json(ChannelRequestReq {
+                channel_id: channel_id.clone(),
+                request_id: "req-reuse".to_string(),
+                amount: 1_000_000,
+                request_hash: request_hash_hex.clone(),
+                client_sig: sign_text_message(&client_signing_key, &request_message),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let provider_signing_key = SigningKey::generate(&mut OsRng);
+        let adaptor = AdaptorKeyPair::generate();
+        let pre_sig = adaptor_sig::pre_sign(
+            &provider_signing_key.to_bytes(),
+            format!(
+                "{channel_id}:{}:{}:{request_hash_hex}",
+                "req-reuse", 1_000_000
+            )
+            .as_bytes(),
+            &adaptor.public,
+        );
+        let plaintext = br#"{"ok":true,"payload":"phase3"}"#.to_vec();
+        let encrypted_result =
+            crate::asc_manager::encrypt_with_scalar(&plaintext, &adaptor.secret.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-a402-provider-auth"),
+            HeaderValue::from_str(provider_api_key).unwrap(),
+        );
+
+        let _ = post_channel_deliver(
+            State(state.clone()),
+            headers,
+            Json(ChannelDeliverRequest {
+                channel_id: channel_id.clone(),
+                adaptor_point: hex::encode(adaptor.public_compressed),
+                pre_sig_r_prime: hex::encode(pre_sig.r_prime),
+                pre_sig_s_prime: hex::encode(pre_sig.s_prime),
+                encrypted_result: BASE64.encode(&encrypted_result),
+                result_hash: hex::encode(Sha256::digest(&plaintext)),
+                provider_pubkey: hex::encode(provider_signing_key.verifying_key().to_bytes()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let finalize_secret = hex::encode(adaptor.secret.to_bytes());
+        let finalize_message = build_channel_finalize_message(&channel_id, &finalize_secret);
+        let _ = post_channel_finalize(
+            State(state.clone()),
+            Json(ChannelFinalizeRequest {
+                channel_id: channel_id.clone(),
+                adaptor_secret: finalize_secret,
+                client_sig: sign_text_message(&client_signing_key, &finalize_message),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let reuse_err = post_channel_request(
+            State(state.clone()),
+            Json(ChannelRequestReq {
+                channel_id: channel_id.clone(),
+                request_id: "req-reuse".to_string(),
+                amount: 1_000_000,
+                request_hash: request_hash_hex,
+                client_sig: sign_text_message(&client_signing_key, &request_message),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(reuse_err, EnclaveError::ChannelRequestIdReused));
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn wal_replay_restores_pending_channel_and_allows_finalize() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let provider_id = "provider-phase3-replay".to_string();
+        let provider_api_key = "phase3-provider-secret";
+        let provider_api_key_hash = hex::encode(Sha256::digest(provider_api_key.as_bytes()));
+
+        let _ = post_register_provider(
+            State(state.clone()),
+            Json(RegisterProviderRequest {
+                provider_id: provider_id.clone(),
+                display_name: "Phase3 Provider".to_string(),
+                settlement_token_account: Pubkey::new_unique().to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique().to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "bearer".to_string(),
+                api_key_hash: provider_api_key_hash,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = post_seed_balance(
+            State(state.clone()),
+            Json(SeedBalanceRequest {
+                client: client.to_string(),
+                free: 5_000_000,
+                locked: Some(0),
+                max_lock_expires_at: Some(0),
+                total_deposited: Some(5_000_000),
+                total_withdrawn: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let open_message = build_channel_open_message(&client.to_string(), &provider_id, 3_000_000);
+        let open_res = post_channel_open(
+            State(state.clone()),
+            Json(OpenChannelRequest {
+                client: client.to_string(),
+                provider_id: provider_id.clone(),
+                initial_deposit: 3_000_000,
+                client_sig: sign_text_message(&client_signing_key, &open_message),
+            }),
+        )
+        .await
+        .unwrap();
+        let channel_id = open_res.0.channel_id;
+
+        let request_hash_hex = "ef".repeat(32);
+        let request_message =
+            build_channel_request_message(&channel_id, "req-replay", 1_250_000, &request_hash_hex);
+        let _ = post_channel_request(
+            State(state.clone()),
+            Json(ChannelRequestReq {
+                channel_id: channel_id.clone(),
+                request_id: "req-replay".to_string(),
+                amount: 1_250_000,
+                request_hash: request_hash_hex.clone(),
+                client_sig: sign_text_message(&client_signing_key, &request_message),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let provider_signing_key = SigningKey::generate(&mut OsRng);
+        let adaptor = AdaptorKeyPair::generate();
+        let pre_sig = adaptor_sig::pre_sign(
+            &provider_signing_key.to_bytes(),
+            format!(
+                "{channel_id}:{}:{}:{request_hash_hex}",
+                "req-replay", 1_250_000
+            )
+            .as_bytes(),
+            &adaptor.public,
+        );
+        let plaintext = br#"{"ok":true,"payload":"phase3-replay"}"#.to_vec();
+        let encrypted_result =
+            crate::asc_manager::encrypt_with_scalar(&plaintext, &adaptor.secret.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {provider_api_key}")).unwrap(),
+        );
+
+        let _ = post_channel_deliver(
+            State(state.clone()),
+            headers,
+            Json(ChannelDeliverRequest {
+                channel_id: channel_id.clone(),
+                adaptor_point: hex::encode(adaptor.public_compressed),
+                pre_sig_r_prime: hex::encode(pre_sig.r_prime),
+                pre_sig_s_prime: hex::encode(pre_sig.s_prime),
+                encrypted_result: BASE64.encode(&encrypted_result),
+                result_hash: hex::encode(Sha256::digest(&plaintext)),
+                provider_pubkey: hex::encode(provider_signing_key.verifying_key().to_bytes()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let replay_signing_key = SigningKey::generate(&mut OsRng);
+        let replay_solana = SolanaRuntimeConfig {
+            program_id: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            rpc_url: "http://localhost:8899".to_string(),
+            ws_url: "ws://localhost:8900".to_string(),
+        };
+        let replay_state = Arc::new(AppState {
+            vault: Arc::new(VaultState::new(
+                Pubkey::new_unique(),
+                replay_signing_key,
+                Pubkey::new_unique(),
+                [0u8; 32],
+                replay_solana.clone(),
+            )),
+            wal: Arc::new(Wal::new(wal_path.clone()).await),
+            deposit_detector: Arc::new(DepositDetector::new(
+                replay_solana.vault_token_account,
+                replay_solana.program_id,
+                replay_solana.rpc_url,
+                replay_solana.ws_url,
+            )),
+            asc_ops_lock: Mutex::new(()),
+            watchtower_url: None,
+        });
+
+        wal::replay_app_state(&replay_state).await.unwrap();
+
+        let replay_channel = replay_state.vault.active_channels.get(&channel_id).unwrap();
+        assert_eq!(replay_channel.status, crate::state::ChannelStatus::Pending);
+        assert_eq!(
+            replay_channel
+                .active_request
+                .as_ref()
+                .map(|request| request.request_id.as_str()),
+            Some("req-replay")
+        );
+        drop(replay_channel);
+
+        let finalize_secret = hex::encode(adaptor.secret.to_bytes());
+        let finalize_message = build_channel_finalize_message(&channel_id, &finalize_secret);
+        let finalize_res = post_channel_finalize(
+            State(replay_state.clone()),
+            Json(ChannelFinalizeRequest {
+                channel_id: channel_id.clone(),
+                adaptor_secret: finalize_secret,
+                client_sig: sign_text_message(&client_signing_key, &finalize_message),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(BASE64.decode(finalize_res.0.result).unwrap(), plaintext);
+
+        let close_message = build_channel_close_message(&channel_id);
+        let close_res = post_channel_close(
+            State(replay_state.clone()),
+            Json(CloseChannelRequest {
+                channel_id: channel_id.clone(),
+                client_sig: sign_text_message(&client_signing_key, &close_message),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(close_res.0.returned_to_client, 1_750_000);
+        assert_eq!(close_res.0.provider_earned, 1_250_000);
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn channel_open_rolls_back_when_wal_append_fails() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let usdc_mint = Pubkey::new_unique();
+        let solana = SolanaRuntimeConfig {
+            program_id: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            rpc_url: "http://localhost:8899".to_string(),
+            ws_url: "ws://localhost:8900".to_string(),
+        };
+        let vault = Arc::new(VaultState::new(
+            Pubkey::new_unique(),
+            signing_key,
+            usdc_mint,
+            [0u8; 32],
+            solana.clone(),
+        ));
+        let wal_path =
+            std::env::temp_dir().join(format!("a402-phase3-dir-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&wal_path).await.unwrap();
+        let state = Arc::new(AppState {
+            vault: vault.clone(),
+            wal: Arc::new(Wal::new(wal_path.clone()).await),
+            deposit_detector: Arc::new(DepositDetector::new(
+                solana.vault_token_account,
+                solana.program_id,
+                solana.rpc_url,
+                solana.ws_url,
+            )),
+            asc_ops_lock: Mutex::new(()),
+            watchtower_url: None,
+        });
+
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        state.vault.providers.insert(
+            "provider-phase3".to_string(),
+            crate::state::ProviderRegistration {
+                provider_id: "provider-phase3".to_string(),
+                display_name: "Phase3 Provider".to_string(),
+                settlement_token_account: Pubkey::new_unique(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "api-key".to_string(),
+                api_key_hash: Sha256::digest(b"secret").to_vec(),
+            },
+        );
+        state.vault.client_balances.insert(
+            client,
+            crate::state::ClientBalance {
+                free: 5_000_000,
+                locked: 0,
+                max_lock_expires_at: 0,
+                total_deposited: 5_000_000,
+                total_withdrawn: 0,
+            },
+        );
+
+        let open_message =
+            build_channel_open_message(&client.to_string(), "provider-phase3", 3_000_000);
+        let error = post_channel_open(
+            State(state.clone()),
+            Json(OpenChannelRequest {
+                client: client.to_string(),
+                provider_id: "provider-phase3".to_string(),
+                initial_deposit: 3_000_000,
+                client_sig: sign_text_message(&client_signing_key, &open_message),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, EnclaveError::Internal(_)));
+        assert!(state.vault.active_channels.is_empty());
+        let balance = state.vault.client_balances.get(&client).unwrap();
+        assert_eq!(balance.free, 5_000_000);
+        assert_eq!(balance.locked, 0);
+
+        let _ = tokio::fs::remove_dir_all(wal_path).await;
+    }
 }

@@ -49,6 +49,21 @@ pub enum EnclaveError {
     #[error("Provider ID mismatch")]
     ProviderIdMismatch,
 
+    #[error("Channel not found")]
+    ChannelNotFound,
+
+    #[error("Invalid channel status: {0}")]
+    InvalidChannelStatus(String),
+
+    #[error("Channel request expired")]
+    ChannelRequestExpired,
+
+    #[error("Channel request ID already used")]
+    ChannelRequestIdReused,
+
+    #[error("Invalid adaptor pre-signature")]
+    InvalidAdaptorSignature,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -81,6 +96,19 @@ impl IntoResponse for EnclaveError {
                 (StatusCode::BAD_REQUEST, "payment_details_hash_mismatch")
             }
             EnclaveError::ProviderIdMismatch => (StatusCode::FORBIDDEN, "provider_id_mismatch"),
+            EnclaveError::ChannelNotFound => (StatusCode::NOT_FOUND, "channel_not_found"),
+            EnclaveError::InvalidChannelStatus(ref _s) => {
+                (StatusCode::CONFLICT, "invalid_channel_status")
+            }
+            EnclaveError::ChannelRequestExpired => {
+                (StatusCode::BAD_REQUEST, "channel_request_expired")
+            }
+            EnclaveError::ChannelRequestIdReused => {
+                (StatusCode::CONFLICT, "channel_request_id_reused")
+            }
+            EnclaveError::InvalidAdaptorSignature => {
+                (StatusCode::BAD_REQUEST, "invalid_adaptor_signature")
+            }
             EnclaveError::Internal(ref _s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
 
