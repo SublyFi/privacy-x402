@@ -269,8 +269,12 @@ Anchor program implemented and all tests passing.
 - `POST /v1/channel/close` — チャネル閉鎖、オンチェーン決済
 
 ### Provider TEE
-- テスト用モック実装あり（handlers.rs内）
-- 本番ではAWS Nitro Enclave別インスタンスとして稼働
+- Provider側ライブラリは middleware/src/asc.ts に本番用コードとして実装済み
+  - `generateAscDeliveryArtifact()`: アダプタ鍵生成、事前署名、結果暗号化
+  - `submitAscDelivery()`: Facilitatorの /v1/channel/deliver へPOST
+  - `deliverAscResult()`: 上記を一括実行するワンショット関数
+- Facilitator側 (enclave) の pVerify 検証も完全実装
+- 本番デプロイでは別Nitro Enclaveインスタンス上で稼働（コードは同一、インスタンスが分離）
 
 ### Batch Settlement Integration (enclave/src/batch.rs, 659 lines)
 - ASC決済をオンチェーンtxに集約
@@ -319,7 +323,6 @@ Anchor program implemented and all tests passing.
 ### Implementation Notes
 - Watchtower永続化は現在JSON形式。本番ではRocksDB等への移行推奨
 - force_settle_finalize の時間経過テストはBankrunのtime warp機能が必要で制限あり
-- Provider TEEは本番では別Nitro Enclaveインスタンスとして稼働が必要
 
 ## Remaining for Phase 5
 - Arcium MXE Integration (encrypted-ixs/)
