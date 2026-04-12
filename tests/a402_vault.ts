@@ -1597,7 +1597,7 @@ describe("a402_vault", () => {
      *   participant (32) + participant_kind (1) + recipient_ata (32) +
      *   free_balance (8) + locked_balance (8) + max_lock_expires_at (8) +
      *   nonce (8) + timestamp (8) + snapshot_seqno (8) + vault_config (32)
-     * Total: 153 bytes
+     * Total: 145 bytes
      */
     function buildReceiptMessage(
       participant: PublicKey,
@@ -1611,7 +1611,7 @@ describe("a402_vault", () => {
       snapshotSeqno: number,
       vaultConfig: PublicKey
     ): Buffer {
-      const buf = Buffer.alloc(153);
+      const buf = Buffer.alloc(145);
       let offset = 0;
       buf.set(participant.toBuffer(), offset);
       offset += 32;
@@ -1805,6 +1805,83 @@ describe("a402_vault", () => {
         expect(request.isResolved).to.equal(false);
       });
 
+      it("rejects force settle when instruction args do not match signed receipt", async () => {
+        const participantKind = 0;
+        const slot = await provider.connection.getSlot();
+        const blockTime = await provider.connection.getBlockTime(slot);
+        const receiptMessage = buildReceiptMessage(
+          fsClient.publicKey,
+          participantKind,
+          fsClientTokenAccount,
+          1_000_000,
+          250_000,
+          blockTime! + 3600,
+          9,
+          blockTime!,
+          0,
+          fsVaultConfigPda
+        );
+
+        const receiptSignature = nacl.sign.detached(
+          receiptMessage,
+          fsVaultSignerKeypair.secretKey
+        );
+
+        const [forceSettlePda] = PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("force_settle"),
+            fsVaultConfigPda.toBuffer(),
+            fsClient.publicKey.toBuffer(),
+            Buffer.from([participantKind]),
+          ],
+          program.programId
+        );
+
+        const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: fsVaultSignerKeypair.secretKey,
+          message: receiptMessage,
+        });
+
+        const tamperedFreeBalance = 1_500_000;
+        const forceSettleIx = await program.methods
+          .forceSettleInit(
+            participantKind,
+            fsClientTokenAccount,
+            new BN(tamperedFreeBalance),
+            new BN(250_000),
+            new BN(blockTime! + 3600),
+            new BN(9),
+            Array.from(receiptSignature) as any,
+            receiptMessage
+          )
+          .accountsPartial({
+            participant: fsClient.publicKey,
+            vaultConfig: fsVaultConfigPda,
+            forceSettleRequest: forceSettlePda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+          })
+          .instruction();
+
+        const latestBlockhash = await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: fsClient.publicKey,
+          recentBlockhash: latestBlockhash.blockhash,
+          instructions: [ed25519Ix, forceSettleIx],
+        }).compileToV0Message();
+
+        const tx = new VersionedTransaction(messageV0);
+        tx.sign([fsClient]);
+
+        try {
+          await provider.connection.sendTransaction(tx);
+          await new Promise((r) => setTimeout(r, 1000));
+          expect.fail("Should have thrown");
+        } catch (err: any) {
+          expect(err.toString()).to.include("Error");
+        }
+      });
+
       it("rejects force settle with wrong signer", async () => {
         const participantKind = 0; // Client
         const fakeSigner = Keypair.generate();
@@ -1974,6 +2051,7 @@ describe("a402_vault", () => {
 
         const challengeIx = await program.methods
           .forceSettleChallenge(
+            fsClientTokenAccount,
             new BN(newerFreeBalance),
             new BN(newerLockedBalance),
             new BN(newerMaxLockExpiresAt),
@@ -2066,6 +2144,7 @@ describe("a402_vault", () => {
 
         const challengeIx = await program.methods
           .forceSettleChallenge(
+            fsClientTokenAccount,
             new BN(1_000_000),
             new BN(0),
             new BN(0),

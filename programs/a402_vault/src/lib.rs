@@ -111,6 +111,7 @@ pub mod a402_vault {
 
     pub fn force_settle_challenge(
         ctx: Context<ForceSettleChallenge>,
+        newer_recipient_ata: Pubkey,
         newer_free_balance: u64,
         newer_locked_balance: u64,
         newer_max_lock_expires_at: i64,
@@ -120,6 +121,7 @@ pub mod a402_vault {
     ) -> Result<()> {
         instructions::force_settle_challenge::handler(
             ctx,
+            newer_recipient_ata,
             newer_free_balance,
             newer_locked_balance,
             newer_max_lock_expires_at,

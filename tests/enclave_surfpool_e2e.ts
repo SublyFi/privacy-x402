@@ -378,6 +378,7 @@ describe("enclave_surfpool_e2e", function () {
       const registerRes = await postJson("/v1/provider/register", {
         providerId,
         displayName: "Surfpool E2E Provider",
+        participantPubkey: providerOwner.publicKey.toBase58(),
         settlementTokenAccount: providerTokenAccount.toBase58(),
         network: "solana:localnet",
         assetMint: usdcMint.toBase58(),

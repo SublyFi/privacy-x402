@@ -26,7 +26,7 @@ pub struct AppState {
     pub wal: Arc<Wal>,
     pub deposit_detector: Arc<DepositDetector>,
     pub asc_ops_lock: Mutex<()>,
-    /// Watchtower URL for receipt replication (Phase 4). None = disabled.
+    /// Watchtower URL for receipt replication (Phase 4).
     pub watchtower_url: Option<String>,
 }
 
@@ -264,6 +264,9 @@ pub struct SettleRequest {
     pub status_code: u16,
 }
 
+const PARTICIPANT_KIND_CLIENT: u8 = 0;
+const PARTICIPANT_KIND_PROVIDER: u8 = 1;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettleResponse {
@@ -279,32 +282,42 @@ pub async fn post_settle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SettleRequest>,
 ) -> Result<Json<SettleResponse>, EnclaveError> {
-    // Look up reservation
-    let mut reservation = state
-        .vault
-        .reservations
-        .get_mut(&req.verification_id)
-        .ok_or(EnclaveError::ReservationNotFound)?;
+    let (status, client, provider_id, amount, existing_settlement_id, settled_at) = {
+        let reservation = state
+            .vault
+            .reservations
+            .get(&req.verification_id)
+            .ok_or(EnclaveError::ReservationNotFound)?;
+        (
+            reservation.status.clone(),
+            reservation.client,
+            reservation.provider_id.clone(),
+            reservation.amount,
+            reservation.settlement_id.clone(),
+            reservation.settled_at,
+        )
+    };
 
-    // Idempotency
-    if reservation.status == ReservationStatus::SettledOffchain {
-        let settled_at = reservation.settled_at.unwrap_or(0);
+    if status == ReservationStatus::SettledOffchain {
+        let settled_at = settled_at.unwrap_or(0);
         let settled_time = chrono::DateTime::from_timestamp(settled_at, 0).unwrap_or_default();
         return Ok(Json(SettleResponse {
             ok: true,
-            settlement_id: reservation.settlement_id.clone().unwrap_or_default(),
+            settlement_id: existing_settlement_id.unwrap_or_default(),
             offchain_settled_at: settled_time.to_rfc3339(),
-            provider_credit_amount: reservation.amount.to_string(),
+            provider_credit_amount: amount.to_string(),
             batch_id: None,
-            participant_receipt: String::new(),
+            participant_receipt: encode_receipt_envelope(
+                &issue_provider_receipt(&state, &provider_id).await?,
+            )?,
         }));
     }
 
     // Must be Reserved
-    if reservation.status != ReservationStatus::Reserved {
+    if status != ReservationStatus::Reserved {
         return Err(EnclaveError::InvalidReservationStatus(format!(
             "{:?}",
-            reservation.status
+            status
         )));
     }
 
@@ -312,16 +325,12 @@ pub async fn post_settle(
     let settlement_id = format!("set_{}", uuid::Uuid::now_v7());
 
     // Settle payment
-    state.vault.settle_payment(
-        &reservation.client,
-        reservation.amount,
-        &reservation.provider_id,
-        &settlement_id,
-        now,
-    )?;
+    state
+        .vault
+        .settle_payment(&client, amount, &provider_id, &settlement_id, now)?;
 
     // Record settlement for audit record generation (Phase 2)
-    let provider_reg = state.vault.providers.get(&reservation.provider_id);
+    let provider_reg = state.vault.providers.get(&provider_id);
     let provider_pubkey = provider_reg
         .as_ref()
         .map(|p| p.settlement_token_account)
@@ -330,9 +339,9 @@ pub async fn post_settle(
         settlement_id.clone(),
         crate::state::SettlementRecord {
             settlement_id: settlement_id.clone(),
-            client: reservation.client,
+            client,
             provider: provider_pubkey,
-            amount: reservation.amount,
+            amount,
             timestamp: now,
         },
     );
@@ -343,44 +352,25 @@ pub async fn post_settle(
         .append(WalEntry::SettlementCommitted {
             settlement_id: settlement_id.clone(),
             verification_id: req.verification_id.clone(),
-            provider_id: reservation.provider_id.clone(),
-            amount: reservation.amount,
+            provider_id: provider_id.clone(),
+            amount,
         })
         .await
         .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
-    // Issue ParticipantReceipt to provider
-    let provider = state
-        .vault
-        .providers
-        .get(&reservation.provider_id)
-        .ok_or(EnclaveError::ProviderNotFound)?;
+    {
+        let mut reservation = state
+            .vault
+            .reservations
+            .get_mut(&req.verification_id)
+            .ok_or(EnclaveError::ReservationNotFound)?;
+        reservation.status = ReservationStatus::SettledOffchain;
+        reservation.settlement_id = Some(settlement_id.clone());
+        reservation.settled_at = Some(now);
+    }
 
-    let nonce = state.vault.next_receipt_nonce();
-    let snapshot_seqno = state
-        .vault
-        .snapshot_seqno
-        .load(std::sync::atomic::Ordering::SeqCst);
-
-    let receipt_message = state.vault.build_participant_receipt_message(
-        &Pubkey::from_str(&reservation.provider_id).unwrap_or(provider.settlement_token_account),
-        1, // Provider kind
-        &provider.settlement_token_account,
-        reservation.amount,
-        0, // Provider locked is always 0
-        0,
-        nonce,
-        now,
-        snapshot_seqno,
-    );
-
-    let receipt_signature = state.vault.sign_message(&receipt_message);
-    let receipt_b64 = BASE64.encode(&receipt_signature);
-
-    // Update reservation
-    reservation.status = ReservationStatus::SettledOffchain;
-    reservation.settlement_id = Some(settlement_id.clone());
-    reservation.settled_at = Some(now);
+    let participant_receipt =
+        encode_receipt_envelope(&issue_provider_receipt(&state, &provider_id).await?)?;
 
     let settled_time = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
 
@@ -390,9 +380,9 @@ pub async fn post_settle(
         ok: true,
         settlement_id,
         offchain_settled_at: settled_time.to_rfc3339(),
-        provider_credit_amount: reservation.amount.to_string(),
+        provider_credit_amount: amount.to_string(),
         batch_id: None,
-        participant_receipt: receipt_b64,
+        participant_receipt,
     }))
 }
 
@@ -575,7 +565,7 @@ pub struct ReceiptRequest {
     pub recipient_ata: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReceiptResponse {
     pub ok: bool,
@@ -606,84 +596,165 @@ pub async fn post_receipt(
         .client_balances
         .get(&client)
         .ok_or(EnclaveError::ClientNotFound)?;
+    let free_balance = balance.free;
+    let locked_balance = balance.locked;
+    let max_lock_expires_at = balance.max_lock_expires_at;
+    drop(balance);
 
+    Ok(Json(
+        issue_participant_receipt(
+            &state,
+            client,
+            PARTICIPANT_KIND_CLIENT,
+            recipient_ata,
+            free_balance,
+            locked_balance,
+            max_lock_expires_at,
+        )
+        .await?,
+    ))
+}
+
+fn encode_receipt_envelope(receipt: &ReceiptResponse) -> Result<String, EnclaveError> {
+    serde_json::to_vec(receipt)
+        .map(|json| BASE64.encode(json))
+        .map_err(|e| EnclaveError::Internal(format!("Receipt serialization failed: {e}")))
+}
+
+async fn issue_provider_receipt(
+    state: &Arc<AppState>,
+    provider_id: &str,
+) -> Result<ReceiptResponse, EnclaveError> {
+    let provider = state
+        .vault
+        .providers
+        .get(provider_id)
+        .ok_or(EnclaveError::ProviderNotFound)?;
+    let participant = provider
+        .participant_pubkey
+        .unwrap_or(provider.settlement_token_account);
+    let recipient_ata = provider.settlement_token_account;
+    drop(provider);
+
+    let free_balance = state
+        .vault
+        .provider_credits
+        .get(provider_id)
+        .map(|credit| credit.credited_amount)
+        .unwrap_or(0);
+
+    issue_participant_receipt(
+        state,
+        participant,
+        PARTICIPANT_KIND_PROVIDER,
+        recipient_ata,
+        free_balance,
+        0,
+        0,
+    )
+    .await
+}
+
+async fn issue_participant_receipt(
+    state: &Arc<AppState>,
+    participant: Pubkey,
+    participant_kind: u8,
+    recipient_ata: Pubkey,
+    free_balance: u64,
+    locked_balance: u64,
+    max_lock_expires_at: i64,
+) -> Result<ReceiptResponse, EnclaveError> {
     let nonce = state.vault.next_receipt_nonce();
-    let now = Utc::now().timestamp();
+    let timestamp = Utc::now().timestamp();
     let snapshot_seqno = state
         .vault
         .snapshot_seqno
         .load(std::sync::atomic::Ordering::SeqCst);
-
     let receipt_message = state.vault.build_participant_receipt_message(
-        &client,
-        0, // Client kind
+        &participant,
+        participant_kind,
         &recipient_ata,
-        balance.free,
-        balance.locked,
-        balance.max_lock_expires_at,
+        free_balance,
+        locked_balance,
+        max_lock_expires_at,
         nonce,
-        now,
+        timestamp,
         snapshot_seqno,
     );
-
     let signature = state.vault.sign_message(&receipt_message);
 
-    // Record in WAL
+    let receipt = ReceiptResponse {
+        ok: true,
+        participant: participant.to_string(),
+        participant_kind,
+        recipient_ata: recipient_ata.to_string(),
+        free_balance,
+        locked_balance,
+        max_lock_expires_at,
+        nonce,
+        timestamp,
+        snapshot_seqno,
+        vault_config: state.vault.vault_config.to_string(),
+        signature: BASE64.encode(signature),
+        message: BASE64.encode(receipt_message),
+    };
+
     state
         .wal
         .append(WalEntry::ParticipantReceiptIssued {
-            participant: req.client.clone(),
-            participant_kind: 0,
+            participant: receipt.participant.clone(),
+            participant_kind,
             nonce,
         })
         .await
         .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
-    info!(client = %req.client, nonce, "ParticipantReceipt issued");
+    replicate_receipt_to_watchtower(state, &receipt).await?;
 
-    let sig_b64 = BASE64.encode(&signature);
-    let msg_b64 = BASE64.encode(&receipt_message);
+    state
+        .wal
+        .append(WalEntry::ParticipantReceiptMirrored {
+            participant: receipt.participant.clone(),
+            participant_kind,
+            nonce,
+        })
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
-    // Replicate to watchtower (fire-and-forget, non-blocking)
-    if let Some(ref watchtower_url) = state.watchtower_url {
-        let url = format!("{}/v1/receipt/store", watchtower_url);
-        let body = serde_json::json!({
-            "participant": req.client,
-            "participantKind": 0,
-            "recipientAta": req.recipient_ata,
-            "freeBalance": balance.free,
-            "lockedBalance": balance.locked,
-            "maxLockExpiresAt": balance.max_lock_expires_at,
-            "nonce": nonce,
-            "timestamp": now,
-            "snapshotSeqno": snapshot_seqno,
-            "vaultConfig": state.vault.vault_config.to_string(),
-            "signature": sig_b64.clone(),
-            "message": msg_b64.clone(),
-        });
-        tokio::spawn(async move {
-            match reqwest::Client::new().post(&url).json(&body).send().await {
-                Ok(_) => info!(nonce, "Receipt replicated to watchtower"),
-                Err(e) => tracing::warn!(error = %e, "Failed to replicate receipt to watchtower"),
-            }
-        });
+    info!(
+        participant = %receipt.participant,
+        participant_kind,
+        nonce,
+        "ParticipantReceipt issued"
+    );
+
+    Ok(receipt)
+}
+
+async fn replicate_receipt_to_watchtower(
+    state: &Arc<AppState>,
+    receipt: &ReceiptResponse,
+) -> Result<(), EnclaveError> {
+    let watchtower_url = state
+        .watchtower_url
+        .as_ref()
+        .ok_or(EnclaveError::ReceiptWatchtowerUnavailable)?;
+    let url = format!("{watchtower_url}/v1/receipt/store");
+    let response = reqwest::Client::new()
+        .post(url)
+        .json(receipt)
+        .send()
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("Watchtower replication failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(EnclaveError::Internal(format!(
+            "Watchtower replication failed with status {}",
+            response.status()
+        )));
     }
 
-    Ok(Json(ReceiptResponse {
-        ok: true,
-        participant: req.client,
-        participant_kind: 0,
-        recipient_ata: req.recipient_ata,
-        free_balance: balance.free,
-        locked_balance: balance.locked,
-        max_lock_expires_at: balance.max_lock_expires_at,
-        nonce,
-        timestamp: now,
-        snapshot_seqno,
-        vault_config: state.vault.vault_config.to_string(),
-        signature: sig_b64,
-        message: msg_b64,
-    }))
+    Ok(())
 }
 
 // ── Provider Registration ──
@@ -693,6 +764,7 @@ pub async fn post_receipt(
 pub struct RegisterProviderRequest {
     pub provider_id: String,
     pub display_name: String,
+    pub participant_pubkey: Option<String>,
     pub settlement_token_account: String,
     pub network: String,
     pub asset_mint: String,
@@ -715,6 +787,11 @@ pub async fn post_register_provider(
 ) -> Result<Json<RegisterProviderResponse>, EnclaveError> {
     let settlement_token_account = Pubkey::from_str(&req.settlement_token_account)
         .map_err(|_| EnclaveError::Internal("Invalid settlement token account".into()))?;
+    let participant_pubkey = req
+        .participant_pubkey
+        .as_deref()
+        .map(|value| Pubkey::from_str(value).map_err(|_| EnclaveError::InvalidProviderParticipant))
+        .transpose()?;
     let asset_mint = Pubkey::from_str(&req.asset_mint)
         .map_err(|_| EnclaveError::Internal("Invalid asset mint".into()))?;
 
@@ -723,6 +800,7 @@ pub async fn post_register_provider(
     let registration = crate::state::ProviderRegistration {
         provider_id: req.provider_id.clone(),
         display_name: req.display_name.clone(),
+        participant_pubkey,
         settlement_token_account,
         network: req.network.clone(),
         asset_mint,
@@ -736,6 +814,7 @@ pub async fn post_register_provider(
         .append(WalEntry::ProviderRegistered {
             provider_id: req.provider_id.clone(),
             display_name: req.display_name.clone(),
+            participant_pubkey: req.participant_pubkey.clone(),
             settlement_token_account: req.settlement_token_account.clone(),
             network: req.network.clone(),
             asset_mint: req.asset_mint.clone(),
@@ -1449,6 +1528,7 @@ mod tests {
             Json(RegisterProviderRequest {
                 provider_id: provider_id.clone(),
                 display_name: "Phase3 Provider".to_string(),
+                participant_pubkey: None,
                 settlement_token_account: Pubkey::new_unique().to_string(),
                 network: "solana:localnet".to_string(),
                 asset_mint: Pubkey::new_unique().to_string(),
@@ -1592,6 +1672,7 @@ mod tests {
             Json(RegisterProviderRequest {
                 provider_id: provider_id.clone(),
                 display_name: "Phase3 Provider".to_string(),
+                participant_pubkey: None,
                 settlement_token_account: Pubkey::new_unique().to_string(),
                 network: "solana:localnet".to_string(),
                 asset_mint: Pubkey::new_unique().to_string(),
@@ -1729,6 +1810,7 @@ mod tests {
             Json(RegisterProviderRequest {
                 provider_id: provider_id.clone(),
                 display_name: "Phase3 Provider".to_string(),
+                participant_pubkey: None,
                 settlement_token_account: Pubkey::new_unique().to_string(),
                 network: "solana:localnet".to_string(),
                 asset_mint: Pubkey::new_unique().to_string(),
@@ -1930,6 +2012,7 @@ mod tests {
             crate::state::ProviderRegistration {
                 provider_id: "provider-phase3".to_string(),
                 display_name: "Phase3 Provider".to_string(),
+                participant_pubkey: None,
                 settlement_token_account: Pubkey::new_unique(),
                 network: "solana:localnet".to_string(),
                 asset_mint: Pubkey::new_unique(),
@@ -1971,5 +2054,59 @@ mod tests {
         assert_eq!(balance.locked, 0);
 
         let _ = tokio::fs::remove_dir_all(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn wal_replay_restores_receipt_nonce() {
+        let (state, wal_path) = make_app_state().await;
+        state
+            .wal
+            .append(WalEntry::ParticipantReceiptIssued {
+                participant: Pubkey::new_unique().to_string(),
+                participant_kind: PARTICIPANT_KIND_CLIENT,
+                nonce: 7,
+            })
+            .await
+            .unwrap();
+        state
+            .wal
+            .append(WalEntry::ParticipantReceiptMirrored {
+                participant: Pubkey::new_unique().to_string(),
+                participant_kind: PARTICIPANT_KIND_PROVIDER,
+                nonce: 7,
+            })
+            .await
+            .unwrap();
+
+        let replay_signing_key = SigningKey::generate(&mut OsRng);
+        let replay_solana = SolanaRuntimeConfig {
+            program_id: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            rpc_url: "http://localhost:8899".to_string(),
+            ws_url: "ws://localhost:8900".to_string(),
+        };
+        let replay_state = Arc::new(AppState {
+            vault: Arc::new(VaultState::new(
+                Pubkey::new_unique(),
+                replay_signing_key,
+                Pubkey::new_unique(),
+                [0u8; 32],
+                replay_solana.clone(),
+            )),
+            wal: Arc::new(Wal::new(wal_path.clone()).await),
+            deposit_detector: Arc::new(DepositDetector::new(
+                replay_solana.vault_token_account,
+                replay_solana.program_id,
+                replay_solana.rpc_url,
+                replay_solana.ws_url,
+            )),
+            asc_ops_lock: Mutex::new(()),
+            watchtower_url: None,
+        });
+
+        wal::replay_app_state(&replay_state).await.unwrap();
+        assert_eq!(replay_state.vault.next_receipt_nonce(), 8);
+
+        let _ = tokio::fs::remove_file(wal_path).await;
     }
 }

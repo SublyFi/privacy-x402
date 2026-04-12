@@ -170,7 +170,7 @@ fn submit_challenge(
     rpc: &solana_rpc_client::rpc_client::RpcClient,
     config: &ChallengerConfig,
     force_settle_address: Pubkey,
-    request: &OnChainForceSettleRequest,
+    _request: &OnChainForceSettleRequest,
     receipt: &StoredReceipt,
     challenger_keypair: &Keypair,
 ) -> Result<String, String> {
@@ -189,28 +189,25 @@ fn submit_challenge(
         .get_account_data(&vault_config)
         .map_err(|e| format!("Failed to fetch vault config: {e}"))?;
 
-    // vault_signer_pubkey is at offset 8 (discriminator) + 1 (bump) + 1 (vault_id) + 32 (governance) + 1 (status) = 43
-    // Actually let's just look for it at the known offset in VaultConfig
-    // VaultConfig: bump(1) + vault_id(1) + governance(32) + status(1) + vault_signer_pubkey(32)
-    let signer_offset = 8 + 1 + 1 + 32 + 1; // = 43
+    // vault_signer_pubkey is at offset:
+    // discriminator(8) + bump(1) + vault_id(8) + governance(32) + status(1) = 50
+    let signer_offset = 8 + 1 + 8 + 32 + 1; // = 50
     if vault_config_data.len() < signer_offset + 32 {
         return Err("VaultConfig data too short".into());
     }
     let vault_signer_bytes: [u8; 32] = vault_config_data[signer_offset..signer_offset + 32]
         .try_into()
         .map_err(|_| "Failed to extract vault_signer_pubkey")?;
-    let vault_signer_pubkey = Pubkey::new_from_array(vault_signer_bytes);
 
     // Build Ed25519 precompile instruction for pre-existing signature verification
-    let ed25519_ix = build_ed25519_verify_instruction(
-        &vault_signer_bytes,
-        &signature_bytes,
-        &message_bytes,
-    );
+    let ed25519_ix =
+        build_ed25519_verify_instruction(&vault_signer_bytes, &signature_bytes, &message_bytes);
 
     let sig_array: [u8; 64] = signature_bytes
         .try_into()
         .map_err(|_| "Signature must be 64 bytes")?;
+    let recipient_ata = Pubkey::from_str(&receipt.recipient_ata)
+        .map_err(|e| format!("Invalid recipient_ata: {e}"))?;
 
     // Build force_settle_challenge instruction
     // Anchor discriminator for force_settle_challenge
@@ -218,6 +215,7 @@ fn submit_challenge(
     // Discriminator: sha256("global:force_settle_challenge")[..8]
     let disc = anchor_discriminator("force_settle_challenge");
     data.extend_from_slice(&disc);
+    data.extend_from_slice(recipient_ata.as_ref());
     data.extend_from_slice(&receipt.free_balance.to_le_bytes());
     data.extend_from_slice(&receipt.locked_balance.to_le_bytes());
     data.extend_from_slice(&receipt.max_lock_expires_at.to_le_bytes());
@@ -259,10 +257,7 @@ fn submit_challenge(
 }
 
 /// Parse a ForceSettleRequest from raw account data.
-fn parse_force_settle_request(
-    address: Pubkey,
-    data: &[u8],
-) -> Option<OnChainForceSettleRequest> {
+fn parse_force_settle_request(address: Pubkey, data: &[u8]) -> Option<OnChainForceSettleRequest> {
     if data.len() < 219 {
         return None;
     }

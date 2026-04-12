@@ -6,8 +6,10 @@ import { Keypair } from "@solana/web3.js";
 /**
  * Enclave Facilitator API integration tests.
  *
- * Prerequisites: enclave must be running on localhost:3100
- * Run: cargo run -p a402-enclave &
+ * Prerequisites: watchtower must be running on localhost:3200 and enclave must
+ * be running on localhost:3100 with A402_WATCHTOWER_URL=http://127.0.0.1:3200
+ * Run: cargo run -p a402-watchtower &
+ * Then: A402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p a402-enclave &
  * Then: yarn run ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts
  */
 
@@ -74,8 +76,14 @@ type WithdrawAuthResponse = {
 type ReceiptResponse = {
   ok: boolean;
   participant: string;
+  participantKind: number;
+  recipientAta: string;
   freeBalance: number;
   lockedBalance: number;
+  maxLockExpiresAt: number;
+  nonce: number;
+  vaultConfig: string;
+  message: string;
   signature: string;
 };
 
@@ -164,6 +172,7 @@ describe("enclave_api", () => {
   it("runs a live verify -> balance -> settle -> withdraw-auth -> receipt flow", async () => {
     const client = Keypair.generate();
     const providerId = `prov_${randomUUID()}`;
+    const providerParticipant = Keypair.generate();
     const providerSettlementAccount = Keypair.generate().publicKey;
     const assetMint = Keypair.generate().publicKey;
     const paymentAmount = 600_000;
@@ -171,6 +180,7 @@ describe("enclave_api", () => {
     const registerRes = await postJson("/v1/provider/register", {
       providerId,
       displayName: "Integration Test Provider",
+      participantPubkey: providerParticipant.publicKey.toBase58(),
       settlementTokenAccount: providerSettlementAccount.toBase58(),
       network: "solana:localnet",
       assetMint: assetMint.toBase58(),
@@ -248,6 +258,18 @@ describe("enclave_api", () => {
     expect(settleBody.settlementId).to.match(/^set_/);
     expect(settleBody.providerCreditAmount).to.equal(paymentAmount.toString());
     expect(settleBody.participantReceipt).to.be.a("string").and.not.equal("");
+    const providerReceipt = JSON.parse(
+      Buffer.from(settleBody.participantReceipt, "base64").toString("utf-8")
+    ) as ReceiptResponse;
+    expect(providerReceipt.participant).to.equal(
+      providerParticipant.publicKey.toBase58()
+    );
+    expect(providerReceipt.participantKind).to.equal(1);
+    expect(providerReceipt.recipientAta).to.equal(
+      providerSettlementAccount.toBase58()
+    );
+    expect(providerReceipt.freeBalance).to.equal(paymentAmount);
+    expect(providerReceipt.lockedBalance).to.equal(0);
 
     const settleRetryRes = await postJson("/v1/settle", {
       verificationId: verifyBody.verificationId,

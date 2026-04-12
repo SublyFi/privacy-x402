@@ -64,6 +64,12 @@ pub enum EnclaveError {
     #[error("Invalid adaptor pre-signature")]
     InvalidAdaptorSignature,
 
+    #[error("Receipt watchtower is unavailable")]
+    ReceiptWatchtowerUnavailable,
+
+    #[error("Provider participant pubkey is invalid")]
+    InvalidProviderParticipant,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -108,6 +114,13 @@ impl IntoResponse for EnclaveError {
             }
             EnclaveError::InvalidAdaptorSignature => {
                 (StatusCode::BAD_REQUEST, "invalid_adaptor_signature")
+            }
+            EnclaveError::ReceiptWatchtowerUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "receipt_watchtower_unavailable",
+            ),
+            EnclaveError::InvalidProviderParticipant => {
+                (StatusCode::BAD_REQUEST, "invalid_provider_participant")
             }
             EnclaveError::Internal(ref _s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };

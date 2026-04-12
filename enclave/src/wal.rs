@@ -50,9 +50,16 @@ pub enum WalEntry {
         participant_kind: u8,
         nonce: u64,
     },
+    ParticipantReceiptMirrored {
+        participant: String,
+        participant_kind: u8,
+        nonce: u64,
+    },
     ProviderRegistered {
         provider_id: String,
         display_name: String,
+        #[serde(default)]
+        participant_pubkey: Option<String>,
         settlement_token_account: String,
         network: String,
         asset_mint: String,
@@ -246,6 +253,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
         WalEntry::ProviderRegistered {
             provider_id,
             display_name,
+            participant_pubkey,
             settlement_token_account,
             network,
             asset_mint,
@@ -256,6 +264,10 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             let settlement_token_account =
                 parse_pubkey("settlement_token_account", &settlement_token_account)?;
             let asset_mint = parse_pubkey("asset_mint", &asset_mint)?;
+            let participant_pubkey = participant_pubkey
+                .as_deref()
+                .map(|value| parse_pubkey("participant_pubkey", value))
+                .transpose()?;
             let api_key_hash = hex::decode(api_key_hash)
                 .map_err(|error| format!("invalid provider api_key_hash in WAL: {error}"))?;
 
@@ -264,6 +276,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 ProviderRegistration {
                     provider_id,
                     display_name,
+                    participant_pubkey,
                     settlement_token_account,
                     network,
                     asset_mint,
@@ -272,6 +285,13 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     api_key_hash,
                 },
             );
+        }
+        WalEntry::ParticipantReceiptIssued { nonce, .. }
+        | WalEntry::ParticipantReceiptMirrored { nonce, .. } => {
+            state
+                .vault
+                .receipt_nonce
+                .fetch_max(nonce.saturating_add(1), Ordering::SeqCst);
         }
         WalEntry::ClientBalanceSeeded {
             client,

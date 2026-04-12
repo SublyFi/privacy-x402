@@ -45,9 +45,7 @@ impl ReceiptKey {
     fn storage_key(&self) -> String {
         format!(
             "{}:{}:{}",
-            self.vault,
-            self.participant,
-            self.participant_kind
+            self.vault, self.participant, self.participant_kind
         )
     }
 }
@@ -144,22 +142,17 @@ impl ReceiptStore {
         }
 
         match fs::read_to_string(&self.persist_path).await {
-            Ok(json) => {
-                match serde_json::from_str::<Vec<(String, StoredReceipt)>>(&json) {
-                    Ok(entries) => {
-                        for (key, receipt) in entries {
-                            self.receipts.insert(key, receipt);
-                        }
-                        info!(
-                            count = self.receipts.len(),
-                            "Loaded receipts from disk"
-                        );
+            Ok(json) => match serde_json::from_str::<Vec<(String, StoredReceipt)>>(&json) {
+                Ok(entries) => {
+                    for (key, receipt) in entries {
+                        self.receipts.insert(key, receipt);
                     }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to parse receipt store file");
-                    }
+                    info!(count = self.receipts.len(), "Loaded receipts from disk");
                 }
-            }
+                Err(e) => {
+                    warn!(error = %e, "Failed to parse receipt store file");
+                }
+            },
             Err(e) => {
                 warn!(error = %e, "Failed to read receipt store file");
             }

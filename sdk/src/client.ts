@@ -290,6 +290,13 @@ export class A402Client {
     receipt: ParticipantReceiptResponse,
     program: anchor.Program
   ): Promise<string> {
+    if (receipt.participant !== this.wallet.publicKey.toBase58()) {
+      throw new Error("Receipt participant does not match the current wallet");
+    }
+    if (receipt.vaultConfig !== this.vaultAddress.toBase58()) {
+      throw new Error("Receipt vaultConfig does not match this client vault");
+    }
+
     const participantKind = receipt.participantKind;
     const signatureBytes = Buffer.from(receipt.signature, "base64");
     const messageBytes = Buffer.from(receipt.message, "base64");

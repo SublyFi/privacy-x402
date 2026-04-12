@@ -111,6 +111,8 @@ impl Default for ClientBalance {
 pub struct ProviderRegistration {
     pub provider_id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub participant_pubkey: Option<Pubkey>,
     pub settlement_token_account: Pubkey,
     pub network: String,
     pub asset_mint: Pubkey,
@@ -330,7 +332,7 @@ impl VaultState {
         timestamp: i64,
         snapshot_seqno: u64,
     ) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(153);
+        let mut msg = Vec::with_capacity(145);
         msg.extend_from_slice(participant.as_ref());
         msg.push(participant_kind);
         msg.extend_from_slice(recipient_ata.as_ref());

@@ -786,6 +786,7 @@ mod tests {
             ProviderRegistration {
                 provider_id: provider_id.to_string(),
                 display_name: "Test Provider".to_string(),
+                participant_pubkey: Some(provider_pubkey),
                 settlement_token_account: provider_pubkey,
                 network: "solana-localnet".to_string(),
                 asset_mint: Pubkey::new_unique(),

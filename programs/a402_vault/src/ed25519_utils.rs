@@ -3,12 +3,42 @@ use anchor_lang::solana_program::sysvar::instructions as sysvar_instructions;
 
 use crate::error::VaultError;
 
+pub const PARTICIPANT_RECEIPT_MESSAGE_LEN: usize = 145;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEd25519Signature {
+    pub signature: [u8; 64],
+    pub message: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantReceiptMessage {
+    pub participant: Pubkey,
+    pub participant_kind: u8,
+    pub recipient_ata: Pubkey,
+    pub free_balance: u64,
+    pub locked_balance: u64,
+    pub max_lock_expires_at: i64,
+    pub nonce: u64,
+    pub timestamp: i64,
+    pub snapshot_seqno: u64,
+    pub vault_config: Pubkey,
+}
+
 /// Verify Ed25519 signature via the precompile instruction and return the signed message bytes.
 /// The caller is responsible for verifying the message content matches expected parameters.
 pub fn verify_ed25519_signature(
     instructions_sysvar: &AccountInfo,
     expected_pubkey: &Pubkey,
 ) -> Result<Vec<u8>> {
+    Ok(verify_ed25519_signature_details(instructions_sysvar, expected_pubkey)?.message)
+}
+
+/// Verify Ed25519 signature via the precompile instruction and return the verified signature + message.
+pub fn verify_ed25519_signature_details(
+    instructions_sysvar: &AccountInfo,
+    expected_pubkey: &Pubkey,
+) -> Result<VerifiedEd25519Signature> {
     let current_index = sysvar_instructions::load_current_index_checked(instructions_sysvar)
         .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
 
@@ -39,6 +69,14 @@ pub fn verify_ed25519_signature(
     require!(ix_data.len() >= 16, VaultError::InvalidEd25519Instruction);
     require!(ix_data[0] == 1, VaultError::InvalidEd25519Instruction); // exactly 1 signature
 
+    let signature_offset = u16::from_le_bytes([ix_data[2], ix_data[3]]) as usize;
+    require!(
+        ix_data.len() >= signature_offset + 64,
+        VaultError::InvalidEd25519Instruction
+    );
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&ix_data[signature_offset..signature_offset + 64]);
+
     let pubkey_offset = u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
     require!(
         ix_data.len() >= pubkey_offset + 32,
@@ -61,5 +99,92 @@ pub fn verify_ed25519_signature(
 
     let message = ix_data[message_offset..message_offset + message_size].to_vec();
 
-    Ok(message)
+    Ok(VerifiedEd25519Signature { signature, message })
+}
+
+pub fn decode_participant_receipt_message(message: &[u8]) -> Result<ParticipantReceiptMessage> {
+    require!(
+        message.len() == PARTICIPANT_RECEIPT_MESSAGE_LEN,
+        VaultError::InvalidReceiptMessage
+    );
+
+    let mut offset = 0;
+
+    let participant = Pubkey::new_from_array(
+        message[offset..offset + 32]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 32;
+
+    let participant_kind = message[offset];
+    offset += 1;
+
+    let recipient_ata = Pubkey::new_from_array(
+        message[offset..offset + 32]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 32;
+
+    let free_balance = u64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let locked_balance = u64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let max_lock_expires_at = i64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let nonce = u64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let timestamp = i64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let snapshot_seqno = u64::from_le_bytes(
+        message[offset..offset + 8]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+    offset += 8;
+
+    let vault_config = Pubkey::new_from_array(
+        message[offset..offset + 32]
+            .try_into()
+            .map_err(|_| error!(VaultError::InvalidReceiptMessage))?,
+    );
+
+    Ok(ParticipantReceiptMessage {
+        participant,
+        participant_kind,
+        recipient_ata,
+        free_balance,
+        locked_balance,
+        max_lock_expires_at,
+        nonce,
+        timestamp,
+        snapshot_seqno,
+        vault_config,
+    })
 }
