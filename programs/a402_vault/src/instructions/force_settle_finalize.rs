@@ -56,8 +56,11 @@ pub fn handler(ctx: Context<ForceSettleFinalize>) -> Result<()> {
         .ok_or(VaultError::ArithmeticOverflow)?;
 
     if claimable == 0 {
-        let request = &mut ctx.accounts.force_settle_request;
-        request.is_resolved = true;
+        // Only resolve if locked_balance_due is also zero (i.e., nothing left to claim)
+        if request.locked_balance_due == 0 {
+            let request = &mut ctx.accounts.force_settle_request;
+            request.is_resolved = true;
+        }
         return Ok(());
     }
 
@@ -92,10 +95,13 @@ pub fn handler(ctx: Context<ForceSettleFinalize>) -> Result<()> {
         claimable,
     )?;
 
-    // Update request
+    // Update request per design doc:
+    // free_balance_due = 0
+    // if current_time >= max_lock_expires_at { locked_balance_due = 0 }
+    // Both 0 → is_resolved = true
     let request = &mut ctx.accounts.force_settle_request;
     request.free_balance_due = 0;
-    if locked > 0 {
+    if clock.unix_timestamp >= request.max_lock_expires_at {
         request.locked_balance_due = 0;
     }
     if request.free_balance_due == 0 && request.locked_balance_due == 0 {

@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
 
+use crate::constants::{VAULT_STATUS_ACTIVE, VAULT_STATUS_MIGRATING};
+use crate::error::VaultError;
 use crate::state::VaultConfig;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -16,6 +18,13 @@ pub struct RecordAudit<'info> {
     #[account(mut)]
     pub vault_signer: Signer<'info>,
 
+    #[account(
+        constraint = vault_config.vault_signer_pubkey == vault_signer.key()
+            @ VaultError::InvalidVaultSigner,
+        constraint = vault_config.status == VAULT_STATUS_ACTIVE
+            || vault_config.status == VAULT_STATUS_MIGRATING
+            @ VaultError::VaultInactive,
+    )]
     pub vault_config: Account<'info, VaultConfig>,
 
     pub system_program: Program<'info, System>,

@@ -49,10 +49,16 @@ pub fn handler(
     _receipt_message: Vec<u8>,
 ) -> Result<()> {
     // Verify Ed25519 signature via precompile
-    verify_ed25519_signature(
+    let signed_message = verify_ed25519_signature(
         &ctx.accounts.instructions_sysvar,
         &ctx.accounts.vault_config.vault_signer_pubkey,
     )?;
+
+    // Verify message matches receipt_message (the raw ParticipantReceipt bytes)
+    require!(
+        signed_message == _receipt_message,
+        VaultError::InvalidParticipantReceipt
+    );
 
     let clock = Clock::get()?;
 

@@ -48,10 +48,16 @@ pub fn handler(
     );
 
     // Verify Ed25519 signature
-    verify_ed25519_signature(
+    let signed_message = verify_ed25519_signature(
         &ctx.accounts.instructions_sysvar,
         &ctx.accounts.vault_config.vault_signer_pubkey,
     )?;
+
+    // Verify message matches the newer receipt message
+    require!(
+        signed_message == _newer_receipt_message,
+        VaultError::InvalidParticipantReceipt
+    );
 
     // Update with newer receipt data
     let request = &mut ctx.accounts.force_settle_request;

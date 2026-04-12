@@ -81,7 +81,23 @@ pub fn handler(
     require!(clock.unix_timestamp <= expires_at, VaultError::WithdrawExpired);
 
     // Verify Ed25519 signature via precompile instruction
-    verify_ed25519_signature(&ctx.accounts.instructions_sysvar, &vault.vault_signer_pubkey)?;
+    let signed_message =
+        verify_ed25519_signature(&ctx.accounts.instructions_sysvar, &vault.vault_signer_pubkey)?;
+
+    // Verify message content matches WithdrawAuthorization:
+    // client (32) + recipient_ata (32) + amount (8) + withdraw_nonce (8) + expires_at (8) + vault_config (32) = 120 bytes
+    let mut expected_message = Vec::with_capacity(120);
+    expected_message.extend_from_slice(ctx.accounts.client.key.as_ref());
+    expected_message.extend_from_slice(ctx.accounts.client_token_account.key().as_ref());
+    expected_message.extend_from_slice(&amount.to_le_bytes());
+    expected_message.extend_from_slice(&withdraw_nonce.to_le_bytes());
+    expected_message.extend_from_slice(&expires_at.to_le_bytes());
+    expected_message.extend_from_slice(ctx.accounts.vault_config.key().as_ref());
+
+    require!(
+        signed_message == expected_message,
+        VaultError::InvalidParticipantReceipt
+    );
 
     // Transfer tokens from vault to client
     let governance_key = vault.governance.key();

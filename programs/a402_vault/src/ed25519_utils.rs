@@ -3,10 +3,12 @@ use anchor_lang::solana_program::sysvar::instructions as sysvar_instructions;
 
 use crate::error::VaultError;
 
+/// Verify Ed25519 signature via the precompile instruction and return the signed message bytes.
+/// The caller is responsible for verifying the message content matches expected parameters.
 pub fn verify_ed25519_signature(
     instructions_sysvar: &AccountInfo,
     expected_pubkey: &Pubkey,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let current_index =
         sysvar_instructions::load_current_index_checked(instructions_sysvar)
             .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
@@ -50,5 +52,15 @@ pub fn verify_ed25519_signature(
         VaultError::InvalidVaultSigner
     );
 
-    Ok(())
+    // Extract message data
+    let message_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
+    let message_size = u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
+    require!(
+        ix_data.len() >= message_offset + message_size,
+        VaultError::InvalidEd25519Instruction
+    );
+
+    let message = ix_data[message_offset..message_offset + message_size].to_vec();
+
+    Ok(message)
 }

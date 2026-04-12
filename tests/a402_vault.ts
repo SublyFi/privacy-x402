@@ -8,9 +8,18 @@ import {
   getAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import { Keypair, PublicKey, SystemProgram, SYSVAR_INSTRUCTIONS_PUBKEY } from "@solana/web3.js";
+import {
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  Ed25519Program,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import { expect } from "chai";
 import BN from "bn.js";
+import nacl from "tweetnacl";
 
 describe("a402_vault", () => {
   const provider = anchor.AnchorProvider.env();
@@ -164,6 +173,371 @@ describe("a402_vault", () => {
     });
   });
 
+  describe("withdraw", () => {
+    let withdrawClient: Keypair;
+    let withdrawClientTokenAccount: PublicKey;
+    const withdrawAmount = 500_000; // 0.5 USDC
+
+    before(async () => {
+      withdrawClient = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(
+        withdrawClient.publicKey,
+        2 * anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig);
+
+      // Create client token account
+      withdrawClientTokenAccount = await createAccount(
+        provider.connection,
+        withdrawClient,
+        usdcMint,
+        withdrawClient.publicKey
+      );
+
+      // Deposit funds first
+      const depositTokenAccount = await createAccount(
+        provider.connection,
+        withdrawClient,
+        usdcMint,
+        withdrawClient.publicKey,
+        Keypair.generate() // separate account for deposit
+      );
+      await mintTo(
+        provider.connection,
+        (governance as any).payer,
+        usdcMint,
+        depositTokenAccount,
+        governance.publicKey,
+        2_000_000
+      );
+      await program.methods
+        .deposit(new BN(2_000_000))
+        .accounts({
+          client: withdrawClient.publicKey,
+          vaultConfig: vaultConfigPda,
+          clientTokenAccount: depositTokenAccount,
+          vaultTokenAccount: vaultTokenAccountPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([withdrawClient])
+        .rpc();
+    });
+
+    function buildWithdrawMessage(
+      client: PublicKey,
+      recipientAta: PublicKey,
+      amount: number,
+      withdrawNonce: number,
+      expiresAt: number,
+      vaultConfig: PublicKey
+    ): Buffer {
+      const buf = Buffer.alloc(120);
+      let offset = 0;
+      buf.set(client.toBuffer(), offset); offset += 32;
+      buf.set(recipientAta.toBuffer(), offset); offset += 32;
+      buf.writeBigUInt64LE(BigInt(amount), offset); offset += 8;
+      buf.writeBigUInt64LE(BigInt(withdrawNonce), offset); offset += 8;
+      buf.writeBigInt64LE(BigInt(expiresAt), offset); offset += 8;
+      buf.set(vaultConfig.toBuffer(), offset);
+      return buf;
+    }
+
+    it("withdraws with valid Ed25519 signature", async () => {
+      const withdrawNonce = 1;
+      const slot = await provider.connection.getSlot();
+      const blockTime = await provider.connection.getBlockTime(slot);
+      const expiresAt = blockTime! + 600;
+
+      const message = buildWithdrawMessage(
+        withdrawClient.publicKey,
+        withdrawClientTokenAccount,
+        withdrawAmount,
+        withdrawNonce,
+        expiresAt,
+        vaultConfigPda
+      );
+
+      const signature = nacl.sign.detached(
+        message,
+        vaultSignerKeypair.secretKey
+      );
+
+      const [usedNoncePda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("withdraw_nonce"),
+          vaultConfigPda.toBuffer(),
+          withdrawClient.publicKey.toBuffer(),
+          new BN(withdrawNonce).toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
+      );
+
+      const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+        privateKey: vaultSignerKeypair.secretKey,
+        message: message,
+      });
+
+      const withdrawIx = await program.methods
+        .withdraw(
+          new BN(withdrawAmount),
+          new BN(withdrawNonce),
+          new BN(expiresAt),
+          Array.from(signature) as any
+        )
+        .accounts({
+          client: withdrawClient.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          clientTokenAccount: withdrawClientTokenAccount,
+          usedWithdrawNonce: usedNoncePda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+
+      const latestBlockhash = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: withdrawClient.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [ed25519Ix, withdrawIx],
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(messageV0);
+      tx.sign([withdrawClient]);
+
+      const txSig = await provider.connection.sendTransaction(tx);
+      await provider.connection.confirmTransaction({
+        signature: txSig,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      });
+
+      const clientToken = await getAccount(
+        provider.connection,
+        withdrawClientTokenAccount
+      );
+      expect(Number(clientToken.amount)).to.equal(withdrawAmount);
+    });
+
+    it("rejects withdraw with wrong signer", async () => {
+      const withdrawNonce = 2;
+      const slot = await provider.connection.getSlot();
+      const blockTime = await provider.connection.getBlockTime(slot);
+      const expiresAt = blockTime! + 600;
+
+      const fakeSigner = Keypair.generate();
+
+      const message = buildWithdrawMessage(
+        withdrawClient.publicKey,
+        withdrawClientTokenAccount,
+        withdrawAmount,
+        withdrawNonce,
+        expiresAt,
+        vaultConfigPda
+      );
+
+      const signature = nacl.sign.detached(message, fakeSigner.secretKey);
+
+      const [usedNoncePda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("withdraw_nonce"),
+          vaultConfigPda.toBuffer(),
+          withdrawClient.publicKey.toBuffer(),
+          new BN(withdrawNonce).toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
+      );
+
+      // Ed25519 instruction signed by fake signer
+      const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+        privateKey: fakeSigner.secretKey,
+        message: message,
+      });
+
+      const withdrawIx = await program.methods
+        .withdraw(
+          new BN(withdrawAmount),
+          new BN(withdrawNonce),
+          new BN(expiresAt),
+          Array.from(signature) as any
+        )
+        .accounts({
+          client: withdrawClient.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          clientTokenAccount: withdrawClientTokenAccount,
+          usedWithdrawNonce: usedNoncePda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+
+      const latestBlockhash = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: withdrawClient.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [ed25519Ix, withdrawIx],
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(messageV0);
+      tx.sign([withdrawClient]);
+
+      try {
+        await provider.connection.sendTransaction(tx);
+        await new Promise((r) => setTimeout(r, 1000));
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        // Transaction should fail with InvalidVaultSigner
+        expect(err.toString()).to.include("Error");
+      }
+    });
+
+    it("rejects withdraw with mismatched message content", async () => {
+      const withdrawNonce = 3;
+      const slot = await provider.connection.getSlot();
+      const blockTime = await provider.connection.getBlockTime(slot);
+      const expiresAt = blockTime! + 600;
+
+      // Build message with wrong amount
+      const wrongMessage = buildWithdrawMessage(
+        withdrawClient.publicKey,
+        withdrawClientTokenAccount,
+        999_999, // wrong amount
+        withdrawNonce,
+        expiresAt,
+        vaultConfigPda
+      );
+
+      const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+        privateKey: vaultSignerKeypair.secretKey,
+        message: wrongMessage,
+      });
+
+      const signature = nacl.sign.detached(wrongMessage, vaultSignerKeypair.secretKey);
+
+      const [usedNoncePda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("withdraw_nonce"),
+          vaultConfigPda.toBuffer(),
+          withdrawClient.publicKey.toBuffer(),
+          new BN(withdrawNonce).toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
+      );
+
+      const withdrawIx = await program.methods
+        .withdraw(
+          new BN(withdrawAmount), // actual amount differs from signed amount
+          new BN(withdrawNonce),
+          new BN(expiresAt),
+          Array.from(signature) as any
+        )
+        .accounts({
+          client: withdrawClient.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          clientTokenAccount: withdrawClientTokenAccount,
+          usedWithdrawNonce: usedNoncePda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+
+      const latestBlockhash = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: withdrawClient.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [ed25519Ix, withdrawIx],
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(messageV0);
+      tx.sign([withdrawClient]);
+
+      try {
+        await provider.connection.sendTransaction(tx);
+        await new Promise((r) => setTimeout(r, 1000));
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        expect(err.toString()).to.include("Error");
+      }
+    });
+
+    it("rejects nonce replay", async () => {
+      // Try to use nonce=1 again (already used above)
+      const withdrawNonce = 1;
+      const slot = await provider.connection.getSlot();
+      const blockTime = await provider.connection.getBlockTime(slot);
+      const expiresAt = blockTime! + 600;
+
+      const message = buildWithdrawMessage(
+        withdrawClient.publicKey,
+        withdrawClientTokenAccount,
+        withdrawAmount,
+        withdrawNonce,
+        expiresAt,
+        vaultConfigPda
+      );
+
+      const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+        privateKey: vaultSignerKeypair.secretKey,
+        message: message,
+      });
+
+      const signature = nacl.sign.detached(message, vaultSignerKeypair.secretKey);
+
+      const [usedNoncePda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("withdraw_nonce"),
+          vaultConfigPda.toBuffer(),
+          withdrawClient.publicKey.toBuffer(),
+          new BN(withdrawNonce).toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
+      );
+
+      const withdrawIx = await program.methods
+        .withdraw(
+          new BN(withdrawAmount),
+          new BN(withdrawNonce),
+          new BN(expiresAt),
+          Array.from(signature) as any
+        )
+        .accounts({
+          client: withdrawClient.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          clientTokenAccount: withdrawClientTokenAccount,
+          usedWithdrawNonce: usedNoncePda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+
+      const latestBlockhash = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: withdrawClient.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [ed25519Ix, withdrawIx],
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(messageV0);
+      tx.sign([withdrawClient]);
+
+      try {
+        await provider.connection.sendTransaction(tx);
+        await new Promise((r) => setTimeout(r, 1000));
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        // PDA already initialized → should fail
+        expect(err.toString()).to.include("Error");
+      }
+    });
+  });
+
   describe("settle_vault", () => {
     let providerKeypair: Keypair;
     let providerTokenAccount: PublicKey;
@@ -259,6 +633,68 @@ describe("a402_vault", () => {
 
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
       expect(vault.lifetimeSettled.toNumber()).to.equal(settleAmount);
+    });
+
+    it("settles to multiple providers in one batch", async () => {
+      const provider2Keypair = Keypair.generate();
+      const sig3 = await provider.connection.requestAirdrop(
+        provider2Keypair.publicKey,
+        2 * anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig3);
+
+      const provider2TokenAccount = await createAccount(
+        provider.connection,
+        provider2Keypair,
+        usdcMint,
+        provider2Keypair.publicKey
+      );
+
+      const amount1 = 50_000;
+      const amount2 = 75_000;
+
+      const vaultBefore = await program.account.vaultConfig.fetch(vaultConfigPda);
+      const settledBefore = vaultBefore.lifetimeSettled.toNumber();
+
+      await program.methods
+        .settleVault(new BN(10), new Array(32).fill(0), [
+          {
+            providerTokenAccount: providerTokenAccount,
+            amount: new BN(amount1),
+          },
+          {
+            providerTokenAccount: provider2TokenAccount,
+            amount: new BN(amount2),
+          },
+        ])
+        .accounts({
+          vaultSigner: vaultSignerKeypair.publicKey,
+          vaultConfig: vaultConfigPda,
+          vaultTokenAccount: vaultTokenAccountPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts([
+          {
+            pubkey: providerTokenAccount,
+            isWritable: true,
+            isSigner: false,
+          },
+          {
+            pubkey: provider2TokenAccount,
+            isWritable: true,
+            isSigner: false,
+          },
+        ])
+        .signers([vaultSignerKeypair])
+        .rpc();
+
+      const p2Token = await getAccount(provider.connection, provider2TokenAccount);
+      expect(Number(p2Token.amount)).to.equal(amount2);
+
+      const vaultAfter = await program.account.vaultConfig.fetch(vaultConfigPda);
+      expect(vaultAfter.lifetimeSettled.toNumber()).to.equal(
+        settledBefore + amount1 + amount2
+      );
     });
 
     it("rejects settlement from non-vault-signer", async () => {
@@ -467,6 +903,32 @@ describe("a402_vault", () => {
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
       expect(vault.auditorEpoch).to.equal(1);
       expect(vault.auditorMasterPubkey).to.deep.equal(newAuditorPubkey);
+    });
+  });
+
+  describe("record_audit", () => {
+    it("rejects record_audit from non-vault-signer", async () => {
+      const fakeSigner = Keypair.generate();
+      const sig = await provider.connection.requestAirdrop(
+        fakeSigner.publicKey,
+        anchor.web3.LAMPORTS_PER_SOL
+      );
+      await provider.connection.confirmTransaction(sig);
+
+      try {
+        await program.methods
+          .recordAudit(new BN(1), new Array(32).fill(0), [])
+          .accounts({
+            vaultSigner: fakeSigner.publicKey,
+            vaultConfig: vaultConfigPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([fakeSigner])
+          .rpc();
+        expect.fail("Should have thrown");
+      } catch (err: any) {
+        expect(err.error.errorCode.code).to.equal("InvalidVaultSigner");
+      }
     });
   });
 
