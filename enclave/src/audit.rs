@@ -65,25 +65,6 @@ pub fn derive_provider_key(
     }
 }
 
-/// Derive the master ElGamal key pair from the master secret.
-/// Used for decrypting all audit records regardless of provider.
-pub fn derive_master_key(master_secret: &[u8; 32]) -> ElGamalKeyPair {
-    let hk = Hkdf::<Sha256>::new(Some(b"a402-audit-master-v1"), master_secret);
-    let mut okm = [0u8; 64];
-    hk.expand(b"master", &mut okm)
-        .expect("HKDF expand should not fail");
-
-    let secret = Scalar::from_bytes_mod_order_wide(&okm);
-    let public = &secret * RISTRETTO_BASEPOINT_POINT;
-    let public_compressed = public.compress().to_bytes();
-
-    ElGamalKeyPair {
-        secret,
-        public,
-        public_compressed,
-    }
-}
-
 /// Encrypt a 32-byte message using ElGamal (ECIES variant).
 ///
 /// Returns 64 bytes: C1 (32 bytes) || C2 (32 bytes)

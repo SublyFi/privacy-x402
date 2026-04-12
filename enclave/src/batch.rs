@@ -1,9 +1,10 @@
+use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use tokio::time::{self, Duration};
 use tracing::{info, warn};
 
-use crate::audit::{self, EncryptedAuditRecord};
+use crate::audit;
 use crate::handlers::AppState;
 use crate::state::ReservationStatus;
 use crate::wal::WalEntry;
@@ -15,6 +16,8 @@ const MAX_SETTLEMENTS_PER_TX: usize = 20;
 const MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT: usize = 4;
 const MIN_BATCH_PROVIDERS: usize = 2;
 const RESERVATION_TIMEOUT_SEC: i64 = 60;
+/// Max age (seconds) for orphaned settlement_history entries before cleanup
+const SETTLEMENT_HISTORY_MAX_AGE_SEC: i64 = 1800;
 
 /// Settlement entry ready for on-chain batch
 #[derive(Debug, Clone)]
@@ -137,7 +140,7 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
     let auditor_epoch = state
         .vault
         .auditor_epoch
-        .load(std::sync::atomic::Ordering::SeqCst) as u32;
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     let mut audit_entries: Vec<BatchAuditEntry> = Vec::new();
 
@@ -161,6 +164,16 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
         }
     }
 
+    // Validate 1:1 pairing between settlements and audit records (design doc §6.3 l.800)
+    if entries.len() != audit_entries.len() {
+        warn!(
+            settlements = entries.len(),
+            audits = audit_entries.len(),
+            "Settlement/audit count mismatch — skipping batch"
+        );
+        return;
+    }
+
     info!(
         batch_id,
         provider_count = entries.len(),
@@ -169,28 +182,44 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
         "Batch settlement ready for on-chain submission"
     );
 
-    // Phase 2: Submit atomic settle_vault + record_audit chunks
+    // Phase 2: Submit atomic settle_vault + record_audit in chunks
     // Per design doc §6.3:
-    //   - Without audit: up to 20 settlements per tx
-    //   - With audit: up to 4-5 settlements per tx (AuditRecord PDA creation is expensive)
-    //
-    // TODO: Submit to on-chain via Solana RPC
-    // For each chunk:
-    //   1. Build settle_vault instruction with chunk of settlements
-    //   2. Build record_audit instruction with corresponding audit records
-    //   3. Combine in same transaction for atomic execution
-    //   4. Sign with vault_signer and submit
+    //   - With audit: up to MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT per tx
+    //   - Each chunk gets its own batch_chunk_hash for atomic pairing verification
+    let chunks = build_batch_chunks(&entries, &audit_entries);
 
-    if let Err(e) = state
-        .wal
-        .append(WalEntry::BatchSubmitted {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let batch_chunk_hash = compute_batch_chunk_hash(batch_id, &chunk.settlements, &chunk.audits);
+
+        info!(
             batch_id,
-            provider_count: entries.len(),
-            total_amount,
-        })
-        .await
-    {
-        warn!("Failed to append batch WAL entry: {e}");
+            chunk_idx,
+            chunk_size = chunk.settlements.len(),
+            chunk_hash = hex::encode(batch_chunk_hash),
+            "Submitting atomic settle_vault + record_audit chunk"
+        );
+
+        // TODO: Build and submit Solana transaction via RPC:
+        //   1. Build settle_vault instruction with chunk.settlements
+        //   2. Build record_audit instruction with chunk.audits
+        //   3. Add AuditRecord PDA accounts to remaining_accounts
+        //   4. Combine in same VersionedTransaction
+        //   5. Sign with vault_signer and send via RPC
+        //
+        // This requires Solana RPC client integration which depends on
+        // enclave networking setup (vsock relay in production).
+
+        if let Err(e) = state
+            .wal
+            .append(WalEntry::BatchSubmitted {
+                batch_id,
+                provider_count: chunk.settlements.len(),
+                total_amount: chunk.settlements.iter().map(|s| s.amount).sum(),
+            })
+            .await
+        {
+            warn!(chunk_idx, "Failed to append batch chunk WAL entry: {e}");
+        }
     }
 
     // Clean up settlement history for processed records
@@ -204,7 +233,55 @@ async fn fire_batch(state: &Arc<AppState>, now: i64) {
     *state.vault.last_batch_at.write().await = now;
 }
 
-/// Periodically expire stale reservations
+/// A chunk of settlements + audits to be submitted in a single atomic transaction.
+struct BatchChunk {
+    settlements: Vec<BatchSettlementEntry>,
+    audits: Vec<BatchAuditEntry>,
+}
+
+/// Split settlements and audits into chunks of MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT.
+fn build_batch_chunks(
+    settlements: &[BatchSettlementEntry],
+    audits: &[BatchAuditEntry],
+) -> Vec<BatchChunk> {
+    settlements
+        .chunks(MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT)
+        .zip(audits.chunks(MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT))
+        .map(|(s_chunk, a_chunk)| BatchChunk {
+            settlements: s_chunk.to_vec(),
+            audits: a_chunk.to_vec(),
+        })
+        .collect()
+}
+
+/// Compute a deterministic hash for an atomic chunk (settle + audit pair).
+/// Used as batch_chunk_hash in both settle_vault and record_audit instructions
+/// to ensure they reference the same data.
+fn compute_batch_chunk_hash(
+    batch_id: u64,
+    settlements: &[BatchSettlementEntry],
+    audits: &[BatchAuditEntry],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"a402-batch-chunk-v1");
+    hasher.update(batch_id.to_le_bytes());
+    for s in settlements {
+        hasher.update(s.provider_token_account.as_ref());
+        hasher.update(s.amount.to_le_bytes());
+    }
+    for a in audits {
+        hasher.update(&a.encrypted_sender);
+        hasher.update(&a.encrypted_amount);
+        hasher.update(a.provider.as_ref());
+        hasher.update(a.timestamp.to_le_bytes());
+    }
+    let result = hasher.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&result);
+    hash
+}
+
+/// Periodically expire stale reservations and clean up old settlement history
 async fn reservation_expiry_loop(state: Arc<AppState>) {
     let mut interval = time::interval(Duration::from_secs(5));
 
@@ -212,6 +289,7 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
         interval.tick().await;
         let now = chrono::Utc::now().timestamp();
 
+        // Expire stale reservations
         let expired_ids: Vec<String> = state
             .vault
             .reservations
@@ -236,6 +314,26 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
 
                 info!(verification_id = %ver_id, "Reservation expired, balance released");
             }
+        }
+
+        // Clean up orphaned settlement_history entries that are older than the max age.
+        // These can accumulate when batches don't fire (e.g., provider count < MIN_BATCH_PROVIDERS).
+        let stale_sids: Vec<String> = state
+            .vault
+            .settlement_history
+            .iter()
+            .filter(|r| now - r.timestamp > SETTLEMENT_HISTORY_MAX_AGE_SEC)
+            .map(|r| r.settlement_id.clone())
+            .collect();
+
+        for sid in &stale_sids {
+            state.vault.settlement_history.remove(sid);
+        }
+        if !stale_sids.is_empty() {
+            warn!(
+                count = stale_sids.len(),
+                "Cleaned up stale settlement_history entries"
+            );
         }
     }
 }

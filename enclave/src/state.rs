@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -90,8 +90,8 @@ pub struct VaultState {
     pub attestation_policy_hash: [u8; 32],
     /// Auditor master secret for ElGamal encryption (Phase 2)
     pub auditor_master_secret: RwLock<[u8; 32]>,
-    /// Current auditor epoch
-    pub auditor_epoch: AtomicU64,
+    /// Current auditor epoch (u32 to match on-chain AuditRecord.auditor_epoch)
+    pub auditor_epoch: AtomicU32,
     pub client_balances: DashMap<Pubkey, ClientBalance>,
     pub reservations: DashMap<String, Reservation>,
     pub payment_id_index: DashMap<String, String>,
@@ -133,7 +133,7 @@ impl VaultState {
             usdc_mint,
             attestation_policy_hash,
             auditor_master_secret: RwLock::new([0u8; 32]),
-            auditor_epoch: AtomicU64::new(0),
+            auditor_epoch: AtomicU32::new(0),
             client_balances: DashMap::new(),
             reservations: DashMap::new(),
             payment_id_index: DashMap::new(),

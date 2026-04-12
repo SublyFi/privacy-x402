@@ -295,14 +295,34 @@ function decryptRecordWithSecret(
   }
 }
 
+// Lazily resolved Ristretto255 dependency
+let _RistrettoPoint: any = null;
+let _ristrettoChecked = false;
+
+function getRistrettoPoint(): any {
+  if (!_ristrettoChecked) {
+    _ristrettoChecked = true;
+    try {
+      _RistrettoPoint = require("@noble/curves/ed25519").RistrettoPoint;
+    } catch {
+      // not installed
+    }
+  }
+  if (!_RistrettoPoint) {
+    throw new Error(
+      "@noble/curves is required for audit record decryption. Install it with: npm install @noble/curves"
+    );
+  }
+  return _RistrettoPoint;
+}
+
 /**
  * ElGamal decryption (ECIES variant on Ristretto255).
  *
  * Ciphertext: C1 (32 bytes) || C2 (32 bytes)
  * Returns 32-byte plaintext.
  *
- * This function dynamically imports @noble/curves for Ristretto255.
- * Falls back to a stub if not available.
+ * Requires @noble/curves to be installed.
  */
 function elgamalDecrypt(
   secretKey: Uint8Array,
@@ -310,38 +330,31 @@ function elgamalDecrypt(
 ): Uint8Array | null {
   if (ciphertext.length !== 64) return null;
 
-  try {
-    // Dynamic import to handle optional dependency
-    // In production, @noble/curves must be installed
-    const { RistrettoPoint } = require("@noble/curves/ed25519");
+  const RistrettoPoint = getRistrettoPoint();
 
-    const c1Bytes = ciphertext.slice(0, 32);
-    const c2 = ciphertext.slice(32, 64);
+  const c1Bytes = ciphertext.slice(0, 32);
+  const c2 = ciphertext.slice(32, 64);
 
-    // Decompress C1 point
-    const c1Point = RistrettoPoint.fromHex(
-      Buffer.from(c1Bytes).toString("hex")
-    );
+  // Decompress C1 point
+  const c1Point = RistrettoPoint.fromHex(
+    Buffer.from(c1Bytes).toString("hex")
+  );
 
-    // Compute shared_secret = secret * C1
-    // The secret is 64 bytes from HKDF, needs to be reduced mod l
-    const sharedPoint = c1Point.multiply(bytesToScalar(secretKey));
-    const sharedBytes = Buffer.from(sharedPoint.toRawBytes());
+  // Compute shared_secret = secret * C1
+  // The secret is 64 bytes from HKDF, needs to be reduced mod l
+  const sharedPoint = c1Point.multiply(bytesToScalar(secretKey));
+  const sharedBytes = Buffer.from(sharedPoint.toRawBytes());
 
-    // Derive mask
-    const mask = kdfMask(sharedBytes);
+  // Derive mask
+  const mask = kdfMask(sharedBytes);
 
-    // XOR to recover plaintext
-    const plaintext = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) {
-      plaintext[i] = c2[i] ^ mask[i];
-    }
-
-    return plaintext;
-  } catch {
-    // @noble/curves not available — return null
-    return null;
+  // XOR to recover plaintext
+  const plaintext = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    plaintext[i] = c2[i] ^ mask[i];
   }
+
+  return plaintext;
 }
 
 /**
@@ -354,9 +367,8 @@ function bytesToScalar(bytes: Uint8Array): bigint {
     "7237005577332262213973186563042994240857116359379907606001950938285454250989"
   );
 
-  // Convert bytes to big-endian bigint, then mod l
+  // Convert LE bytes to bigint, then mod l
   let n = BigInt(0);
-  // For HKDF output (64 bytes), use all bytes in LE order
   const len = Math.min(bytes.length, 64);
   for (let i = len - 1; i >= 0; i--) {
     n = (n << BigInt(8)) | BigInt(bytes[i]);
