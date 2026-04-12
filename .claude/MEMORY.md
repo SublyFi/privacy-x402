@@ -324,6 +324,37 @@ Anchor program implemented and all tests passing.
 - Watchtower永続化は現在JSON形式。本番ではRocksDB等への移行推奨
 - force_settle_finalize の時間経過テストはBankrunのtime warp機能が必要で制限あり
 
+## Phase 1-4 仕様準拠レビュー + Critical修正 (2026-04-12) ✅
+
+### レビュー方法
+- docs/a402-solana-design.md (§1-10) と docs/a402-svm-v1-protocol.md (§1-12) の全仕様を実装と突き合わせ
+- オンチェーンプログラム、Enclave facilitator、Client SDK、Provider middleware、Watchtower、Parent instanceを網羅的に確認
+
+### 修正済み Critical 9件
+
+**Middleware (C1-C4):**
+- C1: PAYMENT-RESPONSE ヘッダ追加 (§8.6) — scheme, paymentId, verificationId, settlementId, batchId, txSignature, participantReceipt
+- C2: settle順序修正 — レスポンス返却前にsettle完了を待機 (§8.3 WAL durability)
+- C3: Single-Execution Rule実装 (§8.4) — verificationId単位のin-memory execution cacheで重複実行防止
+- C4: /verify呼び出しにpaymentDetailsオブジェクト追加 (§8.2)
+
+**Enclave Facilitator (C5-C9):**
+- C5: /verify, /settle, /cancelにAuthorization: Bearer認証追加 (§8.2 要件1)
+- C6: payTo/assetMint/networkのprovider登録情報照合 (§8.2 要件7)
+- C7: paymentDetailsHashのcanonical JSON再計算検証 (§8.2 要件3)
+- C8: /cancelにprovider_mismatchチェック追加 — reservation発行先providerのみキャンセル可 (§8.5)
+- C9: request originのallowedOrigins照合 (§4)
+
+### 残存 Medium 3件 (未修正、本番デプロイ前に対応)
+- M1: SDK verifyAttestation()のPCR検証がstub (§5.3) — 本番Nitro環境で実装
+- M2: Enclave側のVault Statusオフチェーン検証なし — Pause時にオフチェーン予約可能
+- M3: DISPUTE_WINDOW_SEC値の確定 — 設計書内に24時間と7日の2つの値が存在
+
+### 残存 Low 3件
+- L1: Watchtower challenger.rsのForceSettleRequestサイズがハードコード (219)
+- L2: Parent instanceのrelay失敗時にtokio::select!で全体停止
+- L3: Client SDK paymentIdのローカル重複チェックなし
+
 ## Remaining for Phase 5
 - Arcium MXE Integration (encrypted-ixs/)
 - Confidential computation circuits
