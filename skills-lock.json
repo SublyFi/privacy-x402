@@ -21,6 +21,11 @@
       "sourceType": "github",
       "computedHash": "2962142fe40eb3df3a98b250bbee976c043f3c14ab32e48ff723131315e07754"
     },
+    "arcium": {
+      "source": "arcium-hq/agent-skills",
+      "sourceType": "github",
+      "computedHash": "a18d82537d564362ecc41a0fb71e471580998260dbfe53e01c65fba011dec0ec"
+    },
     "arcium-program-development": {
       "source": "sicmundu/arcium-program-skill",
       "sourceType": "github",

@@ -1,0 +1,3 @@
+- [Implementation progress](.claude/MEMORY.md) — Phase 1-4 complete. 25 enclave + 6 watchtower + 27 on-chain = 58 tests passing.
+- [Architecture Decision](project_architecture_decision.md) — TEE for x402 payments + Arcium MPC for yield vault. ZK future path.
+- [Hackathon Strategy](project_hackathon_strategy.md) — Copilot deep dive: high winning potential, Arcium sponsor angle, PMF medium-high.
