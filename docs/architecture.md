@@ -17,7 +17,7 @@ graph TB
         YV --- AUTH
     end
 
-    subgraph TEE["AWS Nitro Enclave"]
+    subgraph TEE["TEE - AWS Nitro Enclave"]
         direction TB
         FAC["x402 Privacy Facilitator\n/verify /settle /cancel"]
         BATCH["Batch Engine\n120s window, max 20 settlements"]
@@ -79,7 +79,7 @@ graph TB
 sequenceDiagram
     participant Agent as AI Agent
     participant Arcium as Arcium MPC
-    participant TEE as Nitro Enclave
+    participant TEE as TEE Nitro Enclave
     participant Provider as API Provider
     participant Chain as Solana
 
