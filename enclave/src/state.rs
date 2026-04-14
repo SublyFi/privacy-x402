@@ -118,7 +118,10 @@ pub struct ProviderRegistration {
     pub asset_mint: Pubkey,
     pub allowed_origins: Vec<String>,
     pub auth_mode: String,
-    pub api_key_hash: Vec<u8>,
+    #[serde(default)]
+    pub api_key_hash: Option<Vec<u8>>,
+    #[serde(default)]
+    pub mtls_cert_fingerprint: Option<Vec<u8>>,
 }
 
 /// A single payment reservation
@@ -158,6 +161,15 @@ pub struct SolanaRuntimeConfig {
     pub ws_url: String,
 }
 
+/// Last synchronized view of the on-chain vault lifecycle state.
+#[derive(Debug, Clone)]
+pub struct VaultLifecycle {
+    pub status: u8,
+    pub successor_vault: Pubkey,
+    pub exit_deadline: i64,
+    pub synced_at_ms: i64,
+}
+
 /// Core enclave vault state
 pub struct VaultState {
     pub vault_config: Pubkey,
@@ -177,6 +189,8 @@ pub struct VaultState {
     pub providers: DashMap<String, ProviderRegistration>,
     /// Settlement history for audit record generation
     pub settlement_history: DashMap<String, SettlementRecord>,
+    /// Batch confirmation lookup keyed by settlement_id
+    pub settlement_batches: DashMap<String, SettlementBatchInfo>,
     /// Active Service Channels (Phase 3 ASC)
     pub active_channels: DashMap<ChannelId, ChannelState>,
     pub receipt_nonce: AtomicU64,
@@ -184,6 +198,7 @@ pub struct VaultState {
     pub snapshot_seqno: AtomicU64,
     pub last_batch_at: RwLock<i64>,
     pub last_finalized_slot: AtomicU64,
+    pub lifecycle: RwLock<VaultLifecycle>,
 }
 
 /// Record of a completed settlement (for audit record generation)
@@ -194,6 +209,13 @@ pub struct SettlementRecord {
     pub provider: Pubkey,
     pub amount: u64,
     pub timestamp: i64,
+}
+
+/// Batch confirmation metadata for a completed settlement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementBatchInfo {
+    pub batch_id: u64,
+    pub tx_signature: String,
 }
 
 impl VaultState {
@@ -222,12 +244,23 @@ impl VaultState {
             provider_credits: DashMap::new(),
             providers: DashMap::new(),
             settlement_history: DashMap::new(),
+            settlement_batches: DashMap::new(),
             active_channels: DashMap::new(),
             receipt_nonce: AtomicU64::new(1),
             withdraw_nonce: AtomicU64::new(1),
             snapshot_seqno: AtomicU64::new(0),
             last_batch_at: RwLock::new(0),
             last_finalized_slot: AtomicU64::new(0),
+            lifecycle: RwLock::new(VaultLifecycle {
+                status: a402_vault::constants::VAULT_STATUS_ACTIVE,
+                successor_vault: Pubkey::default(),
+                exit_deadline: 0,
+                synced_at_ms: if cfg!(test) {
+                    chrono::Utc::now().timestamp_millis()
+                } else {
+                    0
+                },
+            }),
         }
     }
 
@@ -312,6 +345,87 @@ impl VaultState {
         Ok(())
     }
 
+    /// Apply a confirmed on-chain batch to local reservation/provider-credit state.
+    pub fn apply_batch_confirmation(
+        &self,
+        settlement_ids: &[String],
+        batch_id: u64,
+        tx_signature: &str,
+    ) {
+        let mut affected_provider_ids = HashSet::new();
+
+        for settlement_id in settlement_ids {
+            self.settlement_history.remove(settlement_id);
+            self.settlement_batches.insert(
+                settlement_id.clone(),
+                SettlementBatchInfo {
+                    batch_id,
+                    tx_signature: tx_signature.to_string(),
+                },
+            );
+
+            if let Some(mut reservation) = self.reservations.iter_mut().find(|entry| {
+                entry
+                    .settlement_id
+                    .as_ref()
+                    .map(|value| value == settlement_id)
+                    .unwrap_or(false)
+            }) {
+                affected_provider_ids.insert(reservation.provider_id.clone());
+                if let Some(mut credit) = self.provider_credits.get_mut(&reservation.provider_id) {
+                    credit.credited_amount = credit.credited_amount.saturating_sub(reservation.amount);
+                    credit.settlement_ids.retain(|sid| sid != settlement_id);
+                }
+                reservation.status = ReservationStatus::BatchedOnchain;
+                continue;
+            }
+
+            for mut credit in self.provider_credits.iter_mut() {
+                if credit.settlement_ids.iter().any(|sid| sid == settlement_id) {
+                    affected_provider_ids.insert(credit.provider_id.clone());
+                    credit
+                        .settlement_ids
+                        .retain(|sid| sid != settlement_id);
+                    break;
+                }
+            }
+        }
+
+        let provider_ids_to_remove: Vec<String> = affected_provider_ids
+            .iter()
+            .filter_map(|provider_id| {
+                self.provider_credits.get(provider_id).and_then(|credit| {
+                    if credit.credited_amount == 0 || credit.settlement_ids.is_empty() {
+                        Some(provider_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        for provider_id in provider_ids_to_remove {
+            self.provider_credits.remove(&provider_id);
+            affected_provider_ids.remove(&provider_id);
+        }
+
+        for provider_id in affected_provider_ids {
+            if let Some(mut credit) = self.provider_credits.get_mut(&provider_id) {
+                if let Some(oldest_credit_at) = credit
+                    .settlement_ids
+                    .iter()
+                    .filter_map(|settlement_id| {
+                        self.settlement_history
+                            .get(settlement_id)
+                            .map(|record| record.timestamp)
+                    })
+                    .min()
+                {
+                    credit.oldest_credit_at = oldest_credit_at;
+                }
+            }
+        }
+    }
+
     /// Sign a message with the vault signer key
     pub fn sign_message(&self, message: &[u8]) -> [u8; 64] {
         use ed25519_dalek::Signer;
@@ -363,5 +477,34 @@ impl VaultState {
         msg.extend_from_slice(&expires_at.to_le_bytes());
         msg.extend_from_slice(self.vault_config.as_ref());
         msg
+    }
+
+    /// Build a verification receipt message for signing.
+    pub fn build_verification_receipt_message(
+        &self,
+        verification_id: &str,
+        reservation_id: &str,
+        payment_id: &str,
+        client: &Pubkey,
+        provider_id: &str,
+        amount: u64,
+        request_hash_hex: &str,
+        payment_details_hash_hex: &str,
+        reservation_expires_at: i64,
+    ) -> Vec<u8> {
+        format!(
+            "A402-VERIFY-RECEIPT\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            verification_id,
+            reservation_id,
+            payment_id,
+            client,
+            provider_id,
+            amount,
+            request_hash_hex,
+            payment_details_hash_hex,
+            reservation_expires_at,
+            self.vault_config,
+        )
+        .into_bytes()
     }
 }

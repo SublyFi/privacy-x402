@@ -13,6 +13,7 @@ import type {
   AscDeliveryArtifact,
   AscDeliveryInput,
 } from "./types";
+import { postFacilitatorJson } from "./facilitator";
 
 const CURVE_ORDER =
   723700557733226221397318656304299424085711635937990760600195093828545425857n;
@@ -209,30 +210,21 @@ export async function submitAscDelivery(
   channelId: string,
   delivery: AscDeliveryArtifact
 ): Promise<AscDeliverResponse> {
-  const res = await globalThis.fetch(
+  const body = (await postFacilitatorJson(
     `${config.facilitatorUrl}/v1/channel/deliver`,
     {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`,
-        "x-a402-provider-auth": config.apiKey,
-      },
-      body: JSON.stringify({
-        channelId,
-        adaptorPoint: delivery.adaptorPoint,
-        preSigRPrime: delivery.preSigRPrime,
-        preSigSPrime: delivery.preSigSPrime,
-        encryptedResult: delivery.encryptedResult,
-        resultHash: delivery.resultHash,
-        providerPubkey: delivery.providerPubkey,
-      }),
-    }
-  );
-
-  const body = (await res.json()) as { message?: string };
-  if (!res.ok) {
-    throw new Error(`ASC deliver failed: ${body.message || res.status}`);
+      channelId,
+      adaptorPoint: delivery.adaptorPoint,
+      preSigRPrime: delivery.preSigRPrime,
+      preSigSPrime: delivery.preSigSPrime,
+      encryptedResult: delivery.encryptedResult,
+      resultHash: delivery.resultHash,
+      providerPubkey: delivery.providerPubkey,
+    },
+    config
+  )) as AscDeliverResponse & { message?: string };
+  if (!body.ok) {
+    throw new Error(`ASC deliver failed: ${body.message || "unknown error"}`);
   }
 
   return body as AscDeliverResponse;

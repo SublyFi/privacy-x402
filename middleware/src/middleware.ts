@@ -4,7 +4,9 @@ import {
   A402MiddlewareOptions,
   A402ProviderConfig,
   A402Request,
+  SettlementStatusResponse,
 } from "./types";
+import { postFacilitatorJson } from "./facilitator";
 
 /**
  * In-memory execution cache for the Provider Single-Execution Rule (§8.4).
@@ -43,10 +45,11 @@ export function a402Middleware(options: A402MiddlewareOptions) {
     }
 
     const paymentSig = req.headers["payment-signature"] as string | undefined;
+    const requestContext = buildRequestContext(req);
 
     if (!paymentSig) {
       // Return 402 Payment Required
-      return send402(res, config, price);
+      return send402(res, config, price, requestContext);
     }
 
     // Decode and verify payment
@@ -56,22 +59,8 @@ export function a402Middleware(options: A402MiddlewareOptions) {
       );
       const payload = JSON.parse(payloadJson);
 
-      // Build request context for facilitator
-      const bodySha256 = createHash("sha256")
-        .update(req.body ? JSON.stringify(req.body) : "")
-        .digest("hex");
-
-      const origin = `${req.protocol}://${req.get("host")}`;
-
-      const requestContext = {
-        method: req.method.toUpperCase(),
-        origin,
-        pathAndQuery: req.originalUrl,
-        bodySha256,
-      };
-
       // Build paymentDetails from config for this request (§8.2 requirement)
-      const paymentDetails = buildPaymentDetails(config, price);
+      const paymentDetails = buildPaymentDetails(config, price, requestContext);
 
       // Call facilitator /verify (C4: include paymentDetails)
       const verifyRes = await callFacilitator(
@@ -81,7 +70,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
           paymentDetails,
           requestContext,
         },
-        config.apiKey
+        config
       );
 
       if (!verifyRes.ok) {
@@ -205,10 +194,94 @@ export function a402Middleware(options: A402MiddlewareOptions) {
   };
 }
 
+/**
+ * Express verify callback that preserves the exact request body bytes for
+ * A402 request binding. Use with express.json({ verify: captureA402RawBody }).
+ */
+export function captureA402RawBody(
+  req: Request,
+  _res: Response,
+  buf: Buffer
+): void {
+  (req as A402Request).rawBody = Buffer.from(buf);
+}
+
+function getRawRequestBody(req: A402Request): Buffer | string {
+  if (req.rawBody !== undefined) {
+    return req.rawBody;
+  }
+  if (typeof req.body === "string" || Buffer.isBuffer(req.body)) {
+    return req.body;
+  }
+  if (req.body === undefined || req.body === null) {
+    return "";
+  }
+  return JSON.stringify(req.body);
+}
+
+function buildRequestContext(req: Request): {
+  method: string;
+  origin: string;
+  pathAndQuery: string;
+  bodySha256: string;
+} {
+  const body = getRawRequestBody(req as A402Request);
+
+  return {
+    method: req.method.toUpperCase(),
+    origin: `${req.protocol}://${req.get("host")}`,
+    pathAndQuery: req.originalUrl,
+    bodySha256: createHash("sha256").update(body).digest("hex"),
+  };
+}
+
+function buildPaymentDetailsId(
+  config: A402ProviderConfig,
+  amount: string,
+  requestContext: {
+    method: string;
+    origin: string;
+    pathAndQuery: string;
+    bodySha256: string;
+  }
+): string {
+  const hash = createHash("sha256")
+    .update("A402-SVM-V1-PAYDET\n")
+    .update(config.providerId)
+    .update("\n")
+    .update(config.payTo)
+    .update("\n")
+    .update(config.network)
+    .update("\n")
+    .update(config.assetMint)
+    .update("\n")
+    .update(config.vaultConfig)
+    .update("\n")
+    .update(amount)
+    .update("\n")
+    .update(requestContext.method)
+    .update("\n")
+    .update(requestContext.origin)
+    .update("\n")
+    .update(requestContext.pathAndQuery)
+    .update("\n")
+    .update(requestContext.bodySha256)
+    .update("\n")
+    .digest("hex");
+
+  return `paydet_${hash.slice(0, 32)}`;
+}
+
 /** Build payment details object (§5) */
 function buildPaymentDetails(
   config: A402ProviderConfig,
-  amount: string
+  amount: string,
+  requestContext: {
+    method: string;
+    origin: string;
+    pathAndQuery: string;
+    bodySha256: string;
+  }
 ): Record<string, unknown> {
   return {
     scheme: "a402-svm-v1",
@@ -228,7 +301,7 @@ function buildPaymentDetails(
       signer: config.vaultSigner,
       attestationPolicyHash: config.attestationPolicyHash,
     },
-    paymentDetailsId: `paydet_${crypto.randomUUID()}`,
+    paymentDetailsId: buildPaymentDetailsId(config, amount, requestContext),
     verifyWindowSec: 60,
     maxSettlementDelaySec: 900,
     privacyMode: "vault-batched-v1",
@@ -239,10 +312,16 @@ function buildPaymentDetails(
 function send402(
   res: Response,
   config: A402ProviderConfig,
-  amount: string
+  amount: string,
+  requestContext: {
+    method: string;
+    origin: string;
+    pathAndQuery: string;
+    bodySha256: string;
+  }
 ): void {
   res.status(402).json({
-    accepts: [buildPaymentDetails(config, amount)],
+    accepts: [buildPaymentDetails(config, amount, requestContext)],
   });
 }
 
@@ -250,18 +329,20 @@ function send402(
 async function callFacilitator(
   url: string,
   body: any,
-  apiKey: string
+  config: A402ProviderConfig
 ): Promise<any> {
-  const res = await globalThis.fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  return postFacilitatorJson(url, body, config);
+}
 
-  return res.json();
+export async function lookupSettlementStatus(
+  config: A402ProviderConfig,
+  settlementId: string
+): Promise<SettlementStatusResponse> {
+  return callFacilitator(
+    `${config.facilitatorUrl}/v1/settlement/status`,
+    { settlementId },
+    config
+  ) as Promise<SettlementStatusResponse>;
 }
 
 /** Settle payment with facilitator and return settle result (C2: synchronous) */
@@ -285,7 +366,7 @@ async function settlePayment(
       resultHash,
       statusCode,
     },
-    config.apiKey
+    config
   );
 
   if (!res.ok) {

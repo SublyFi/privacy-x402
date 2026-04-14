@@ -361,3 +361,121 @@ Anchor program implemented and all tests passing.
 
 ## Remaining for Phase 6
 - Token-2022 Confidential Transfer for deposit privacy
+
+## Phase 4 Protocol Hardening (2026-04-15) ✅
+
+### Fixed in this pass
+- Enclave now synchronizes on-chain `VaultConfig.status` and enforces Phase 4 lifecycle rules off-chain:
+  - `/verify` rejects when vault is `Paused`, `Migrating`, or `Retired`
+  - `/settle` / `/cancel` allow `Migrating` only until `exit_deadline`
+  - `/withdraw-auth` mirrors the on-chain `withdraw` guard
+  - ASC endpoints now respect the same lifecycle boundaries
+- `paymentDetails` is now required on `/verify`, and the facilitator validates both:
+  - `paymentDetails.scheme == "a402-svm-v1"`
+  - canonical `paymentDetailsHash`
+- Provider auth was tightened to match the Phase 1-4 wire protocol more closely:
+  - `bearer` mode requires `Authorization: Bearer ...` plus `x-a402-provider-id`
+  - `api-key` mode accepts `x-a402-provider-auth` (and bearer fallback for compatibility)
+  - provider registration now rejects unsupported auth modes and invalid API key hashes
+- Middleware no longer regenerates a random `paymentDetailsId` between the 402 response and `/verify`
+  - `paymentDetailsId` is now deterministic per request context
+  - middleware now forwards `x-a402-provider-id` and `x-a402-provider-auth`
+- Enclave startup now fails fast unless `A402_WATCHTOWER_URL` is configured and healthy
+- `/verify` now returns a real enclave-signed `verificationReceipt`
+  - envelope is base64(JSON) with `verificationId`, `reservationId`, `paymentId`, hashes, expiry, `vaultConfig`, `signature`, and signed `message`
+  - idempotent `/verify` replay returns the same deterministic receipt payload
+
+### Tests / verification updated
+- Updated `tests/enclave_api.ts` for required `paymentDetails` and provider auth headers
+- Updated `tests/enclave_surfpool_e2e.ts` to use bearer auth and start a watchtower process
+- Updated both enclave integration tests to decode and assert `verificationReceipt`
+- `sdk/src/crypto.ts` now uses canonical JSON hashing for payment details
+- SDK now exposes `decodeVerificationReceiptEnvelope()`
+
+### Verified commands
+- `cargo test -p a402-enclave`
+- `cargo test --workspace`
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/attestation_sdk.ts tests/audit_tool.ts`
+- `anchor test`
+
+### Remaining gaps after this pass
+- Provider auth still does not implement true mTLS mode; only `bearer` and `api-key` are supported
+
+## Phase 4 Provider mTLS (2026-04-15) ✅
+
+### Fixed in this pass
+- Enclave now supports real TLS listener configuration via:
+  - `A402_ENCLAVE_TLS_CERT_PATH`
+  - `A402_ENCLAVE_TLS_KEY_PATH`
+  - optional `A402_ENCLAVE_TLS_CLIENT_CA_PATH`
+- When a client CA bundle is configured:
+  - enclave offers client certificate auth
+  - bearer / api-key providers can still connect without a client cert
+  - `authMode = "mtls"` providers are authenticated by SHA-256 fingerprint of the presented client certificate
+- Provider registration now persists auth material by mode:
+  - `api_key_hash` for `bearer` / `api-key`
+  - `mtls_cert_fingerprint` for `mtls`
+  - registration rejects `mtls` when the enclave listener is not configured for client cert verification
+- Middleware facilitator calls no longer depend on `fetch`
+  - switched to a small `http` / `https` helper
+  - supports `authMode = "mtls"` with client cert + key PEM paths
+  - ASC delivery and `/verify` / `/settle` / `/settlement/status` all share the same transport/auth path
+
+### Tests / verification updated
+- Added enclave unit test that rejects `mtls` provider registration when client-cert verification is disabled
+- Added enclave unit test covering end-to-end `/verify` auth for an `mtls` provider using a matching certificate fingerprint
+
+### Verified commands
+- `cargo test -p a402-enclave`
+- `cargo test --workspace`
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/middleware_raw_body.ts tests/attestation_sdk.ts tests/audit_tool.ts`
+
+## Phase 4 Live HTTPS/mTLS Validation (2026-04-15) ✅
+
+### Fixed in this pass
+- Added test-side HTTPS/mTLS transport helpers with on-the-fly OpenSSL certificate generation
+- `tests/enclave_api.ts` now supports:
+  - `A402_TEST_ENCLAVE_URL`
+  - `A402_TEST_TLS_CA_PATH`
+  - `A402_TEST_MTLS_CERT_PATH`
+  - `A402_TEST_MTLS_KEY_PATH`
+- `tests/enclave_surfpool_e2e.ts` now runs two live flows:
+  - existing `http + bearer`
+  - new `https + mtls`
+- Fixed a real compatibility bug uncovered by the live E2E:
+  - SDK canonical JSON sorting used `localeCompare`
+  - enclave canonicalization uses bytewise lexicographic sort
+  - switched SDK canonical sort to simple bytewise string ordering in both payment-details hashing and attestation hashing
+- Added rustls crypto-provider initialization for enclave TLS startup
+- Hardened live test cleanup so watchtower/enclave child processes do not hang the suite
+
+### Verified commands
+- `yarn ts-mocha -p ./tsconfig.json -t 300000 tests/enclave_surfpool_e2e.ts --exit`
+- `cargo test -p a402-enclave`
+- `cargo test --workspace`
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit`
+
+## Phase 4 Follow-up Hardening (2026-04-15) ✅
+
+### Fixed in this pass
+- Middleware request binding now supports exact raw request bytes
+  - exported `captureA402RawBody()` for `express.json({ verify })`
+  - `buildRequestContext()` hashes `req.rawBody` first, then falls back only when raw bytes are unavailable
+- Enclave now exposes `POST /v1/settlement/status`
+  - provider-authenticated lookup by `settlementId`
+  - returns `verificationId`, reservation status, `batchId`, and `txSignature`
+  - batch confirm now stores `settlement_ids` in WAL and maintains in-memory `settlementId -> batch metadata`
+- Production vault status checks no longer use a 5-second stale cache
+  - test binaries still read the cached lifecycle to avoid live RPC dependencies in unit tests
+- Live test fixtures were corrected to send auth headers on `/settle` retry
+
+### Verified commands
+- `cargo test -p a402-enclave`
+- `cargo test --workspace`
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit`
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/middleware_raw_body.ts tests/attestation_sdk.ts tests/audit_tool.ts`
+
+### Remaining gaps after this pass
+- Provider auth still does not implement true mTLS mode; only `bearer` and `api-key` are supported

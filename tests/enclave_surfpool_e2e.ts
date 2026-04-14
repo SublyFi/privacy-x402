@@ -18,10 +18,20 @@ import nacl from "tweetnacl";
 import { Keypair, PublicKey } from "@solana/web3.js";
 
 import { AuditTool } from "../sdk/src/audit";
+import { computePaymentDetailsHash } from "../sdk/src/crypto";
+import { decodeVerificationReceiptEnvelope } from "../sdk/src/receipt";
 import { A402Vault } from "../target/types/a402_vault";
+import {
+  generateTlsFixture,
+  requestJson,
+  RequestTlsOptions,
+  TestResponse,
+  GeneratedTlsFixture,
+} from "./live_transport";
 
 const RPC_URL = process.env.ANCHOR_PROVIDER_URL || "http://127.0.0.1:8899";
-const ENCLAVE_URL = "http://127.0.0.1:3100";
+const DEFAULT_ENCLAVE_URL = "http://127.0.0.1:3100";
+const WATCHTOWER_URL = "http://127.0.0.1:3200";
 
 type RequestContext = {
   method: string;
@@ -61,10 +71,13 @@ type BalanceResponse = {
 type VerifyResponse = {
   ok: boolean;
   verificationId: string;
+  reservationId: string;
+  verificationReceipt: string;
 };
 
 type SettleResponse = {
   ok: boolean;
+  settlementId: string;
 };
 
 type FireBatchResponse = {
@@ -73,6 +86,16 @@ type FireBatchResponse = {
   batchId: number;
   settlementCount: number;
   txSignatures: string[];
+};
+
+type SettlementStatusResponse = {
+  ok: boolean;
+  settlementId: string;
+  verificationId: string;
+  providerId: string;
+  status: string;
+  batchId: number | null;
+  txSignature: string | null;
 };
 
 function sha256Hex(input: string): string {
@@ -126,22 +149,44 @@ function signPaymentPayload(
   ).toString("base64");
 }
 
-async function postJson(path: string, body: unknown) {
-  return fetch(`${ENCLAVE_URL}${path}`, {
+async function postJson(
+  baseUrl: string,
+  path: string,
+  body: unknown,
+  headers?: Record<string, string>,
+  tls?: RequestTlsOptions
+): Promise<TestResponse> {
+  return requestJson(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body,
+    headers,
+    tls,
   });
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-  return (await response.json()) as T;
+async function getJson(
+  baseUrl: string,
+  path: string,
+  tls?: RequestTlsOptions
+): Promise<TestResponse> {
+  return requestJson(`${baseUrl}${path}`, {
+    method: "GET",
+    tls,
+  });
 }
 
-async function waitForAttestation(maxAttempts = 120) {
+async function readJson<T>(response: TestResponse): Promise<T> {
+  return response.json<T>();
+}
+
+async function waitForAttestation(
+  baseUrl: string,
+  tls?: RequestTlsOptions,
+  maxAttempts = 120
+) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const response = await fetch(`${ENCLAVE_URL}/v1/attestation`);
+      const response = await getJson(baseUrl, "/v1/attestation", tls);
       if (response.ok) {
         return readJson<AttestationResponse>(response);
       }
@@ -155,15 +200,40 @@ async function waitForAttestation(maxAttempts = 120) {
   throw new Error("Timed out waiting for enclave attestation endpoint");
 }
 
+async function waitForWatchtower(maxAttempts = 120) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await fetch(`${WATCHTOWER_URL}/v1/status`);
+      if (response.ok) {
+        return;
+      }
+    } catch (_error) {
+      // Server not ready yet.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error("Timed out waiting for watchtower status endpoint");
+}
+
 async function waitForClientBalance(
+  baseUrl: string,
   client: PublicKey,
   expectedFree: number,
+  tls?: RequestTlsOptions,
   maxAttempts = 90
 ): Promise<BalanceResponse> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const response = await postJson("/v1/balance", {
-      client: client.toBase58(),
-    });
+    const response = await postJson(
+      baseUrl,
+      "/v1/balance",
+      {
+        client: client.toBase58(),
+      },
+      undefined,
+      tls
+    );
     if (response.ok) {
       const body = await readJson<BalanceResponse>(response);
       if (body.free === expectedFree) {
@@ -211,20 +281,82 @@ describe("enclave_surfpool_e2e", function () {
   const governance = provider.wallet as anchor.Wallet;
 
   let enclaveProcess: ChildProcessWithoutNullStreams | undefined;
+  let watchtowerProcess: ChildProcessWithoutNullStreams | undefined;
   let enclaveLogs = "";
   let walPath = "";
+  let watchtowerStorePath = "";
+  let tlsFixture: GeneratedTlsFixture | undefined;
 
-  after(async () => {
-    if (enclaveProcess && !enclaveProcess.killed) {
-      enclaveProcess.kill("SIGINT");
-      await once(enclaveProcess, "exit").catch(() => undefined);
+  async function terminateProcess(
+    process: ChildProcessWithoutNullStreams | undefined
+  ) {
+    if (
+      !process ||
+      process.killed ||
+      process.exitCode !== null ||
+      process.signalCode !== null
+    ) {
+      return;
     }
+
+    let exited = false;
+    process.kill("SIGINT");
+    await Promise.race([
+      once(process, "exit")
+        .then(() => {
+          exited = true;
+        })
+        .catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
+
+    if (!exited) {
+      process.kill("SIGKILL");
+      if (process.exitCode === null && process.signalCode === null) {
+        await Promise.race([
+          once(process, "exit").catch(() => undefined),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
+    }
+  }
+
+  async function stopLiveProcesses() {
+    await terminateProcess(enclaveProcess);
+    await terminateProcess(watchtowerProcess);
     if (walPath && existsSync(walPath)) {
       rmSync(walPath, { force: true });
     }
+    if (watchtowerStorePath && existsSync(watchtowerStorePath)) {
+      rmSync(watchtowerStorePath, { force: true });
+    }
+    if (tlsFixture) {
+      tlsFixture.cleanup();
+      tlsFixture = undefined;
+    }
+    enclaveProcess = undefined;
+    watchtowerProcess = undefined;
+    walPath = "";
+    watchtowerStorePath = "";
+  }
+
+  afterEach(async () => {
+    await stopLiveProcesses();
   });
 
-  it("runs verify -> settle -> on-chain batch submit on surfpool and decrypts the audit record", async () => {
+  after(async () => {
+    await stopLiveProcesses();
+  });
+
+  async function runSurfpoolFlow(options: {
+    enclaveUrl: string;
+    requestOrigin: string;
+    authMode: "bearer" | "mtls";
+    sharedTls?: RequestTlsOptions;
+    providerTls?: RequestTlsOptions;
+    enclaveExtraEnv?: Record<string, string>;
+    mtlsFingerprintHex?: string;
+  }) {
     try {
       await provider.connection.getVersion();
 
@@ -269,7 +401,27 @@ describe("enclave_surfpool_e2e", function () {
       );
 
       walPath = `data/wal-surfpool-e2e-${randomUUID()}.jsonl`;
+      watchtowerStorePath = `data/watchtower-surfpool-e2e-${randomUUID()}.json`;
       enclaveLogs = "";
+      watchtowerProcess = spawn("cargo", ["run", "-p", "a402-watchtower"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          A402_PROGRAM_ID: program.programId.toBase58(),
+          A402_VAULT_CONFIG: vaultConfigPda.toBase58(),
+          A402_SOLANA_RPC_URL: RPC_URL,
+          A402_WATCHTOWER_STORE_PATH: watchtowerStorePath,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      watchtowerProcess.stdout.on("data", (chunk) => {
+        enclaveLogs += chunk.toString();
+      });
+      watchtowerProcess.stderr.on("data", (chunk) => {
+        enclaveLogs += chunk.toString();
+      });
+      await waitForWatchtower();
+
       enclaveProcess = spawn("cargo", ["run", "-p", "a402-enclave"], {
         cwd: process.cwd(),
         env: {
@@ -283,6 +435,8 @@ describe("enclave_surfpool_e2e", function () {
           A402_SOLANA_RPC_URL: RPC_URL,
           A402_SOLANA_WS_URL: "ws://127.0.0.1:8900",
           A402_WAL_PATH: walPath,
+          A402_WATCHTOWER_URL: WATCHTOWER_URL,
+          ...(options.enclaveExtraEnv ?? {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -293,7 +447,10 @@ describe("enclave_surfpool_e2e", function () {
         enclaveLogs += chunk.toString();
       });
 
-      const attestation = await waitForAttestation();
+      const attestation = await waitForAttestation(
+        options.enclaveUrl,
+        options.sharedTls
+      );
       expect(attestation.vaultConfig).to.equal(vaultConfigPda.toBase58());
       expect(attestation.vaultSigner).to.equal(
         enclaveSigner.publicKey.toBase58()
@@ -375,32 +532,69 @@ describe("enclave_surfpool_e2e", function () {
       );
 
       const providerId = `prov_${randomUUID()}`;
-      const registerRes = await postJson("/v1/provider/register", {
-        providerId,
-        displayName: "Surfpool E2E Provider",
-        participantPubkey: providerOwner.publicKey.toBase58(),
-        settlementTokenAccount: providerTokenAccount.toBase58(),
-        network: "solana:localnet",
-        assetMint: usdcMint.toBase58(),
-        allowedOrigins: ["http://localhost"],
-        authMode: "none",
-        apiKeyHash: "00".repeat(32),
-      });
-      expect(registerRes.status).to.equal(200);
+      const providerApiKey = `surfpool-provider-secret-${randomUUID()}`;
+      const registerRes = await postJson(
+        options.enclaveUrl,
+        "/v1/provider/register",
+        {
+          providerId,
+          displayName: "Surfpool E2E Provider",
+          participantPubkey: providerOwner.publicKey.toBase58(),
+          settlementTokenAccount: providerTokenAccount.toBase58(),
+          network: "solana:localnet",
+          assetMint: usdcMint.toBase58(),
+          allowedOrigins: [options.requestOrigin],
+          authMode: options.authMode,
+          apiKeyHash:
+            options.authMode === "bearer" ? sha256Hex(providerApiKey) : "",
+          mtlsCertFingerprint:
+            options.authMode === "mtls" ? options.mtlsFingerprintHex : undefined,
+        },
+        undefined,
+        options.sharedTls
+      );
+      expect(registerRes.status, await registerRes.text()).to.equal(200);
 
       const syncedBalance = await waitForClientBalance(
+        options.enclaveUrl,
         client.publicKey,
-        depositAmount
+        depositAmount,
+        options.sharedTls
       );
       expect(syncedBalance.totalDeposited).to.equal(depositAmount);
 
       const requestContext: RequestContext = {
         method: "POST",
-        origin: "http://localhost",
+        origin: options.requestOrigin,
         pathAndQuery: "/surfpool-e2e",
         bodySha256: sha256Hex(JSON.stringify({ ok: true })),
       };
-      const paymentDetailsHash = sha256Hex("surfpool-e2e-payment");
+      const paymentDetails = {
+        scheme: "a402-svm-v1",
+        network: "solana:localnet",
+        amount: paymentAmount.toString(),
+        asset: {
+          kind: "spl-token",
+          mint: usdcMint.toBase58(),
+          decimals: 6,
+          symbol: "USDC",
+        },
+        payTo: providerTokenAccount.toBase58(),
+        providerId,
+        facilitatorUrl: options.enclaveUrl,
+        vault: {
+          config: vaultConfigPda.toBase58(),
+          signer: enclaveSigner.publicKey.toBase58(),
+          attestationPolicyHash: attestationPolicyHash
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join(""),
+        },
+        paymentDetailsId: `paydet_test_${providerId}`,
+        verifyWindowSec: 60,
+        maxSettlementDelaySec: 900,
+        privacyMode: "vault-batched-v1",
+      } as const;
+      const paymentDetailsHash = computePaymentDetailsHash(paymentDetails);
       const requestHash = computeRequestHash(
         requestContext,
         paymentDetailsHash
@@ -426,31 +620,97 @@ describe("enclave_surfpool_e2e", function () {
         clientSig: signPaymentPayload(client, unsignedPayload),
       };
 
-      const verifyRes = await postJson("/v1/verify", {
-        paymentPayload,
-        requestContext,
-      });
-      expect(verifyRes.status).to.equal(200);
+      const providerHeaders =
+        options.authMode === "bearer"
+          ? {
+              Authorization: `Bearer ${providerApiKey}`,
+              "x-a402-provider-id": providerId,
+            }
+          : {
+              "x-a402-provider-id": providerId,
+            };
+
+      const verifyRes = await postJson(
+        options.enclaveUrl,
+        "/v1/verify",
+        {
+          paymentPayload,
+          paymentDetails,
+          requestContext,
+        },
+        providerHeaders,
+        options.providerTls ?? options.sharedTls
+      );
+      expect(verifyRes.status, await verifyRes.text()).to.equal(200);
       const verifyBody = await readJson<VerifyResponse>(verifyRes);
       expect(verifyBody.ok).to.equal(true);
+      const verificationReceipt = decodeVerificationReceiptEnvelope(
+        verifyBody.verificationReceipt
+      );
+      expect(verificationReceipt.verificationId).to.equal(
+        verifyBody.verificationId
+      );
+      expect(verificationReceipt.reservationId).to.equal(
+        verifyBody.reservationId
+      );
+      expect(verificationReceipt.providerId).to.equal(providerId);
+      expect(verificationReceipt.amount).to.equal(paymentAmount.toString());
 
-      const settleRes = await postJson("/v1/settle", {
-        verificationId: verifyBody.verificationId,
-        resultHash: "ab".repeat(32),
-        statusCode: 200,
-      });
-      expect(settleRes.status).to.equal(200);
+      const settleRes = await postJson(
+        options.enclaveUrl,
+        "/v1/settle",
+        {
+          verificationId: verifyBody.verificationId,
+          resultHash: "ab".repeat(32),
+          statusCode: 200,
+        },
+        providerHeaders,
+        options.providerTls ?? options.sharedTls
+      );
+      expect(settleRes.status, await settleRes.text()).to.equal(200);
       const settleBody = await readJson<SettleResponse>(settleRes);
       expect(settleBody.ok).to.equal(true);
 
-      const fireBatchRes = await postJson("/v1/admin/fire-batch", {});
-      expect(fireBatchRes.status).to.equal(200);
+      const fireBatchRes = await postJson(
+        options.enclaveUrl,
+        "/v1/admin/fire-batch",
+        {},
+        undefined,
+        options.sharedTls
+      );
+      expect(fireBatchRes.status, await fireBatchRes.text()).to.equal(200);
       const fireBatchBody = await readJson<FireBatchResponse>(fireBatchRes);
       expect(fireBatchBody.ok).to.equal(true);
       expect(fireBatchBody.submitted).to.equal(true);
       expect(fireBatchBody.batchId).to.be.a("number");
       expect(fireBatchBody.settlementCount).to.equal(1);
       expect(fireBatchBody.txSignatures).to.have.length(1);
+
+      const settlementStatusRes = await postJson(
+        options.enclaveUrl,
+        "/v1/settlement/status",
+        {
+          settlementId: settleBody.settlementId,
+        },
+        providerHeaders,
+        options.providerTls ?? options.sharedTls
+      );
+      expect(settlementStatusRes.status, await settlementStatusRes.text()).to.equal(200);
+      const settlementStatusBody =
+        await readJson<SettlementStatusResponse>(settlementStatusRes);
+      expect(settlementStatusBody.ok).to.equal(true);
+      expect(settlementStatusBody.settlementId).to.equal(
+        settleBody.settlementId
+      );
+      expect(settlementStatusBody.verificationId).to.equal(
+        verifyBody.verificationId
+      );
+      expect(settlementStatusBody.providerId).to.equal(providerId);
+      expect(settlementStatusBody.status).to.equal("BatchedOnchain");
+      expect(settlementStatusBody.batchId).to.equal(fireBatchBody.batchId);
+      expect(settlementStatusBody.txSignature).to.equal(
+        fireBatchBody.txSignatures[0]
+      );
 
       const providerAccount = await getAccount(
         provider.connection,
@@ -479,5 +739,41 @@ describe("enclave_surfpool_e2e", function () {
     } catch (error) {
       throw new Error(`${String(error)}\n\nEnclave logs:\n${enclaveLogs}`);
     }
+  }
+
+  it("runs verify -> settle -> on-chain batch submit on surfpool and decrypts the audit record", async () => {
+    await stopLiveProcesses();
+    await runSurfpoolFlow({
+      enclaveUrl: DEFAULT_ENCLAVE_URL,
+      requestOrigin: "http://localhost",
+      authMode: "bearer",
+    });
+  });
+
+  it("runs the same surfpool flow over https + mtls", async () => {
+    await stopLiveProcesses();
+    tlsFixture = generateTlsFixture("a402-surfpool-mtls");
+
+    await runSurfpoolFlow({
+      enclaveUrl: "https://127.0.0.1:3100",
+      requestOrigin: "https://127.0.0.1",
+      authMode: "mtls",
+      sharedTls: {
+        caPath: tlsFixture.caCertPath,
+        serverName: "localhost",
+      },
+      providerTls: {
+        caPath: tlsFixture.caCertPath,
+        certPath: tlsFixture.clientCertPath,
+        keyPath: tlsFixture.clientKeyPath,
+        serverName: "localhost",
+      },
+      enclaveExtraEnv: {
+        A402_ENCLAVE_TLS_CERT_PATH: tlsFixture.serverCertPath,
+        A402_ENCLAVE_TLS_KEY_PATH: tlsFixture.serverKeyPath,
+        A402_ENCLAVE_TLS_CLIENT_CA_PATH: tlsFixture.caCertPath,
+      },
+      mtlsFingerprintHex: tlsFixture.clientCertFingerprintHex,
+    });
   });
 });

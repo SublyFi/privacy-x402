@@ -60,6 +60,21 @@ export interface VerifyResponse {
   verificationReceipt: string;
 }
 
+export interface VerificationReceiptEnvelope {
+  verificationId: string;
+  reservationId: string;
+  paymentId: string;
+  client: string;
+  providerId: string;
+  amount: string;
+  requestHash: string;
+  paymentDetailsHash: string;
+  reservationExpiresAt: string;
+  vaultConfig: string;
+  signature: string;
+  message: string;
+}
+
 /** Facilitator /v1/settle response */
 export interface SettleResponse {
   ok: boolean;
@@ -138,10 +153,10 @@ export interface PaymentResponse {
   scheme: string;
   paymentId: string;
   verificationId: string;
-  settlementId: string;
+  settlementId: string | null;
   batchId: number | null;
   txSignature: string | null;
-  participantReceipt: string;
+  participantReceipt: string | null;
 }
 
 /** Facilitator /v1/balance response */
@@ -212,7 +227,6 @@ export interface ChannelFinalizeResponse {
 export interface CloseChannelResponse {
   ok: boolean;
   channelId: string;
-  client: string;
   providerId: string;
   returnedToClient: number;
   providerEarned: number;

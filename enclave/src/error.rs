@@ -16,8 +16,20 @@ pub enum EnclaveError {
     #[error("Provider authentication failed")]
     ProviderAuthFailed,
 
+    #[error("Provider registration has an unsupported auth mode")]
+    UnsupportedProviderAuthMode,
+
+    #[error("Provider registration auth material is invalid")]
+    InvalidProviderAuthConfig,
+
+    #[error("mTLS listener is not enabled on this facilitator")]
+    MtlsNotEnabled,
+
     #[error("Invalid payment scheme")]
     InvalidScheme,
+
+    #[error("paymentDetails is required")]
+    PaymentDetailsRequired,
 
     #[error("Invalid client signature")]
     InvalidClientSignature,
@@ -31,11 +43,26 @@ pub enum EnclaveError {
     #[error("Reservation not found")]
     ReservationNotFound,
 
+    #[error("Settlement not found")]
+    SettlementNotFound,
+
     #[error("Invalid reservation status: {0}")]
     InvalidReservationStatus(String),
 
     #[error("Vault not active")]
     VaultNotActive,
+
+    #[error("Vault is paused")]
+    VaultPaused,
+
+    #[error("Vault is migrating")]
+    VaultMigrating,
+
+    #[error("Vault is retired")]
+    VaultRetired,
+
+    #[error("Vault status is unavailable")]
+    VaultStatusUnavailable,
 
     #[error("Deposit synchronization in progress")]
     DepositSyncInProgress,
@@ -95,17 +122,36 @@ impl IntoResponse for EnclaveError {
             EnclaveError::ClientNotFound => (StatusCode::BAD_REQUEST, "client_not_found"),
             EnclaveError::ProviderNotFound => (StatusCode::BAD_REQUEST, "provider_not_found"),
             EnclaveError::ProviderAuthFailed => (StatusCode::UNAUTHORIZED, "provider_auth_failed"),
+            EnclaveError::UnsupportedProviderAuthMode => {
+                (StatusCode::BAD_REQUEST, "unsupported_provider_auth_mode")
+            }
+            EnclaveError::InvalidProviderAuthConfig => {
+                (StatusCode::BAD_REQUEST, "invalid_provider_auth_config")
+            }
+            EnclaveError::MtlsNotEnabled => (StatusCode::SERVICE_UNAVAILABLE, "mtls_not_enabled"),
             EnclaveError::InvalidScheme => (StatusCode::BAD_REQUEST, "invalid_scheme"),
+            EnclaveError::PaymentDetailsRequired => {
+                (StatusCode::BAD_REQUEST, "payment_details_required")
+            }
             EnclaveError::InvalidClientSignature => {
                 (StatusCode::BAD_REQUEST, "invalid_client_signature")
             }
             EnclaveError::PaymentExpired => (StatusCode::BAD_REQUEST, "payment_expired"),
             EnclaveError::PaymentIdReused => (StatusCode::CONFLICT, "payment_id_reused"),
             EnclaveError::ReservationNotFound => (StatusCode::NOT_FOUND, "reservation_not_found"),
+            EnclaveError::SettlementNotFound => (StatusCode::NOT_FOUND, "settlement_not_found"),
             EnclaveError::InvalidReservationStatus(ref _s) => {
                 (StatusCode::CONFLICT, "invalid_reservation_status")
             }
             EnclaveError::VaultNotActive => (StatusCode::SERVICE_UNAVAILABLE, "vault_not_active"),
+            EnclaveError::VaultPaused => (StatusCode::SERVICE_UNAVAILABLE, "vault_paused"),
+            EnclaveError::VaultMigrating => {
+                (StatusCode::SERVICE_UNAVAILABLE, "vault_migrating")
+            }
+            EnclaveError::VaultRetired => (StatusCode::SERVICE_UNAVAILABLE, "vault_retired"),
+            EnclaveError::VaultStatusUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "vault_status_unavailable")
+            }
             EnclaveError::DepositSyncInProgress => {
                 (StatusCode::SERVICE_UNAVAILABLE, "deposit_sync_in_progress")
             }

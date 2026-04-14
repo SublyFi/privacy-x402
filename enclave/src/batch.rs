@@ -9,7 +9,6 @@ use anchor_client::solana_sdk::{system_program, sysvar};
 use anchor_client::{Client, Cluster};
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -210,19 +209,26 @@ async fn fire_batch_at(state: &Arc<AppState>, now: i64) -> Result<BatchSubmitRes
             format!("chunk {chunk_idx} submission failed for batch {batch_id}: {error}")
         })?;
 
+        let settlement_ids: Vec<String> = chunk
+            .entries
+            .iter()
+            .map(|entry| entry.settlement_id.clone())
+            .collect();
+
         {
             let _persist_guard = state.persistence_lock.lock().await;
-            apply_submitted_chunk(state, &chunk, now).await;
             state
                 .wal
                 .append(WalEntry::BatchConfirmed {
                     batch_id,
                     tx_signature: signature.clone(),
+                    settlement_ids: settlement_ids.clone(),
                 })
                 .await
                 .map_err(|error| {
                     format!("failed to append BatchConfirmed WAL entry: {error}")
                 })?;
+            apply_submitted_chunk(state, &chunk, now, batch_id, &signature).await;
         }
 
         tx_signatures.push(signature);
@@ -451,78 +457,23 @@ fn submit_atomic_chunk(
     submit_result
 }
 
-async fn apply_submitted_chunk(state: &Arc<AppState>, chunk: &BatchChunk, now: i64) {
-    let submitted_ids: HashSet<String> = chunk
+async fn apply_submitted_chunk(
+    state: &Arc<AppState>,
+    chunk: &BatchChunk,
+    now: i64,
+    batch_id: u64,
+    tx_signature: &str,
+) {
+    let submitted_ids: Vec<String> = chunk
         .entries
         .iter()
         .map(|entry| entry.settlement_id.clone())
         .collect();
-
-    for entry in &chunk.entries {
-        state.vault.settlement_history.remove(&entry.settlement_id);
-
-        if let Some(mut credit) = state.vault.provider_credits.get_mut(&entry.provider_id) {
-            credit.credited_amount = credit
-                .credited_amount
-                .saturating_sub(entry.settlement.amount);
-            credit
-                .settlement_ids
-                .retain(|sid| sid != &entry.settlement_id);
-        }
-    }
-
-    let provider_ids_to_remove: Vec<String> = state
-        .vault
-        .provider_credits
-        .iter()
-        .filter(|credit| credit.credited_amount == 0 || credit.settlement_ids.is_empty())
-        .map(|credit| credit.provider_id.clone())
-        .collect();
-    for provider_id in provider_ids_to_remove {
-        state.vault.provider_credits.remove(&provider_id);
-    }
-
-    let remaining_oldest_by_provider = recompute_oldest_credit_times(state);
-    for (provider_id, oldest_credit_at) in remaining_oldest_by_provider {
-        if let Some(mut credit) = state.vault.provider_credits.get_mut(&provider_id) {
-            credit.oldest_credit_at = oldest_credit_at;
-        }
-    }
-
-    for mut reservation in state.vault.reservations.iter_mut() {
-        if reservation
-            .settlement_id
-            .as_ref()
-            .map(|settlement_id| submitted_ids.contains(settlement_id))
-            .unwrap_or(false)
-        {
-            reservation.status = ReservationStatus::BatchedOnchain;
-        }
-    }
-
-    *state.vault.last_batch_at.write().await = now;
-}
-
-fn recompute_oldest_credit_times(state: &Arc<AppState>) -> HashMap<String, i64> {
     state
         .vault
-        .provider_credits
-        .iter()
-        .filter_map(|credit| {
-            credit
-                .settlement_ids
-                .iter()
-                .filter_map(|settlement_id| {
-                    state
-                        .vault
-                        .settlement_history
-                        .get(settlement_id)
-                        .map(|record| record.timestamp)
-                })
-                .min()
-                .map(|oldest| (credit.provider_id.clone(), oldest))
-        })
-        .collect()
+        .apply_batch_confirmation(&submitted_ids, batch_id, tx_signature);
+
+    *state.vault.last_batch_at.write().await = now;
 }
 
 /// Compute a deterministic hash for an atomic chunk (settle + audit pair).

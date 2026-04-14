@@ -12,6 +12,7 @@ mod kms_bootstrap;
 mod snapshot;
 mod snapshot_store;
 mod state;
+mod tls;
 mod wal;
 
 use axum::routing::{get, post};
@@ -87,7 +88,17 @@ async fn main() {
         solana.ws_url.clone(),
     ));
 
-    let watchtower_url = env::var("A402_WATCHTOWER_URL").ok();
+    let watchtower_url = env::var("A402_WATCHTOWER_URL")
+        .expect("A402_WATCHTOWER_URL must be set for Phase 4 receipt mirroring");
+    ensure_watchtower_ready(&watchtower_url)
+        .await
+        .expect("watchtower health check must succeed before enclave starts serving");
+
+    let tls_runtime = tls::TlsRuntime::from_env().expect("TLS configuration must be valid");
+    let provider_mtls_enabled = tls_runtime
+        .as_ref()
+        .map(|runtime| runtime.mtls_enabled())
+        .unwrap_or(false);
 
     let app_state = Arc::new(AppState {
         vault: vault_state,
@@ -95,9 +106,10 @@ async fn main() {
         deposit_detector: deposit_detector.clone(),
         asc_ops_lock: tokio::sync::Mutex::new(()),
         persistence_lock: tokio::sync::Mutex::new(()),
-        watchtower_url,
+        watchtower_url: Some(watchtower_url),
         attestation_document: bootstrap.attestation.document_b64,
         attestation_is_local_dev: bootstrap.attestation.is_local_dev,
+        provider_mtls_enabled,
     });
 
     let snapshot_manager = snapshot_store
@@ -132,6 +144,10 @@ async fn main() {
         .route("/v1/attestation", get(handlers::get_attestation))
         .route("/v1/verify", post(handlers::post_verify))
         .route("/v1/settle", post(handlers::post_settle))
+        .route(
+            "/v1/settlement/status",
+            post(handlers::post_settlement_status),
+        )
         .route("/v1/cancel", post(handlers::post_cancel))
         .route("/v1/withdraw-auth", post(handlers::post_withdraw_auth))
         .route("/v1/balance", post(handlers::post_balance))
@@ -156,7 +172,27 @@ async fn main() {
     info!(addr = %listen_addr, vault_config = %vault_config, program_id = %solana.program_id, "Enclave facilitator starting");
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    if let Some(tls_runtime) = tls_runtime {
+        tls::serve(listener, app, tls_runtime).await.unwrap();
+    } else {
+        axum::serve(listener, app).await.unwrap();
+    }
+}
+
+async fn ensure_watchtower_ready(url: &str) -> Result<(), String> {
+    let status_url = format!("{url}/v1/status");
+    let response = reqwest::Client::new()
+        .get(&status_url)
+        .send()
+        .await
+        .map_err(|error| format!("failed to reach watchtower at {status_url}: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "watchtower health check returned status {}",
+            response.status()
+        ));
+    }
+    Ok(())
 }
 
 fn read_pubkey_env(name: &str, default: Pubkey) -> Pubkey {

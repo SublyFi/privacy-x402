@@ -18,7 +18,9 @@ use crate::asc_manager;
 use crate::error::EnclaveError;
 use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
-use crate::state::{ClientBalance, ProviderRegistration};
+use crate::state::{
+    ClientBalance, ProviderRegistration, Reservation, ReservationStatus, SettlementRecord,
+};
 
 /// WAL entry types for Phase 1
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,10 +34,20 @@ pub enum WalEntry {
     },
     ReservationCreated {
         verification_id: String,
+        #[serde(default)]
+        reservation_id: Option<String>,
         payment_id: String,
         client: String,
         provider_id: String,
         amount: u64,
+        #[serde(default)]
+        request_hash: Option<String>,
+        #[serde(default)]
+        payment_details_hash: Option<String>,
+        #[serde(default)]
+        created_at: Option<i64>,
+        #[serde(default)]
+        expires_at: Option<i64>,
     },
     ReservationCancelled {
         verification_id: String,
@@ -49,6 +61,8 @@ pub enum WalEntry {
         verification_id: String,
         provider_id: String,
         amount: u64,
+        #[serde(default)]
+        settled_at: Option<i64>,
     },
     ParticipantReceiptIssued {
         participant: String,
@@ -70,7 +84,10 @@ pub enum WalEntry {
         asset_mint: String,
         allowed_origins: Vec<String>,
         auth_mode: String,
-        api_key_hash: String,
+        #[serde(default)]
+        api_key_hash: Option<String>,
+        #[serde(default)]
+        mtls_cert_fingerprint: Option<String>,
     },
     ClientBalanceSeeded {
         client: String,
@@ -88,6 +105,8 @@ pub enum WalEntry {
     BatchConfirmed {
         batch_id: u64,
         tx_signature: String,
+        #[serde(default)]
+        settlement_ids: Vec<String>,
     },
     // Phase 3: ASC events
     ChannelOpened {
@@ -432,6 +451,177 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .last_finalized_slot
                 .fetch_max(slot, Ordering::SeqCst);
         }
+        WalEntry::ReservationCreated {
+            verification_id,
+            reservation_id,
+            payment_id,
+            client,
+            provider_id,
+            amount,
+            request_hash,
+            payment_details_hash,
+            created_at,
+            expires_at,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            let reservation_id = reservation_id
+                .ok_or_else(|| {
+                    "legacy ReservationCreated WAL entry missing reservation_id".to_string()
+                })?;
+            let request_hash = request_hash
+                .ok_or_else(|| {
+                    "legacy ReservationCreated WAL entry missing request_hash".to_string()
+                })
+                .and_then(|value| decode_fixed_hex_32("request_hash", &value))?;
+            let payment_details_hash = payment_details_hash
+                .ok_or_else(|| {
+                    "legacy ReservationCreated WAL entry missing payment_details_hash".to_string()
+                })
+                .and_then(|value| decode_fixed_hex_32("payment_details_hash", &value))?;
+            let created_at = created_at
+                .ok_or_else(|| {
+                    "legacy ReservationCreated WAL entry missing created_at".to_string()
+                })?;
+            let expires_at = expires_at
+                .ok_or_else(|| {
+                    "legacy ReservationCreated WAL entry missing expires_at".to_string()
+                })?;
+
+            state
+                .vault
+                .reserve_balance(&client, amount)
+                .map_err(wal_replay_error)?;
+            state.vault.payment_id_index.insert(
+                payment_id.clone(),
+                verification_id.clone(),
+            );
+            state.vault.reservations.insert(
+                verification_id.clone(),
+                Reservation {
+                    verification_id,
+                    reservation_id,
+                    payment_id,
+                    client,
+                    provider_id,
+                    amount,
+                    request_hash,
+                    payment_details_hash,
+                    status: ReservationStatus::Reserved,
+                    created_at,
+                    expires_at,
+                    settlement_id: None,
+                    settled_at: None,
+                },
+            );
+        }
+        WalEntry::ReservationCancelled { verification_id, .. } => {
+            let mut reservation = state
+                .vault
+                .reservations
+                .get_mut(&verification_id)
+                .ok_or_else(|| {
+                    format!("missing reservation {verification_id} for ReservationCancelled WAL entry")
+                })?;
+            if reservation.status == ReservationStatus::Reserved {
+                let client = reservation.client;
+                let amount = reservation.amount;
+                reservation.status = ReservationStatus::Cancelled;
+                drop(reservation);
+                state
+                    .vault
+                    .release_balance(&client, amount)
+                    .map_err(wal_replay_error)?;
+            } else {
+                reservation.status = ReservationStatus::Cancelled;
+            }
+        }
+        WalEntry::ReservationExpired { verification_id } => {
+            let mut reservation = state
+                .vault
+                .reservations
+                .get_mut(&verification_id)
+                .ok_or_else(|| {
+                    format!("missing reservation {verification_id} for ReservationExpired WAL entry")
+                })?;
+            if reservation.status == ReservationStatus::Reserved {
+                let client = reservation.client;
+                let amount = reservation.amount;
+                reservation.status = ReservationStatus::Expired;
+                drop(reservation);
+                state
+                    .vault
+                    .release_balance(&client, amount)
+                    .map_err(wal_replay_error)?;
+            } else {
+                reservation.status = ReservationStatus::Expired;
+            }
+        }
+        WalEntry::SettlementCommitted {
+            settlement_id,
+            verification_id,
+            provider_id,
+            amount,
+            settled_at,
+        } => {
+            let (client, provider_id, amount, timestamp) = {
+                let mut reservation = state
+                    .vault
+                    .reservations
+                    .get_mut(&verification_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "missing reservation {verification_id} for SettlementCommitted WAL entry"
+                        )
+                    })?;
+                let client = reservation.client;
+                if reservation.provider_id != provider_id {
+                    return Err(format!(
+                        "provider_id mismatch for settlement {settlement_id}: reservation={} wal={provider_id}",
+                        reservation.provider_id
+                    ));
+                }
+                if reservation.amount != amount {
+                    return Err(format!(
+                        "amount mismatch for settlement {settlement_id}: reservation={} wal={amount}",
+                        reservation.amount
+                    ));
+                }
+                let provider_id = reservation.provider_id.clone();
+                let amount = reservation.amount;
+                let timestamp = settled_at.unwrap_or(reservation.created_at);
+                if reservation.status == ReservationStatus::Reserved {
+                    reservation.status = ReservationStatus::SettledOffchain;
+                    reservation.settlement_id = Some(settlement_id.clone());
+                    reservation.settled_at = Some(timestamp);
+                }
+                (client, provider_id, amount, timestamp)
+            };
+
+            state
+                .vault
+                .settle_payment(&client, amount, &provider_id, &settlement_id, timestamp)
+                .map_err(wal_replay_error)?;
+            let provider_pubkey = state
+                .vault
+                .providers
+                .get(&provider_id)
+                .map(|provider| provider.settlement_token_account)
+                .ok_or_else(|| {
+                    format!(
+                        "missing provider {provider_id} for SettlementCommitted WAL entry"
+                    )
+                })?;
+            state.vault.settlement_history.insert(
+                settlement_id.clone(),
+                SettlementRecord {
+                    settlement_id,
+                    client,
+                    provider: provider_pubkey,
+                    amount,
+                    timestamp,
+                },
+            );
+        }
         WalEntry::ProviderRegistered {
             provider_id,
             display_name,
@@ -442,6 +632,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             allowed_origins,
             auth_mode,
             api_key_hash,
+            mtls_cert_fingerprint,
         } => {
             let settlement_token_account =
                 parse_pubkey("settlement_token_account", &settlement_token_account)?;
@@ -450,8 +641,19 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .as_deref()
                 .map(|value| parse_pubkey("participant_pubkey", value))
                 .transpose()?;
-            let api_key_hash = hex::decode(api_key_hash)
-                .map_err(|error| format!("invalid provider api_key_hash in WAL: {error}"))?;
+            let api_key_hash = api_key_hash
+                .map(|value| {
+                    hex::decode(&value)
+                        .map_err(|error| format!("invalid provider api_key_hash in WAL: {error}"))
+                })
+                .transpose()?;
+            let mtls_cert_fingerprint = mtls_cert_fingerprint
+                .map(|value| {
+                    hex::decode(&value).map_err(|error| {
+                        format!("invalid provider mtls_cert_fingerprint in WAL: {error}")
+                    })
+                })
+                .transpose()?;
 
             state.vault.providers.insert(
                 provider_id.clone(),
@@ -465,6 +667,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     allowed_origins,
                     auth_mode,
                     api_key_hash,
+                    mtls_cert_fingerprint,
                 },
             );
         }
@@ -494,6 +697,15 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     total_withdrawn,
                 },
             );
+        }
+        WalEntry::BatchConfirmed {
+            batch_id,
+            tx_signature,
+            settlement_ids,
+        } => {
+            state
+                .vault
+                .apply_batch_confirmation(&settlement_ids, batch_id, &tx_signature);
         }
         WalEntry::ChannelOpened {
             channel_id,

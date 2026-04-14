@@ -2,6 +2,12 @@ import { expect } from "chai";
 import { createHash, randomUUID } from "crypto";
 import nacl from "tweetnacl";
 import { Keypair } from "@solana/web3.js";
+import {
+  computePaymentDetailsHash,
+  sha256hex,
+} from "../sdk/src/crypto";
+import { decodeVerificationReceiptEnvelope } from "../sdk/src/receipt";
+import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
 
 /**
  * Enclave Facilitator API integration tests.
@@ -11,9 +17,29 @@ import { Keypair } from "@solana/web3.js";
  * Run: cargo run -p a402-watchtower &
  * Then: A402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p a402-enclave &
  * Then: yarn run ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts
+ *
+ * Optional HTTPS/mTLS:
+ * - set A402_TEST_ENCLAVE_URL=https://127.0.0.1:3100
+ * - set A402_TEST_TLS_CA_PATH to trust the enclave certificate
+ * - set A402_TEST_MTLS_CERT_PATH / A402_TEST_MTLS_KEY_PATH for provider-authenticated calls
  */
 
-const ENCLAVE_URL = "http://localhost:3100";
+const ENCLAVE_URL =
+  process.env.A402_TEST_ENCLAVE_URL || "http://localhost:3100";
+const SHARED_TLS: RequestTlsOptions | undefined = process.env.A402_TEST_TLS_CA_PATH
+  ? {
+      caPath: process.env.A402_TEST_TLS_CA_PATH,
+      serverName: process.env.A402_TEST_TLS_SERVER_NAME,
+    }
+  : undefined;
+const PROVIDER_MTLS: RequestTlsOptions | undefined =
+  process.env.A402_TEST_MTLS_CERT_PATH && process.env.A402_TEST_MTLS_KEY_PATH
+    ? {
+        ...SHARED_TLS,
+        certPath: process.env.A402_TEST_MTLS_CERT_PATH,
+        keyPath: process.env.A402_TEST_MTLS_KEY_PATH,
+      }
+    : undefined;
 
 type RequestContext = {
   method: string;
@@ -51,8 +77,11 @@ type AttestationResponse = {
 type VerifyResponse = {
   ok: boolean;
   verificationId: string;
+  reservationId: string;
+  reservationExpiresAt: string;
   providerId: string;
   amount: string;
+  verificationReceipt: string;
 };
 
 type BalanceResponse = {
@@ -91,12 +120,6 @@ type ErrorResponse = {
   error: string;
   message?: string;
 };
-
-function sha256Hex(input: string): string {
-  const hash = createHash("sha256");
-  hash.update(input);
-  return hash.digest("hex");
-}
 
 function computeRequestHash(
   ctx: RequestContext,
@@ -142,23 +165,36 @@ function signPaymentPayload(
   return Buffer.from(signature).toString("base64");
 }
 
-async function postJson(path: string, body: unknown) {
-  return fetch(`${ENCLAVE_URL}${path}`, {
+async function postJson(
+  path: string,
+  body: unknown,
+  headers?: Record<string, string>,
+  tls?: RequestTlsOptions
+): Promise<TestResponse> {
+  return requestJson(`${ENCLAVE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body,
+    headers,
+    tls: tls ?? SHARED_TLS,
   });
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-  return (await response.json()) as T;
+async function getJson(path: string, tls?: RequestTlsOptions): Promise<TestResponse> {
+  return requestJson(`${ENCLAVE_URL}${path}`, {
+    method: "GET",
+    tls: tls ?? SHARED_TLS,
+  });
+}
+
+async function readJson<T>(response: TestResponse): Promise<T> {
+  return response.json<T>();
 }
 
 describe("enclave_api", () => {
   let attestation: AttestationResponse;
 
   it("returns attestation document", async () => {
-    const res = await fetch(`${ENCLAVE_URL}/v1/attestation`);
+    const res = await getJson("/v1/attestation");
     expect(res.status).to.equal(200);
 
     attestation = await readJson<AttestationResponse>(res);
@@ -172,6 +208,7 @@ describe("enclave_api", () => {
   it("runs a live verify -> balance -> settle -> withdraw-auth -> receipt flow", async () => {
     const client = Keypair.generate();
     const providerId = `prov_${randomUUID()}`;
+    const providerApiKey = `provider-secret-${randomUUID()}`;
     const providerParticipant = Keypair.generate();
     const providerSettlementAccount = Keypair.generate().publicKey;
     const assetMint = Keypair.generate().publicKey;
@@ -185,8 +222,8 @@ describe("enclave_api", () => {
       network: "solana:localnet",
       assetMint: assetMint.toBase58(),
       allowedOrigins: ["http://localhost"],
-      authMode: "none",
-      apiKeyHash: "00".repeat(32),
+      authMode: "bearer",
+      apiKeyHash: sha256hex(providerApiKey),
     });
     expect(registerRes.status).to.equal(200);
 
@@ -202,9 +239,32 @@ describe("enclave_api", () => {
       method: "POST",
       origin: "http://localhost",
       pathAndQuery: "/demo?x=1",
-      bodySha256: sha256Hex(JSON.stringify({ hello: "world" })),
+      bodySha256: sha256hex(JSON.stringify({ hello: "world" })),
     };
-    const paymentDetailsHash = sha256Hex("payment-details");
+    const paymentDetails = {
+      scheme: "a402-svm-v1",
+      network: "solana:localnet",
+      amount: paymentAmount.toString(),
+      asset: {
+        kind: "spl-token",
+        mint: assetMint.toBase58(),
+        decimals: 6,
+        symbol: "USDC",
+      },
+      payTo: providerSettlementAccount.toBase58(),
+      providerId,
+      facilitatorUrl: ENCLAVE_URL,
+      vault: {
+        config: attestation.vaultConfig,
+        signer: attestation.vaultSigner,
+        attestationPolicyHash: attestation.attestationPolicyHash,
+      },
+      paymentDetailsId: `paydet_test_${providerId}`,
+      verifyWindowSec: 60,
+      maxSettlementDelaySec: 900,
+      privacyMode: "vault-batched-v1",
+    } as const;
+    const paymentDetailsHash = computePaymentDetailsHash(paymentDetails);
     const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
     const unsignedPayload: Omit<PaymentPayload, "clientSig"> = {
       version: 1,
@@ -227,15 +287,46 @@ describe("enclave_api", () => {
       clientSig: signPaymentPayload(client, unsignedPayload),
     };
 
-    const verifyRes = await postJson("/v1/verify", {
-      paymentPayload,
-      requestContext,
-    });
+    const verifyRes = await postJson(
+      "/v1/verify",
+      {
+        paymentPayload,
+        paymentDetails,
+        requestContext,
+      },
+      {
+        Authorization: `Bearer ${providerApiKey}`,
+        "x-a402-provider-id": providerId,
+      },
+      PROVIDER_MTLS ?? undefined
+    );
     expect(verifyRes.status).to.equal(200);
     const verifyBody = await readJson<VerifyResponse>(verifyRes);
     expect(verifyBody.ok).to.equal(true);
     expect(verifyBody.providerId).to.equal(providerId);
     expect(verifyBody.amount).to.equal(paymentAmount.toString());
+    expect(verifyBody.verificationReceipt).to.be.a("string").and.not.equal("");
+    const verificationReceipt = decodeVerificationReceiptEnvelope(
+      verifyBody.verificationReceipt
+    );
+    expect(verificationReceipt.verificationId).to.equal(
+      verifyBody.verificationId
+    );
+    expect(verificationReceipt.reservationId).to.equal(verifyBody.reservationId);
+    expect(verificationReceipt.paymentId).to.equal(paymentPayload.paymentId);
+    expect(verificationReceipt.client).to.equal(client.publicKey.toBase58());
+    expect(verificationReceipt.providerId).to.equal(providerId);
+    expect(verificationReceipt.amount).to.equal(paymentAmount.toString());
+    expect(verificationReceipt.requestHash).to.equal(requestHash);
+    expect(verificationReceipt.paymentDetailsHash).to.equal(
+      paymentDetailsHash
+    );
+    expect(verificationReceipt.reservationExpiresAt).to.equal(
+      verifyBody.reservationExpiresAt
+    );
+    expect(verificationReceipt.vaultConfig).to.equal(attestation.vaultConfig);
+    expect(verificationReceipt.signature).to.be.a("string").and.not.equal("");
+    expect(verificationReceipt.message).to.be.a("string").and.not.equal("");
 
     const balanceAfterVerifyRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
@@ -247,11 +338,19 @@ describe("enclave_api", () => {
     expect(balanceAfterVerify.free).to.equal(1_400_000);
     expect(balanceAfterVerify.locked).to.equal(paymentAmount);
 
-    const settleRes = await postJson("/v1/settle", {
-      verificationId: verifyBody.verificationId,
-      resultHash: "ab".repeat(32),
-      statusCode: 200,
-    });
+    const settleRes = await postJson(
+      "/v1/settle",
+      {
+        verificationId: verifyBody.verificationId,
+        resultHash: "ab".repeat(32),
+        statusCode: 200,
+      },
+      {
+        Authorization: `Bearer ${providerApiKey}`,
+        "x-a402-provider-id": providerId,
+      },
+      PROVIDER_MTLS ?? undefined
+    );
     expect(settleRes.status).to.equal(200);
     const settleBody = await readJson<SettleResponse>(settleRes);
     expect(settleBody.ok).to.equal(true);
@@ -271,11 +370,19 @@ describe("enclave_api", () => {
     expect(providerReceipt.freeBalance).to.equal(paymentAmount);
     expect(providerReceipt.lockedBalance).to.equal(0);
 
-    const settleRetryRes = await postJson("/v1/settle", {
-      verificationId: verifyBody.verificationId,
-      resultHash: "ab".repeat(32),
-      statusCode: 200,
-    });
+    const settleRetryRes = await postJson(
+      "/v1/settle",
+      {
+        verificationId: verifyBody.verificationId,
+        resultHash: "ab".repeat(32),
+        statusCode: 200,
+      },
+      {
+        Authorization: `Bearer ${providerApiKey}`,
+        "x-a402-provider-id": providerId,
+      },
+      PROVIDER_MTLS ?? undefined
+    );
     expect(settleRetryRes.status).to.equal(200);
     const settleRetryBody = await readJson<SettleResponse>(settleRetryRes);
     expect(settleRetryBody.settlementId).to.equal(settleBody.settlementId);
@@ -335,6 +442,9 @@ describe("enclave_api", () => {
         nonce: "123",
         clientSig: "",
       },
+      paymentDetails: {
+        scheme: "invalid-scheme",
+      },
       requestContext: {
         method: "POST",
         origin: "http://localhost",
@@ -364,6 +474,9 @@ describe("enclave_api", () => {
         expiresAt: new Date(Date.now() + 3600000).toISOString(),
         nonce: "123",
         clientSig: "",
+      },
+      paymentDetails: {
+        scheme: "a402-svm-v1",
       },
       requestContext: {
         method: "POST",

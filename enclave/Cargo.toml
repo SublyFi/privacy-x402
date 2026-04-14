@@ -11,6 +11,7 @@ path = "src/main.rs"
 a402_vault = { path = "../programs/a402_vault", features = ["cpi"] }
 axum = { version = "0.7", features = ["json"] }
 hyper = { version = "1.0" }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,3 +38,7 @@ solana-transaction-status-client-types = "2.3.13"
 reqwest = { version = "0.12", features = ["json"] }
 aes-gcm = "0.10"
 rsa = { version = "0.9", features = ["pem"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+tower = { version = "0.5", features = ["util"] }

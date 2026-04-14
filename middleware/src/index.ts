@@ -1,4 +1,9 @@
-export { a402Middleware } from "./middleware";
+export {
+  a402Middleware,
+  captureA402RawBody,
+  lookupSettlementStatus,
+} from "./middleware";
+export { postFacilitatorJson } from "./facilitator";
 export {
   buildAscPaymentMessage,
   decryptAscResult,
@@ -15,4 +20,5 @@ export type {
   AscDeliveryArtifact,
   AscDeliveryInput,
   PricingFn,
+  SettlementStatusResponse,
 } from "./types";

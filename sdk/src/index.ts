@@ -5,7 +5,10 @@ export {
   parseA402UserDataEnvelope,
   verifyNitroAttestationDocument,
 } from "./attestation";
-export { decodeParticipantReceiptEnvelope } from "./receipt";
+export {
+  decodeParticipantReceiptEnvelope,
+  decodeVerificationReceiptEnvelope,
+} from "./receipt";
 export type { DecryptedAuditRecord, RawAuditRecord } from "./audit";
 export {
   computePaymentDetailsHash,
@@ -28,6 +31,7 @@ export type {
   PaymentPayload,
   PaymentRequiredResponse,
   PaymentResponse,
+  VerificationReceiptEnvelope,
   NitroAttestationConfig,
   NitroAttestationDocument,
   NitroAttestationPolicy,

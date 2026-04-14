@@ -18,7 +18,7 @@ use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{
     ChannelState, ClientBalance, ProviderCredit, ProviderRegistration, Reservation,
-    SettlementRecord,
+    SettlementBatchInfo, SettlementRecord,
 };
 
 const DEFAULT_SNAPSHOT_EVERY_SEC: u64 = 30;
@@ -61,6 +61,8 @@ struct StateSnapshot {
     provider_credits: Vec<ProviderCredit>,
     providers: Vec<ProviderRegistration>,
     settlement_history: Vec<SettlementRecord>,
+    #[serde(default)]
+    settlement_batches: Vec<SnapshotSettlementBatch>,
     active_channels: Vec<ChannelState>,
     auditor_master_secret: String,
     auditor_epoch: u32,
@@ -76,6 +78,12 @@ struct StateSnapshot {
 struct SnapshotClientBalance {
     client: String,
     balance: ClientBalance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotSettlementBatch {
+    settlement_id: String,
+    batch: SettlementBatchInfo,
 }
 
 impl SnapshotManager {
@@ -329,6 +337,17 @@ async fn capture_snapshot(
         .collect::<Vec<_>>();
     settlement_history.sort_by(|a, b| a.settlement_id.cmp(&b.settlement_id));
 
+    let mut settlement_batches = state
+        .vault
+        .settlement_batches
+        .iter()
+        .map(|entry| SnapshotSettlementBatch {
+            settlement_id: entry.key().clone(),
+            batch: entry.value().clone(),
+        })
+        .collect::<Vec<_>>();
+    settlement_batches.sort_by(|a, b| a.settlement_id.cmp(&b.settlement_id));
+
     let mut active_channels = state
         .vault
         .active_channels
@@ -366,6 +385,7 @@ async fn capture_snapshot(
         provider_credits,
         providers,
         settlement_history,
+        settlement_batches,
         active_channels,
         auditor_master_secret: BASE64.encode(auditor_master_secret),
         auditor_epoch: state.vault.auditor_epoch.load(Ordering::SeqCst),
@@ -385,6 +405,7 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
     state.vault.provider_credits.clear();
     state.vault.providers.clear();
     state.vault.settlement_history.clear();
+    state.vault.settlement_batches.clear();
     state.vault.active_channels.clear();
 
     for item in &snapshot.client_balances {
@@ -426,6 +447,13 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
             .vault
             .settlement_history
             .insert(record.settlement_id.clone(), record.clone());
+    }
+
+    for item in &snapshot.settlement_batches {
+        state
+            .vault
+            .settlement_batches
+            .insert(item.settlement_id.clone(), item.batch.clone());
     }
 
     for channel in &snapshot.active_channels {
@@ -607,6 +635,7 @@ mod tests {
             watchtower_url: None,
             attestation_document: String::new(),
             attestation_is_local_dev: true,
+            provider_mtls_enabled: false,
         })
     }
 
@@ -635,7 +664,8 @@ mod tests {
                 asset_mint: Pubkey::new_unique(),
                 allowed_origins: vec!["http://localhost".to_string()],
                 auth_mode: "bearer".to_string(),
-                api_key_hash: vec![1, 2, 3],
+                api_key_hash: Some(vec![1, 2, 3]),
+                mtls_cert_fingerprint: None,
             },
         );
         state.vault.provider_credits.insert(

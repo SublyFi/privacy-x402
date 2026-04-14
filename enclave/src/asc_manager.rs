@@ -792,7 +792,8 @@ mod tests {
                 asset_mint: Pubkey::new_unique(),
                 allowed_origins: vec!["*".to_string()],
                 auth_mode: "api-key".to_string(),
-                api_key_hash: vec![0; 32],
+                api_key_hash: Some(vec![0; 32]),
+                mtls_cert_fingerprint: None,
             },
         );
         provider_pubkey

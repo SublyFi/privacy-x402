@@ -6,8 +6,17 @@ export interface A402ProviderConfig {
   facilitatorUrl: string;
   /** Provider's registered ID */
   providerId: string;
+  /** Provider auth mode used against the facilitator */
+  authMode?: "bearer" | "api-key" | "mtls";
   /** Provider API key for facilitator auth */
-  apiKey: string;
+  apiKey?: string;
+  /** Optional mTLS client certificate configuration */
+  mtls?: {
+    certPath: string;
+    keyPath: string;
+    caPath?: string;
+    serverName?: string;
+  };
   /** Provider's settlement token account (base58) */
   payTo: string;
   /** CAIP-2 network identifier */
@@ -67,10 +76,21 @@ export interface A402MiddlewareOptions {
 
 /** Extended request with payment context */
 export interface A402Request extends Request {
+  rawBody?: Buffer | string;
   a402?: {
     verificationId: string;
     paymentId: string;
     amount: string;
     providerId: string;
   };
+}
+
+export interface SettlementStatusResponse {
+  ok: boolean;
+  settlementId: string;
+  verificationId: string;
+  providerId: string;
+  status: string;
+  batchId: number | null;
+  txSignature: string | null;
 }

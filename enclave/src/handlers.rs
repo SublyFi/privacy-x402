@@ -1,12 +1,18 @@
 use axum::extract::State;
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use axum::Json;
+use a402_vault::constants::{
+    VAULT_STATUS_ACTIVE, VAULT_STATUS_MIGRATING, VAULT_STATUS_PAUSED, VAULT_STATUS_RETIRED,
+};
+use a402_vault::state::VaultConfig as OnChainVaultConfig;
+use anchor_client::anchor_lang::AccountDeserialize;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,8 +25,12 @@ use crate::attestation::response_window;
 use crate::batch;
 use crate::deposit_detector::DepositDetector;
 use crate::error::EnclaveError;
-use crate::state::{Reservation, ReservationStatus, VaultState};
+use crate::state::{Reservation, ReservationStatus, VaultLifecycle, VaultState};
+use crate::tls::INTERNAL_MTLS_FINGERPRINT_HEADER;
 use crate::wal::{Wal, WalEntry};
+
+const PROVIDER_ID_HEADER: &str = "x-a402-provider-id";
+const PROVIDER_AUTH_HEADER: &str = "x-a402-provider-auth";
 
 pub struct AppState {
     pub vault: Arc<VaultState>,
@@ -32,6 +42,7 @@ pub struct AppState {
     pub watchtower_url: Option<String>,
     pub attestation_document: String,
     pub attestation_is_local_dev: bool,
+    pub provider_mtls_enabled: bool,
 }
 
 // ── Attestation ──
@@ -102,30 +113,182 @@ pub struct VerifyRequest {
 
 // ── Provider Authentication Helper (§8.2 requirement 1) ──
 
-/// Authenticate provider from Authorization header.
-/// Returns the authenticated provider_id on success.
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+async fn load_vault_lifecycle(state: &Arc<AppState>) -> Result<VaultLifecycle, EnclaveError> {
+    if cfg!(test) {
+        return Ok(state.vault.lifecycle.read().await.clone());
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let rpc = RpcClient::new(state.vault.solana.rpc_url.clone());
+    let account_data = rpc
+        .get_account_data(&state.vault.vault_config)
+        .await
+        .map_err(|_| EnclaveError::VaultStatusUnavailable)?;
+    let mut slice: &[u8] = account_data.as_slice();
+    let vault_config = OnChainVaultConfig::try_deserialize(&mut slice)
+        .map_err(|_| EnclaveError::VaultStatusUnavailable)?;
+
+    let lifecycle = VaultLifecycle {
+        status: vault_config.status,
+        successor_vault: vault_config.successor_vault,
+        exit_deadline: vault_config.exit_deadline,
+        synced_at_ms: now_ms,
+    };
+    *state.vault.lifecycle.write().await = lifecycle.clone();
+    Ok(lifecycle)
+}
+
+async fn ensure_vault_allows_new_verification(state: &Arc<AppState>) -> Result<(), EnclaveError> {
+    let lifecycle = load_vault_lifecycle(state).await?;
+    match lifecycle.status {
+        VAULT_STATUS_ACTIVE => Ok(()),
+        VAULT_STATUS_PAUSED => Err(EnclaveError::VaultPaused),
+        VAULT_STATUS_MIGRATING => Err(EnclaveError::VaultMigrating),
+        VAULT_STATUS_RETIRED => Err(EnclaveError::VaultRetired),
+        _ => Err(EnclaveError::VaultStatusUnavailable),
+    }
+}
+
+async fn ensure_vault_allows_existing_reservation_ops(
+    state: &Arc<AppState>,
+) -> Result<(), EnclaveError> {
+    let lifecycle = load_vault_lifecycle(state).await?;
+    match lifecycle.status {
+        VAULT_STATUS_ACTIVE => Ok(()),
+        VAULT_STATUS_PAUSED => Err(EnclaveError::VaultPaused),
+        VAULT_STATUS_MIGRATING => {
+            if Utc::now().timestamp() <= lifecycle.exit_deadline {
+                Ok(())
+            } else {
+                Err(EnclaveError::VaultRetired)
+            }
+        }
+        VAULT_STATUS_RETIRED => Err(EnclaveError::VaultRetired),
+        _ => Err(EnclaveError::VaultStatusUnavailable),
+    }
+}
+
+async fn ensure_vault_allows_withdraw(state: &Arc<AppState>) -> Result<(), EnclaveError> {
+    let lifecycle = load_vault_lifecycle(state).await?;
+    match lifecycle.status {
+        VAULT_STATUS_ACTIVE => Ok(()),
+        VAULT_STATUS_MIGRATING => {
+            if Utc::now().timestamp() <= lifecycle.exit_deadline {
+                Ok(())
+            } else {
+                Err(EnclaveError::VaultRetired)
+            }
+        }
+        VAULT_STATUS_PAUSED => Err(EnclaveError::VaultPaused),
+        VAULT_STATUS_RETIRED => Err(EnclaveError::VaultRetired),
+        _ => Err(EnclaveError::VaultStatusUnavailable),
+    }
+}
+
+fn authenticate_registered_provider(
+    provider: &crate::state::ProviderRegistration,
+    headers: &HeaderMap,
+) -> Result<(), EnclaveError> {
+    match provider.auth_mode.as_str() {
+        "bearer" => {
+            let api_key_hash = provider
+                .api_key_hash
+                .as_deref()
+                .ok_or(EnclaveError::InvalidProviderAuthConfig)?;
+            if api_key_hash.len() != 32 {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+
+            let provider_id = header_value(headers, PROVIDER_ID_HEADER)
+                .ok_or(EnclaveError::ProviderAuthFailed)?;
+            if provider_id != provider.provider_id {
+                return Err(EnclaveError::ProviderIdMismatch);
+            }
+
+            let auth_header = headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or(EnclaveError::ProviderAuthFailed)?;
+            let token = auth_header
+                .strip_prefix("Bearer ")
+                .ok_or(EnclaveError::ProviderAuthFailed)?;
+            if Sha256::digest(token.as_bytes()).as_slice() != api_key_hash {
+                return Err(EnclaveError::ProviderAuthFailed);
+            }
+            Ok(())
+        }
+        "api-key" => {
+            let api_key_hash = provider
+                .api_key_hash
+                .as_deref()
+                .ok_or(EnclaveError::InvalidProviderAuthConfig)?;
+            if api_key_hash.len() != 32 {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+
+            if let Some(provider_id) = header_value(headers, PROVIDER_ID_HEADER) {
+                if provider_id != provider.provider_id {
+                    return Err(EnclaveError::ProviderIdMismatch);
+                }
+            }
+
+            let token = header_value(headers, PROVIDER_AUTH_HEADER)
+                .or_else(|| {
+                    headers
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.strip_prefix("Bearer "))
+                })
+                .ok_or(EnclaveError::ProviderAuthFailed)?;
+            if Sha256::digest(token.as_bytes()).as_slice() != api_key_hash {
+                return Err(EnclaveError::ProviderAuthFailed);
+            }
+            Ok(())
+        }
+        "mtls" => {
+            let expected_fingerprint = provider
+                .mtls_cert_fingerprint
+                .as_deref()
+                .ok_or(EnclaveError::InvalidProviderAuthConfig)?;
+            if expected_fingerprint.len() != 32 {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+
+            if let Some(provider_id) = header_value(headers, PROVIDER_ID_HEADER) {
+                if provider_id != provider.provider_id {
+                    return Err(EnclaveError::ProviderIdMismatch);
+                }
+            }
+
+            let presented_fingerprint = header_value(headers, INTERNAL_MTLS_FINGERPRINT_HEADER)
+                .ok_or(EnclaveError::ProviderAuthFailed)?;
+            let presented_fingerprint = hex::decode(presented_fingerprint)
+                .map_err(|_| EnclaveError::ProviderAuthFailed)?;
+            if presented_fingerprint.as_slice() != expected_fingerprint {
+                return Err(EnclaveError::ProviderAuthFailed);
+            }
+            Ok(())
+        }
+        _ => Err(EnclaveError::UnsupportedProviderAuthMode),
+    }
+}
+
 fn authenticate_provider(
     state: &Arc<AppState>,
     headers: &HeaderMap,
+    expected_provider_id: &str,
 ) -> Result<String, EnclaveError> {
-    let auth_header = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(EnclaveError::ProviderAuthFailed)?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(EnclaveError::ProviderAuthFailed)?;
-
-    let token_hash = Sha256::digest(token.as_bytes()).to_vec();
-
-    for entry in state.vault.providers.iter() {
-        if entry.value().api_key_hash == token_hash {
-            return Ok(entry.key().clone());
-        }
-    }
-
-    Err(EnclaveError::ProviderAuthFailed)
+    let provider = state
+        .vault
+        .providers
+        .get(expected_provider_id)
+        .ok_or(EnclaveError::ProviderNotFound)?;
+    authenticate_registered_provider(provider.value(), headers)?;
+    Ok(expected_provider_id.to_string())
 }
 
 /// Compute canonical JSON hash of payment details (§6, paymentDetailsHash).
@@ -173,24 +336,100 @@ pub struct VerifyResponse {
     pub verification_receipt: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationReceiptEnvelope {
+    pub verification_id: String,
+    pub reservation_id: String,
+    pub payment_id: String,
+    pub client: String,
+    pub provider_id: String,
+    pub amount: String,
+    pub request_hash: String,
+    pub payment_details_hash: String,
+    pub reservation_expires_at: String,
+    pub vault_config: String,
+    pub signature: String,
+    pub message: String,
+}
+
+fn encode_verification_receipt_envelope(
+    receipt: &VerificationReceiptEnvelope,
+) -> Result<String, EnclaveError> {
+    serde_json::to_vec(receipt)
+        .map(|json| BASE64.encode(json))
+        .map_err(|e| EnclaveError::Internal(format!("VerificationReceipt serialization failed: {e}")))
+}
+
+fn issue_verification_receipt(
+    state: &Arc<AppState>,
+    reservation: &Reservation,
+) -> Result<String, EnclaveError> {
+    let reservation_expires_at =
+        chrono::DateTime::from_timestamp(reservation.expires_at, 0).unwrap_or_default();
+    let request_hash = hex::encode(reservation.request_hash);
+    let payment_details_hash = hex::encode(reservation.payment_details_hash);
+    let message = state.vault.build_verification_receipt_message(
+        &reservation.verification_id,
+        &reservation.reservation_id,
+        &reservation.payment_id,
+        &reservation.client,
+        &reservation.provider_id,
+        reservation.amount,
+        &request_hash,
+        &payment_details_hash,
+        reservation.expires_at,
+    );
+    let signature = state.vault.sign_message(&message);
+
+    encode_verification_receipt_envelope(&VerificationReceiptEnvelope {
+        verification_id: reservation.verification_id.clone(),
+        reservation_id: reservation.reservation_id.clone(),
+        payment_id: reservation.payment_id.clone(),
+        client: reservation.client.to_string(),
+        provider_id: reservation.provider_id.clone(),
+        amount: reservation.amount.to_string(),
+        request_hash,
+        payment_details_hash,
+        reservation_expires_at: reservation_expires_at.to_rfc3339(),
+        vault_config: state.vault.vault_config.to_string(),
+        signature: BASE64.encode(signature),
+        message: BASE64.encode(message),
+    })
+}
+
 pub async fn post_verify(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, EnclaveError> {
     let payload = &req.payment_payload;
+    let payment_details = req
+        .payment_details
+        .as_ref()
+        .ok_or(EnclaveError::PaymentDetailsRequired)?;
 
     if state.deposit_detector.is_enabled() && !state.deposit_detector.is_ready() {
         return Err(EnclaveError::DepositSyncInProgress);
     }
 
-    // C5: Authenticate provider from Authorization header (§8.2 requirement 1)
-    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
+    ensure_vault_allows_new_verification(&state).await?;
 
     // 1. Validate scheme
     if payload.scheme != "a402-svm-v1" {
         return Err(EnclaveError::InvalidScheme);
     }
+    if payment_details
+        .get("scheme")
+        .and_then(|value| value.as_str())
+        != Some("a402-svm-v1")
+    {
+        return Err(EnclaveError::InvalidScheme);
+    }
+
+    // C5: Authenticate provider from provider registration + headers (§8.2 requirement 1)
+    let authenticated_provider_id =
+        authenticate_provider(&state, &headers, &payload.provider_id)?;
 
     // 2. Validate provider exists and matches authenticated identity
     let provider = state
@@ -224,13 +463,11 @@ pub async fn post_verify(
     }
 
     // C7: Validate paymentDetailsHash via canonical JSON (§8.2 requirement 3)
-    if let Some(ref payment_details) = req.payment_details {
-        let computed_hash = compute_payment_details_hash(payment_details);
-        let provided_hash = hex::decode(&payload.payment_details_hash)
-            .map_err(|_| EnclaveError::PaymentDetailsHashMismatch)?;
-        if computed_hash != provided_hash {
-            return Err(EnclaveError::PaymentDetailsHashMismatch);
-        }
+    let computed_hash = compute_payment_details_hash(payment_details);
+    let provided_hash = hex::decode(&payload.payment_details_hash)
+        .map_err(|_| EnclaveError::PaymentDetailsHashMismatch)?;
+    if computed_hash != provided_hash {
+        return Err(EnclaveError::PaymentDetailsHashMismatch);
     }
 
     // Drop the provider reference before further borrows
@@ -276,6 +513,7 @@ pub async fn post_verify(
             if existing.request_hash == req_hash {
                 let res_expires =
                     chrono::DateTime::from_timestamp(existing.expires_at, 0).unwrap_or_default();
+                let verification_receipt = issue_verification_receipt(&state, &existing)?;
                 return Ok(Json(VerifyResponse {
                     ok: true,
                     verification_id: existing.verification_id.clone(),
@@ -283,7 +521,7 @@ pub async fn post_verify(
                     reservation_expires_at: res_expires.to_rfc3339(),
                     provider_id: existing.provider_id.clone(),
                     amount: existing.amount.to_string(),
-                    verification_receipt: String::new(),
+                    verification_receipt,
                 }));
             } else {
                 return Err(EnclaveError::PaymentIdReused);
@@ -329,10 +567,15 @@ pub async fn post_verify(
             .wal
             .append(WalEntry::ReservationCreated {
                 verification_id: verification_id.clone(),
+                reservation_id: Some(reservation_id.clone()),
                 payment_id: payload.payment_id.clone(),
                 client: payload.client.clone(),
                 provider_id: payload.provider_id.clone(),
                 amount,
+                request_hash: Some(hex::encode(request_hash)),
+                payment_details_hash: Some(hex::encode(payment_details_hash)),
+                created_at: Some(now),
+                expires_at: Some(reservation_expires_at),
             })
             .await
             .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
@@ -352,6 +595,16 @@ pub async fn post_verify(
 
     info!(verification_id = %verification_id, amount, "Payment verified and reserved");
 
+    let verification_receipt = issue_verification_receipt(
+        &state,
+        state
+            .vault
+            .reservations
+            .get(&verification_id)
+            .ok_or(EnclaveError::ReservationNotFound)?
+            .value(),
+    )?;
+
     Ok(Json(VerifyResponse {
         ok: true,
         verification_id,
@@ -359,7 +612,7 @@ pub async fn post_verify(
         reservation_expires_at: res_expires.to_rfc3339(),
         provider_id: payload.provider_id.clone(),
         amount: amount.to_string(),
-        verification_receipt: String::new(),
+        verification_receipt,
     }))
 }
 
@@ -392,9 +645,6 @@ pub async fn post_settle(
     headers: HeaderMap,
     Json(req): Json<SettleRequest>,
 ) -> Result<Json<SettleResponse>, EnclaveError> {
-    // C5: Authenticate provider (§8.3 — same auth as /verify)
-    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
-
     let (status, client, provider_id, amount, existing_settlement_id, settled_at) = {
         let reservation = state
             .vault
@@ -410,6 +660,12 @@ pub async fn post_settle(
             reservation.settled_at,
         )
     };
+
+    ensure_vault_allows_existing_reservation_ops(&state).await?;
+
+    // C5: Authenticate provider (§8.3 — same auth as /verify)
+    let authenticated_provider_id =
+        authenticate_provider(&state, &headers, &provider_id)?;
 
     // Verify authenticated provider owns this reservation
     if authenticated_provider_id != provider_id {
@@ -475,6 +731,7 @@ pub async fn post_settle(
                 verification_id: req.verification_id.clone(),
                 provider_id: provider_id.clone(),
                 amount,
+                settled_at: Some(now),
             })
             .await
             .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
@@ -508,6 +765,62 @@ pub async fn post_settle(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettlementStatusRequest {
+    pub settlement_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettlementStatusResponse {
+    pub ok: bool,
+    pub settlement_id: String,
+    pub verification_id: String,
+    pub provider_id: String,
+    pub status: String,
+    pub batch_id: Option<u64>,
+    pub tx_signature: Option<String>,
+}
+
+pub async fn post_settlement_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SettlementStatusRequest>,
+) -> Result<Json<SettlementStatusResponse>, EnclaveError> {
+    let reservation = state
+        .vault
+        .reservations
+        .iter()
+        .find(|entry| {
+            entry
+                .settlement_id
+                .as_ref()
+                .map(|settlement_id| settlement_id == &req.settlement_id)
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.clone())
+        .ok_or(EnclaveError::SettlementNotFound)?;
+
+    authenticate_provider(&state, &headers, &reservation.provider_id)?;
+
+    let batch_info = state
+        .vault
+        .settlement_batches
+        .get(&req.settlement_id)
+        .map(|entry| entry.clone());
+
+    Ok(Json(SettlementStatusResponse {
+        ok: true,
+        settlement_id: req.settlement_id,
+        verification_id: reservation.verification_id,
+        provider_id: reservation.provider_id,
+        status: format!("{:?}", reservation.status),
+        batch_id: batch_info.as_ref().map(|entry| entry.batch_id),
+        tx_signature: batch_info.map(|entry| entry.tx_signature),
+    }))
+}
+
 // ── Cancel ──
 
 #[derive(Deserialize)]
@@ -529,8 +842,19 @@ pub async fn post_cancel(
     headers: HeaderMap,
     Json(req): Json<CancelRequest>,
 ) -> Result<Json<CancelResponse>, EnclaveError> {
+    let provider_id = state
+        .vault
+        .reservations
+        .get(&req.verification_id)
+        .ok_or(EnclaveError::ReservationNotFound)?
+        .provider_id
+        .clone();
+
+    ensure_vault_allows_existing_reservation_ops(&state).await?;
+
     // C8: Authenticate provider (§8.5)
-    let authenticated_provider_id = authenticate_provider(&state, &headers)?;
+    let authenticated_provider_id =
+        authenticate_provider(&state, &headers, &provider_id)?;
 
     let mut reservation = state
         .vault
@@ -613,6 +937,8 @@ pub async fn post_withdraw_auth(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WithdrawAuthRequest>,
 ) -> Result<Json<WithdrawAuthResponse>, EnclaveError> {
+    ensure_vault_allows_withdraw(&state).await?;
+
     let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
     let recipient_ata = Pubkey::from_str(&req.recipient_ata)
         .map_err(|_| EnclaveError::Internal("Invalid recipient ATA".into()))?;
@@ -929,7 +1255,10 @@ pub struct RegisterProviderRequest {
     pub asset_mint: String,
     pub allowed_origins: Vec<String>,
     pub auth_mode: String,
+    #[serde(default)]
     pub api_key_hash: String,
+    #[serde(default)]
+    pub mtls_cert_fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -954,7 +1283,32 @@ pub async fn post_register_provider(
     let asset_mint = Pubkey::from_str(&req.asset_mint)
         .map_err(|_| EnclaveError::Internal("Invalid asset mint".into()))?;
 
-    let api_key_hash = hex::decode(&req.api_key_hash).unwrap_or_default();
+    let (api_key_hash, mtls_cert_fingerprint) = match req.auth_mode.as_str() {
+        "bearer" | "api-key" => {
+            let api_key_hash = hex::decode(&req.api_key_hash)
+                .map_err(|_| EnclaveError::InvalidProviderAuthConfig)?;
+            if api_key_hash.len() != 32 {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+            (Some(api_key_hash), None)
+        }
+        "mtls" => {
+            if !state.provider_mtls_enabled {
+                return Err(EnclaveError::MtlsNotEnabled);
+            }
+            let fingerprint_hex = req
+                .mtls_cert_fingerprint
+                .as_deref()
+                .ok_or(EnclaveError::InvalidProviderAuthConfig)?;
+            let fingerprint = hex::decode(fingerprint_hex)
+                .map_err(|_| EnclaveError::InvalidProviderAuthConfig)?;
+            if fingerprint.len() != 32 {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+            (None, Some(fingerprint))
+        }
+        _ => return Err(EnclaveError::UnsupportedProviderAuthMode),
+    };
 
     let registration = crate::state::ProviderRegistration {
         provider_id: req.provider_id.clone(),
@@ -966,6 +1320,7 @@ pub async fn post_register_provider(
         allowed_origins: req.allowed_origins.clone(),
         auth_mode: req.auth_mode.clone(),
         api_key_hash,
+        mtls_cert_fingerprint,
     };
 
     {
@@ -981,7 +1336,12 @@ pub async fn post_register_provider(
                 asset_mint: req.asset_mint.clone(),
                 allowed_origins: req.allowed_origins.clone(),
                 auth_mode: req.auth_mode.clone(),
-                api_key_hash: req.api_key_hash.clone(),
+                api_key_hash: if req.api_key_hash.is_empty() {
+                    None
+                } else {
+                    Some(req.api_key_hash.clone())
+                },
+                mtls_cert_fingerprint: req.mtls_cert_fingerprint.clone(),
             })
             .await
             .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
@@ -1216,31 +1576,7 @@ fn verify_channel_provider_auth(
         .providers
         .get(&provider_id)
         .ok_or(EnclaveError::ProviderNotFound)?;
-
-    if provider.api_key_hash.len() != 32 {
-        return Err(EnclaveError::ProviderAuthFailed);
-    }
-    if provider.auth_mode != "api-key" && provider.auth_mode != "bearer" {
-        return Err(EnclaveError::ProviderAuthFailed);
-    }
-
-    let provider_secret = headers
-        .get("x-a402-provider-auth")
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| {
-            headers
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-        })
-        .ok_or(EnclaveError::ProviderAuthFailed)?;
-
-    let computed_hash = Sha256::digest(provider_secret.as_bytes());
-    if computed_hash.as_slice() != provider.api_key_hash.as_slice() {
-        return Err(EnclaveError::ProviderAuthFailed);
-    }
-
-    Ok(())
+    authenticate_registered_provider(provider.value(), headers)
 }
 
 fn build_channel_open_message(client: &str, provider_id: &str, initial_deposit: u64) -> String {
@@ -1298,6 +1634,8 @@ pub async fn post_channel_open(
     State(state): State<Arc<AppState>>,
     Json(req): Json<OpenChannelRequest>,
 ) -> Result<Json<OpenChannelResponse>, EnclaveError> {
+    ensure_vault_allows_new_verification(&state).await?;
+
     let _guard = state.asc_ops_lock.lock().await;
     let _persist_guard = state.persistence_lock.lock().await;
     let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
@@ -1355,6 +1693,8 @@ pub async fn post_channel_request(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChannelRequestReq>,
 ) -> Result<Json<ChannelRequestResponse>, EnclaveError> {
+    ensure_vault_allows_new_verification(&state).await?;
+
     let _guard = state.asc_ops_lock.lock().await;
     let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_request_message(
@@ -1428,6 +1768,8 @@ pub async fn post_channel_deliver(
     headers: HeaderMap,
     Json(req): Json<ChannelDeliverRequest>,
 ) -> Result<Json<ChannelDeliverResponse>, EnclaveError> {
+    ensure_vault_allows_existing_reservation_ops(&state).await?;
+
     let _guard = state.asc_ops_lock.lock().await;
     let _persist_guard = state.persistence_lock.lock().await;
     verify_channel_provider_auth(&state, &req.channel_id, &headers)?;
@@ -1534,6 +1876,8 @@ pub async fn post_channel_finalize(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChannelFinalizeRequest>,
 ) -> Result<Json<ChannelFinalizeResponse>, EnclaveError> {
+    ensure_vault_allows_existing_reservation_ops(&state).await?;
+
     let _guard = state.asc_ops_lock.lock().await;
     let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_finalize_message(&req.channel_id, &req.adaptor_secret);
@@ -1586,7 +1930,6 @@ pub struct CloseChannelRequest {
 pub struct CloseChannelResponse {
     pub ok: bool,
     pub channel_id: String,
-    pub client: String,
     pub provider_id: String,
     pub returned_to_client: u64,
     pub provider_earned: u64,
@@ -1596,6 +1939,8 @@ pub async fn post_channel_close(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CloseChannelRequest>,
 ) -> Result<Json<CloseChannelResponse>, EnclaveError> {
+    ensure_vault_allows_existing_reservation_ops(&state).await?;
+
     let _guard = state.asc_ops_lock.lock().await;
     let _persist_guard = state.persistence_lock.lock().await;
     let message = build_channel_close_message(&req.channel_id);
@@ -1622,7 +1967,6 @@ pub async fn post_channel_close(
     Ok(Json(CloseChannelResponse {
         ok: true,
         channel_id: req.channel_id,
-        client: outcome.client.to_string(),
         provider_id: outcome.provider_id,
         returned_to_client: outcome.returned_to_client,
         provider_earned: outcome.provider_earned,
@@ -1646,7 +1990,30 @@ mod tests {
         BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
     }
 
-    async fn make_app_state() -> (Arc<AppState>, PathBuf) {
+    fn sign_payment_payload(signing_key: &SigningKey, payload: &PaymentPayload) -> String {
+        use ed25519_dalek::Signer;
+
+        let mut message = String::new();
+        message.push_str("A402-SVM-V1-AUTH\n");
+        message.push_str(&format!("{}\n", payload.version));
+        message.push_str(&format!("{}\n", payload.scheme));
+        message.push_str(&format!("{}\n", payload.payment_id));
+        message.push_str(&format!("{}\n", payload.client));
+        message.push_str(&format!("{}\n", payload.vault));
+        message.push_str(&format!("{}\n", payload.provider_id));
+        message.push_str(&format!("{}\n", payload.pay_to));
+        message.push_str(&format!("{}\n", payload.network));
+        message.push_str(&format!("{}\n", payload.asset_mint));
+        message.push_str(&format!("{}\n", payload.amount));
+        message.push_str(&format!("{}\n", payload.request_hash));
+        message.push_str(&format!("{}\n", payload.payment_details_hash));
+        message.push_str(&format!("{}\n", payload.expires_at));
+        message.push_str(&format!("{}\n", payload.nonce));
+
+        BASE64.encode(signing_key.sign(message.as_bytes()).to_bytes())
+    }
+
+    async fn make_app_state_with_mtls(provider_mtls_enabled: bool) -> (Arc<AppState>, PathBuf) {
         let signing_key = SigningKey::generate(&mut OsRng);
         let usdc_mint = Pubkey::new_unique();
         let solana = SolanaRuntimeConfig {
@@ -1682,9 +2049,168 @@ mod tests {
                 watchtower_url: None,
                 attestation_document: String::new(),
                 attestation_is_local_dev: true,
+                provider_mtls_enabled,
             }),
             wal_path,
         )
+    }
+
+    async fn make_app_state() -> (Arc<AppState>, PathBuf) {
+        make_app_state_with_mtls(false).await
+    }
+
+    #[tokio::test]
+    async fn register_provider_rejects_mtls_when_listener_disabled() {
+        let (state, wal_path) = make_app_state().await;
+
+        let error = post_register_provider(
+            State(state.clone()),
+            Json(RegisterProviderRequest {
+                provider_id: "provider-mtls-disabled".to_string(),
+                display_name: "mTLS Provider".to_string(),
+                participant_pubkey: None,
+                settlement_token_account: Pubkey::new_unique().to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique().to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "mtls".to_string(),
+                api_key_hash: String::new(),
+                mtls_cert_fingerprint: Some("ab".repeat(32)),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, EnclaveError::MtlsNotEnabled));
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_mtls_provider_with_matching_client_certificate_fingerprint() {
+        let (state, wal_path) = make_app_state_with_mtls(true).await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let provider_id = "provider-mtls".to_string();
+        let settlement_token_account = Pubkey::new_unique();
+        let asset_mint = Pubkey::new_unique();
+        let fingerprint_hex = "cd".repeat(32);
+
+        let _ = post_register_provider(
+            State(state.clone()),
+            Json(RegisterProviderRequest {
+                provider_id: provider_id.clone(),
+                display_name: "mTLS Provider".to_string(),
+                participant_pubkey: None,
+                settlement_token_account: settlement_token_account.to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: asset_mint.to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "mtls".to_string(),
+                api_key_hash: String::new(),
+                mtls_cert_fingerprint: Some(fingerprint_hex.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = post_seed_balance(
+            State(state.clone()),
+            Json(SeedBalanceRequest {
+                client: client.to_string(),
+                free: 2_000_000,
+                locked: Some(0),
+                max_lock_expires_at: Some(0),
+                total_deposited: Some(2_000_000),
+                total_withdrawn: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+
+        state
+            .deposit_detector
+            .is_synced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let request_context = RequestContext {
+            method: "POST".to_string(),
+            origin: "http://localhost".to_string(),
+            path_and_query: "/demo".to_string(),
+            body_sha256: "11".repeat(32),
+        };
+        let payment_details = serde_json::json!({
+            "scheme": "a402-svm-v1",
+            "network": "solana:localnet",
+            "amount": "600000",
+            "asset": {
+                "kind": "spl-token",
+                "mint": asset_mint.to_string(),
+                "decimals": 6,
+                "symbol": "USDC",
+            },
+            "payTo": settlement_token_account.to_string(),
+            "providerId": provider_id,
+            "facilitatorUrl": "https://localhost:3100/v1",
+            "vault": {
+                "config": state.vault.vault_config.to_string(),
+                "signer": state.vault.vault_signer_pubkey.to_string(),
+                "attestationPolicyHash": hex::encode(state.vault.attestation_policy_hash),
+            },
+            "paymentDetailsId": "paydet_test_mtls",
+            "verifyWindowSec": 60,
+            "maxSettlementDelaySec": 900,
+            "privacyMode": "vault-batched-v1",
+        });
+        let payment_details_hash = hex::encode(compute_payment_details_hash(&payment_details));
+        let request_hash = hex::encode(compute_request_hash(&request_context, &payment_details_hash));
+
+        let mut payment_payload = PaymentPayload {
+            version: 1,
+            scheme: "a402-svm-v1".to_string(),
+            payment_id: "pay_mtls_test".to_string(),
+            client: client.to_string(),
+            vault: state.vault.vault_config.to_string(),
+            provider_id: "provider-mtls".to_string(),
+            pay_to: settlement_token_account.to_string(),
+            network: "solana:localnet".to_string(),
+            asset_mint: asset_mint.to_string(),
+            amount: "600000".to_string(),
+            request_hash,
+            payment_details_hash,
+            expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            nonce: "1".to_string(),
+            client_sig: String::new(),
+        };
+        payment_payload.client_sig = sign_payment_payload(&client_signing_key, &payment_payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(PROVIDER_ID_HEADER),
+            HeaderValue::from_static("provider-mtls"),
+        );
+        headers.insert(
+            HeaderName::from_static(INTERNAL_MTLS_FINGERPRINT_HEADER),
+            HeaderValue::from_str(&fingerprint_hex).unwrap(),
+        );
+
+        let response = post_verify(
+            State(state.clone()),
+            headers,
+            Json(VerifyRequest {
+                payment_payload,
+                payment_details: Some(payment_details),
+                request_context,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.0.ok);
+        assert_eq!(response.0.provider_id, "provider-mtls");
+        assert!(!response.0.verification_receipt.is_empty());
+
+        let _ = tokio::fs::remove_file(wal_path).await;
     }
 
     #[tokio::test]
@@ -1708,6 +2234,7 @@ mod tests {
                 allowed_origins: vec!["http://localhost".to_string()],
                 auth_mode: "bearer".to_string(),
                 api_key_hash: provider_api_key_hash,
+                mtls_cert_fingerprint: None,
             }),
         )
         .await
@@ -1778,6 +2305,10 @@ mod tests {
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {provider_api_key}")).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static(PROVIDER_ID_HEADER),
+            HeaderValue::from_str(&provider_id).unwrap(),
         );
 
         let _ = post_channel_deliver(
@@ -1860,6 +2391,7 @@ mod tests {
                 allowed_origins: vec!["http://localhost".to_string()],
                 auth_mode: "api-key".to_string(),
                 api_key_hash: provider_api_key_hash,
+                mtls_cert_fingerprint: None,
             }),
         )
         .await
@@ -1998,6 +2530,7 @@ mod tests {
                 allowed_origins: vec!["http://localhost".to_string()],
                 auth_mode: "bearer".to_string(),
                 api_key_hash: provider_api_key_hash,
+                mtls_cert_fingerprint: None,
             }),
         )
         .await
@@ -2067,6 +2600,10 @@ mod tests {
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {provider_api_key}")).unwrap(),
         );
+        headers.insert(
+            HeaderName::from_static(PROVIDER_ID_HEADER),
+            HeaderValue::from_str(&provider_id).unwrap(),
+        );
 
         let _ = post_channel_deliver(
             State(state.clone()),
@@ -2111,6 +2648,7 @@ mod tests {
             watchtower_url: None,
             attestation_document: String::new(),
             attestation_is_local_dev: true,
+            provider_mtls_enabled: false,
         });
 
         wal::replay_app_state(&replay_state).await.unwrap();
@@ -2190,6 +2728,7 @@ mod tests {
             watchtower_url: None,
             attestation_document: String::new(),
             attestation_is_local_dev: true,
+            provider_mtls_enabled: false,
         });
 
         let client_signing_key = SigningKey::generate(&mut OsRng);
@@ -2205,7 +2744,8 @@ mod tests {
                 asset_mint: Pubkey::new_unique(),
                 allowed_origins: vec!["http://localhost".to_string()],
                 auth_mode: "api-key".to_string(),
-                api_key_hash: Sha256::digest(b"secret").to_vec(),
+                api_key_hash: Some(Sha256::digest(b"secret").to_vec()),
+                mtls_cert_fingerprint: None,
             },
         );
         state.vault.client_balances.insert(
@@ -2292,10 +2832,164 @@ mod tests {
             watchtower_url: None,
             attestation_document: String::new(),
             attestation_is_local_dev: true,
+            provider_mtls_enabled: false,
         });
 
         wal::replay_app_state(&replay_state).await.unwrap();
         assert_eq!(replay_state.vault.next_receipt_nonce(), 8);
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn wal_replay_restores_batched_settlement_lookup_state() {
+        let (state, wal_path) = make_app_state().await;
+        let client = Pubkey::new_unique();
+        let provider_id = "provider-replay-batch".to_string();
+        let provider_api_key = "provider-replay-batch-secret";
+        let provider_api_key_hash = hex::encode(Sha256::digest(provider_api_key.as_bytes()));
+        let provider_settlement_account = Pubkey::new_unique();
+        let asset_mint = Pubkey::new_unique();
+
+        state
+            .wal
+            .append(WalEntry::ProviderRegistered {
+                provider_id: provider_id.clone(),
+                display_name: "Replay Batch Provider".to_string(),
+                participant_pubkey: None,
+                settlement_token_account: provider_settlement_account.to_string(),
+                network: "solana:localnet".to_string(),
+                asset_mint: asset_mint.to_string(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "bearer".to_string(),
+                api_key_hash: Some(provider_api_key_hash.clone()),
+                mtls_cert_fingerprint: None,
+            })
+            .await
+            .unwrap();
+        state
+            .wal
+            .append(WalEntry::ClientBalanceSeeded {
+                client: client.to_string(),
+                free: 2_000_000,
+                locked: 0,
+                max_lock_expires_at: 0,
+                total_deposited: 2_000_000,
+                total_withdrawn: 0,
+            })
+            .await
+            .unwrap();
+        state
+            .wal
+            .append(WalEntry::ReservationCreated {
+                verification_id: "ver_replay_batch".to_string(),
+                reservation_id: Some("res_replay_batch".to_string()),
+                payment_id: "pay_replay_batch".to_string(),
+                client: client.to_string(),
+                provider_id: provider_id.clone(),
+                amount: 600_000,
+                request_hash: Some("11".repeat(32)),
+                payment_details_hash: Some("22".repeat(32)),
+                created_at: Some(1_700_000_000),
+                expires_at: Some(1_700_000_060),
+            })
+            .await
+            .unwrap();
+        state
+            .wal
+            .append(WalEntry::SettlementCommitted {
+                settlement_id: "set_replay_batch".to_string(),
+                verification_id: "ver_replay_batch".to_string(),
+                provider_id: provider_id.clone(),
+                amount: 600_000,
+                settled_at: Some(1_700_000_010),
+            })
+            .await
+            .unwrap();
+        state
+            .wal
+            .append(WalEntry::BatchConfirmed {
+                batch_id: 7,
+                tx_signature: "txsig_replay_batch".to_string(),
+                settlement_ids: vec!["set_replay_batch".to_string()],
+            })
+            .await
+            .unwrap();
+
+        let replay_signing_key = SigningKey::generate(&mut OsRng);
+        let replay_solana = SolanaRuntimeConfig {
+            program_id: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            rpc_url: "http://localhost:8899".to_string(),
+            ws_url: "ws://localhost:8900".to_string(),
+        };
+        let replay_state = Arc::new(AppState {
+            vault: Arc::new(VaultState::new(
+                Pubkey::new_unique(),
+                replay_signing_key,
+                Pubkey::new_unique(),
+                [0u8; 32],
+                replay_solana.clone(),
+            )),
+            wal: Arc::new(Wal::new(wal_path.clone()).await),
+            deposit_detector: Arc::new(DepositDetector::new(
+                replay_solana.vault_token_account,
+                replay_solana.program_id,
+                replay_solana.rpc_url,
+                replay_solana.ws_url,
+            )),
+            asc_ops_lock: Mutex::new(()),
+            persistence_lock: Mutex::new(()),
+            watchtower_url: None,
+            attestation_document: String::new(),
+            attestation_is_local_dev: true,
+            provider_mtls_enabled: false,
+        });
+
+        wal::replay_app_state(&replay_state).await.unwrap();
+
+        let reservation = replay_state
+            .vault
+            .reservations
+            .get("ver_replay_batch")
+            .unwrap();
+        assert_eq!(reservation.status, ReservationStatus::BatchedOnchain);
+        assert_eq!(reservation.settlement_id.as_deref(), Some("set_replay_batch"));
+        drop(reservation);
+
+        assert!(replay_state
+            .vault
+            .provider_credits
+            .get(&provider_id)
+            .is_none());
+        assert!(replay_state
+            .vault
+            .settlement_history
+            .get("set_replay_batch")
+            .is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {provider_api_key}")).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static(PROVIDER_ID_HEADER),
+            HeaderValue::from_str(&provider_id).unwrap(),
+        );
+
+        let response = post_settlement_status(
+            State(replay_state.clone()),
+            headers,
+            Json(SettlementStatusRequest {
+                settlement_id: "set_replay_batch".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.batch_id, Some(7));
+        assert_eq!(response.0.tx_signature.as_deref(), Some("txsig_replay_batch"));
+        assert_eq!(response.0.status, "BatchedOnchain");
 
         let _ = tokio::fs::remove_file(wal_path).await;
     }

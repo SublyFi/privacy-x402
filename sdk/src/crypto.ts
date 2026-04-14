@@ -7,11 +7,30 @@ export function sha256hex(data: string | Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)
+    );
+    return `{${entries
+      .map(
+        ([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`
+      )
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
 /** Compute SHA-256 hash of canonical JSON payment details */
 export function computePaymentDetailsHash(
   details: PaymentDetails
 ): string {
-  const canonical = JSON.stringify(details);
+  const canonical = canonicalJson(details);
   return sha256hex(canonical);
 }
 
