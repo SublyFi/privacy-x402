@@ -2,11 +2,9 @@ import { expect } from "chai";
 import { createHash, randomUUID } from "crypto";
 import nacl from "tweetnacl";
 import { Keypair } from "@solana/web3.js";
-import {
-  computePaymentDetailsHash,
-  sha256hex,
-} from "../sdk/src/crypto";
+import { computePaymentDetailsHash, sha256hex } from "../sdk/src/crypto";
 import { decodeVerificationReceiptEnvelope } from "../sdk/src/receipt";
+import { buildTestProviderParticipantAttestation } from "./provider_attestation";
 import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
 
 /**
@@ -14,6 +12,7 @@ import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
  *
  * Prerequisites: watchtower must be running on localhost:3200 and enclave must
  * be running on localhost:3100 with A402_WATCHTOWER_URL=http://127.0.0.1:3200
+ * A402_ENABLE_PROVIDER_REGISTRATION_API=1 and A402_ENABLE_ADMIN_API=1
  * Run: cargo run -p a402-watchtower &
  * Then: A402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p a402-enclave &
  * Then: yarn run ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts
@@ -26,7 +25,8 @@ import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
 
 const ENCLAVE_URL =
   process.env.A402_TEST_ENCLAVE_URL || "http://localhost:3100";
-const SHARED_TLS: RequestTlsOptions | undefined = process.env.A402_TEST_TLS_CA_PATH
+const SHARED_TLS: RequestTlsOptions | undefined = process.env
+  .A402_TEST_TLS_CA_PATH
   ? {
       caPath: process.env.A402_TEST_TLS_CA_PATH,
       serverName: process.env.A402_TEST_TLS_SERVER_NAME,
@@ -165,6 +165,24 @@ function signPaymentPayload(
   return Buffer.from(signature).toString("base64");
 }
 
+function signClientTextRequest(client: Keypair, message: string): string {
+  const signature = nacl.sign.detached(Buffer.from(message), client.secretKey);
+  return Buffer.from(signature).toString("base64");
+}
+
+function buildClientRequestAuth(
+  client: Keypair,
+  buildMessage: (issuedAt: number, expiresAt: number) => string
+) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const expiresAt = issuedAt + 300;
+  const clientSig = signClientTextRequest(
+    client,
+    buildMessage(issuedAt, expiresAt)
+  );
+  return { issuedAt, expiresAt, clientSig };
+}
+
 async function postJson(
   path: string,
   body: unknown,
@@ -179,7 +197,10 @@ async function postJson(
   });
 }
 
-async function getJson(path: string, tls?: RequestTlsOptions): Promise<TestResponse> {
+async function getJson(
+  path: string,
+  tls?: RequestTlsOptions
+): Promise<TestResponse> {
   return requestJson(`${ENCLAVE_URL}${path}`, {
     method: "GET",
     tls: tls ?? SHARED_TLS,
@@ -218,6 +239,10 @@ describe("enclave_api", () => {
       providerId,
       displayName: "Integration Test Provider",
       participantPubkey: providerParticipant.publicKey.toBase58(),
+      participantAttestation: buildTestProviderParticipantAttestation(
+        providerId,
+        providerParticipant.publicKey.toBase58()
+      ),
       settlementTokenAccount: providerSettlementAccount.toBase58(),
       network: "solana:localnet",
       assetMint: assetMint.toBase58(),
@@ -312,15 +337,15 @@ describe("enclave_api", () => {
     expect(verificationReceipt.verificationId).to.equal(
       verifyBody.verificationId
     );
-    expect(verificationReceipt.reservationId).to.equal(verifyBody.reservationId);
+    expect(verificationReceipt.reservationId).to.equal(
+      verifyBody.reservationId
+    );
     expect(verificationReceipt.paymentId).to.equal(paymentPayload.paymentId);
     expect(verificationReceipt.client).to.equal(client.publicKey.toBase58());
     expect(verificationReceipt.providerId).to.equal(providerId);
     expect(verificationReceipt.amount).to.equal(paymentAmount.toString());
     expect(verificationReceipt.requestHash).to.equal(requestHash);
-    expect(verificationReceipt.paymentDetailsHash).to.equal(
-      paymentDetailsHash
-    );
+    expect(verificationReceipt.paymentDetailsHash).to.equal(paymentDetailsHash);
     expect(verificationReceipt.reservationExpiresAt).to.equal(
       verifyBody.reservationExpiresAt
     );
@@ -328,8 +353,16 @@ describe("enclave_api", () => {
     expect(verificationReceipt.signature).to.be.a("string").and.not.equal("");
     expect(verificationReceipt.message).to.be.a("string").and.not.equal("");
 
+    const balanceAfterVerifyAuth = buildClientRequestAuth(
+      client,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+    );
     const balanceAfterVerifyRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
+      issuedAt: balanceAfterVerifyAuth.issuedAt,
+      expiresAt: balanceAfterVerifyAuth.expiresAt,
+      clientSig: balanceAfterVerifyAuth.clientSig,
     });
     expect(balanceAfterVerifyRes.status).to.equal(200);
     const balanceAfterVerify = await readJson<BalanceResponse>(
@@ -387,8 +420,16 @@ describe("enclave_api", () => {
     const settleRetryBody = await readJson<SettleResponse>(settleRetryRes);
     expect(settleRetryBody.settlementId).to.equal(settleBody.settlementId);
 
+    const balanceAfterSettleAuth = buildClientRequestAuth(
+      client,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+    );
     const balanceAfterSettleRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
+      issuedAt: balanceAfterSettleAuth.issuedAt,
+      expiresAt: balanceAfterSettleAuth.expiresAt,
+      clientSig: balanceAfterSettleAuth.clientSig,
     });
     expect(balanceAfterSettleRes.status).to.equal(200);
     const balanceAfterSettle = await readJson<BalanceResponse>(
@@ -397,10 +438,19 @@ describe("enclave_api", () => {
     expect(balanceAfterSettle.free).to.equal(1_400_000);
     expect(balanceAfterSettle.locked).to.equal(0);
 
+    const withdrawRecipientAta = Keypair.generate().publicKey.toBase58();
+    const withdrawAuth = buildClientRequestAuth(
+      client,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-WITHDRAW-AUTH\n${client.publicKey.toBase58()}\n${withdrawRecipientAta}\n500000\n${issuedAt}\n${expiresAt}\n`
+    );
     const withdrawAuthRes = await postJson("/v1/withdraw-auth", {
       client: client.publicKey.toBase58(),
-      recipientAta: Keypair.generate().publicKey.toBase58(),
+      recipientAta: withdrawRecipientAta,
       amount: 500_000,
+      issuedAt: withdrawAuth.issuedAt,
+      expiresAt: withdrawAuth.expiresAt,
+      clientSig: withdrawAuth.clientSig,
     });
     expect(withdrawAuthRes.status).to.equal(200);
     const withdrawAuthBody = await readJson<WithdrawAuthResponse>(
@@ -410,9 +460,18 @@ describe("enclave_api", () => {
     expect(withdrawAuthBody.signature).to.be.a("string").and.not.equal("");
     expect(withdrawAuthBody.message).to.be.a("string").and.not.equal("");
 
+    const receiptRecipientAta = Keypair.generate().publicKey.toBase58();
+    const receiptAuth = buildClientRequestAuth(
+      client,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-RECEIPT\n${client.publicKey.toBase58()}\n${receiptRecipientAta}\n${issuedAt}\n${expiresAt}\n`
+    );
     const receiptRes = await postJson("/v1/receipt", {
       client: client.publicKey.toBase58(),
-      recipientAta: Keypair.generate().publicKey.toBase58(),
+      recipientAta: receiptRecipientAta,
+      issuedAt: receiptAuth.issuedAt,
+      expiresAt: receiptAuth.expiresAt,
+      clientSig: receiptAuth.clientSig,
     });
     expect(receiptRes.status).to.equal(200);
     const receiptBody = await readJson<ReceiptResponse>(receiptRes);
@@ -509,10 +568,20 @@ describe("enclave_api", () => {
       "reservation_not_found"
     );
 
+    const unknownClient = Keypair.generate();
+    const unknownRecipientAta = Keypair.generate().publicKey.toBase58();
+    const unknownWithdrawAuth = buildClientRequestAuth(
+      unknownClient,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-WITHDRAW-AUTH\n${unknownClient.publicKey.toBase58()}\n${unknownRecipientAta}\n1000000\n${issuedAt}\n${expiresAt}\n`
+    );
     const withdrawRes = await postJson("/v1/withdraw-auth", {
-      client: Keypair.generate().publicKey.toBase58(),
-      recipientAta: Keypair.generate().publicKey.toBase58(),
+      client: unknownClient.publicKey.toBase58(),
+      recipientAta: unknownRecipientAta,
       amount: 1000000,
+      issuedAt: unknownWithdrawAuth.issuedAt,
+      expiresAt: unknownWithdrawAuth.expiresAt,
+      clientSig: unknownWithdrawAuth.clientSig,
     });
     expect(withdrawRes.status).to.equal(400);
     expect((await readJson<ErrorResponse>(withdrawRes)).error).to.equal(

@@ -121,6 +121,28 @@ pub fn generate_audit_record(
     auditor_epoch: u32,
     auditor_master_secret: &[u8; 32],
 ) -> EncryptedAuditRecord {
+    generate_audit_record_at(
+        client,
+        provider,
+        amount,
+        auditor_epoch,
+        auditor_master_secret,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+/// Generate an encrypted audit record with an explicit public timestamp.
+///
+/// Batch submission uses the batch fire time here so the public timestamp does
+/// not reveal the exact per-request settle time.
+pub fn generate_audit_record_at(
+    client: &Pubkey,
+    provider: &Pubkey,
+    amount: u64,
+    auditor_epoch: u32,
+    auditor_master_secret: &[u8; 32],
+    timestamp: i64,
+) -> EncryptedAuditRecord {
     let provider_key = derive_provider_key(auditor_master_secret, provider);
 
     // Encrypt sender pubkey (32 bytes)
@@ -132,13 +154,11 @@ pub fn generate_audit_record(
     amount_bytes[..8].copy_from_slice(&amount.to_le_bytes());
     let encrypted_amount = elgamal_encrypt(&provider_key.public, &amount_bytes);
 
-    let now = chrono::Utc::now().timestamp();
-
     EncryptedAuditRecord {
         encrypted_sender,
         encrypted_amount,
         provider: *provider,
-        timestamp: now,
+        timestamp,
         auditor_epoch,
     }
 }
@@ -211,6 +231,16 @@ mod tests {
 
         assert_eq!(decrypted_sender, client);
         assert_eq!(decrypted_amount, amount);
+    }
+
+    #[test]
+    fn test_audit_record_uses_explicit_timestamp() {
+        let master_secret = [7u8; 32];
+        let client = Pubkey::new_unique();
+        let provider = Pubkey::new_unique();
+        let record =
+            generate_audit_record_at(&client, &provider, 42, 3, &master_secret, 1_700_000_123);
+        assert_eq!(record.timestamp, 1_700_000_123);
     }
 
     #[test]

@@ -19,7 +19,8 @@ use crate::error::EnclaveError;
 use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{
-    ClientBalance, ProviderRegistration, Reservation, ReservationStatus, SettlementRecord,
+    ClientBalance, PendingWithdrawal, ProviderRegistration, Reservation, ReservationStatus,
+    SettlementRecord,
 };
 
 /// WAL entry types for Phase 1
@@ -31,6 +32,27 @@ pub enum WalEntry {
         amount: u64,
         slot: u64,
         tx_signature: String,
+    },
+    WithdrawAuthorized {
+        client: String,
+        recipient_ata: String,
+        amount: u64,
+        withdraw_nonce: u64,
+        issued_at: i64,
+        expires_at: i64,
+    },
+    WithdrawApplied {
+        client: String,
+        recipient_ata: String,
+        amount: u64,
+        withdraw_nonce: u64,
+        expires_at: i64,
+        slot: u64,
+        tx_signature: String,
+    },
+    WithdrawExpired {
+        client: String,
+        withdraw_nonce: u64,
     },
     ReservationCreated {
         verification_id: String,
@@ -79,6 +101,12 @@ pub enum WalEntry {
         display_name: String,
         #[serde(default)]
         participant_pubkey: Option<String>,
+        #[serde(default)]
+        participant_attestation_policy_hash: Option<String>,
+        #[serde(default)]
+        participant_attestation_verified_at_ms: Option<i64>,
+        #[serde(default)]
+        participant_attestation_mode: Option<String>,
         settlement_token_account: String,
         network: String,
         asset_mint: String,
@@ -121,6 +149,11 @@ pub enum WalEntry {
         amount: u64,
         #[serde(default)]
         request_hash: Option<String>,
+    },
+    ChannelRequestExpired {
+        channel_id: String,
+        request_id: String,
+        amount: u64,
     },
     ChannelAdaptorDelivered {
         channel_id: String,
@@ -219,7 +252,10 @@ impl Wal {
                 }
                 if path.exists() {
                     let content = fs::read_to_string(path).await.unwrap_or_default();
-                    content.lines().filter(|line| !line.trim().is_empty()).count() as u64
+                    content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count() as u64
                 } else {
                     0
                 }
@@ -344,8 +380,9 @@ async fn read_snapshot_records(
         let Some(blob) = client.get(&item).await? else {
             continue;
         };
-        let line = String::from_utf8(blob)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+        let line = String::from_utf8(blob).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
         records.push(parse_stored_record(&line, key)?);
     }
     Ok(records)
@@ -356,17 +393,17 @@ fn parse_stored_record(line: &str, key: [u8; 32]) -> Result<WalRecord, std::io::
         return Ok(record);
     }
 
-    let envelope = serde_json::from_str::<EncryptedWalEnvelope>(line).map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-    })?;
+    let envelope = serde_json::from_str::<EncryptedWalEnvelope>(line)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
     let plaintext = decrypt_record(key, &envelope)?;
     serde_json::from_slice::<WalRecord>(&plaintext)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
 }
 
 fn encrypt_record(key: [u8; 32], plaintext: &[u8]) -> Result<EncryptedWalEnvelope, std::io::Error> {
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = cipher
@@ -380,7 +417,10 @@ fn encrypt_record(key: [u8; 32], plaintext: &[u8]) -> Result<EncryptedWalEnvelop
     })
 }
 
-fn decrypt_record(key: [u8; 32], envelope: &EncryptedWalEnvelope) -> Result<Vec<u8>, std::io::Error> {
+fn decrypt_record(
+    key: [u8; 32],
+    envelope: &EncryptedWalEnvelope,
+) -> Result<Vec<u8>, std::io::Error> {
     if envelope.version != 1 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -388,9 +428,9 @@ fn decrypt_record(key: [u8; 32], envelope: &EncryptedWalEnvelope) -> Result<Vec<
         ));
     }
 
-    let nonce_bytes = BASE64.decode(&envelope.nonce).map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-    })?;
+    let nonce_bytes = BASE64
+        .decode(&envelope.nonce)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
     if nonce_bytes.len() != 12 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -398,11 +438,12 @@ fn decrypt_record(key: [u8; 32], envelope: &EncryptedWalEnvelope) -> Result<Vec<
         ));
     }
 
-    let ciphertext = BASE64.decode(&envelope.ciphertext).map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+    let ciphertext = BASE64
+        .decode(&envelope.ciphertext)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
     })?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string()))?;
     cipher
         .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
@@ -416,7 +457,10 @@ pub async fn replay_app_state(state: &AppState) -> Result<(), String> {
     replay_app_state_from(state, None).await
 }
 
-pub async fn replay_app_state_from(state: &AppState, min_seqno_exclusive: Option<u64>) -> Result<(), String> {
+pub async fn replay_app_state_from(
+    state: &AppState,
+    min_seqno_exclusive: Option<u64>,
+) -> Result<(), String> {
     let records = state
         .wal
         .read_records_after(min_seqno_exclusive)
@@ -425,6 +469,19 @@ pub async fn replay_app_state_from(state: &AppState, min_seqno_exclusive: Option
 
     for record in records {
         replay_entry(state, record.entry).await?;
+    }
+
+    let clients: Vec<Pubkey> = state
+        .vault
+        .client_balances
+        .iter()
+        .map(|entry| *entry.key())
+        .collect();
+    for client in clients {
+        state
+            .vault
+            .refresh_client_max_lock_expires_at(&client)
+            .map_err(wal_replay_error)?;
     }
 
     Ok(())
@@ -451,6 +508,104 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .last_finalized_slot
                 .fetch_max(slot, Ordering::SeqCst);
         }
+        WalEntry::WithdrawAuthorized {
+            client,
+            recipient_ata,
+            amount,
+            withdraw_nonce,
+            issued_at,
+            expires_at,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            let recipient_ata = parse_pubkey("recipient_ata", &recipient_ata)?;
+            state
+                .vault
+                .authorize_withdrawal(PendingWithdrawal {
+                    client,
+                    recipient_ata,
+                    amount,
+                    withdraw_nonce,
+                    issued_at,
+                    expires_at,
+                })
+                .map_err(wal_replay_error)?;
+            state
+                .vault
+                .withdraw_nonce
+                .fetch_max(withdraw_nonce.saturating_add(1), Ordering::SeqCst);
+            state
+                .vault
+                .refresh_client_max_lock_expires_at(&client)
+                .map_err(wal_replay_error)?;
+        }
+        WalEntry::WithdrawApplied {
+            client,
+            recipient_ata,
+            amount,
+            withdraw_nonce,
+            expires_at,
+            slot,
+            tx_signature,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            let recipient_ata = parse_pubkey("recipient_ata", &recipient_ata)?;
+            let applied = state
+                .vault
+                .apply_withdrawal(withdraw_nonce)
+                .map_err(wal_replay_error)?;
+            if applied.client != client
+                || applied.recipient_ata != recipient_ata
+                || applied.amount != amount
+                || applied.expires_at != expires_at
+            {
+                return Err(format!(
+                    "withdraw replay mismatch for nonce {withdraw_nonce}: state={:?} wal=({}, {}, {}, {})",
+                    applied,
+                    client,
+                    recipient_ata,
+                    amount,
+                    expires_at
+                ));
+            }
+            state.deposit_detector.mark_processed(&tx_signature).await;
+            *state
+                .deposit_detector
+                .last_processed_signature
+                .write()
+                .await = Some(tx_signature);
+            state
+                .vault
+                .last_finalized_slot
+                .fetch_max(slot, Ordering::SeqCst);
+            state
+                .vault
+                .withdraw_nonce
+                .fetch_max(withdraw_nonce.saturating_add(1), Ordering::SeqCst);
+            state
+                .vault
+                .refresh_client_max_lock_expires_at(&client)
+                .map_err(wal_replay_error)?;
+        }
+        WalEntry::WithdrawExpired {
+            client,
+            withdraw_nonce,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            let expired = state
+                .vault
+                .expire_pending_withdrawal(withdraw_nonce)
+                .map_err(wal_replay_error)?;
+            if expired.client != client {
+                return Err(format!(
+                    "withdraw expiry client mismatch for nonce {withdraw_nonce}: state={} wal={client}",
+                    expired.client
+                ));
+            }
+            state
+                .vault
+                .refresh_client_max_lock_expires_at(&client)
+                .map_err(wal_replay_error)?;
+        }
         WalEntry::ReservationCreated {
             verification_id,
             reservation_id,
@@ -464,10 +619,9 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             expires_at,
         } => {
             let client = parse_pubkey("client", &client)?;
-            let reservation_id = reservation_id
-                .ok_or_else(|| {
-                    "legacy ReservationCreated WAL entry missing reservation_id".to_string()
-                })?;
+            let reservation_id = reservation_id.ok_or_else(|| {
+                "legacy ReservationCreated WAL entry missing reservation_id".to_string()
+            })?;
             let request_hash = request_hash
                 .ok_or_else(|| {
                     "legacy ReservationCreated WAL entry missing request_hash".to_string()
@@ -478,23 +632,21 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     "legacy ReservationCreated WAL entry missing payment_details_hash".to_string()
                 })
                 .and_then(|value| decode_fixed_hex_32("payment_details_hash", &value))?;
-            let created_at = created_at
-                .ok_or_else(|| {
-                    "legacy ReservationCreated WAL entry missing created_at".to_string()
-                })?;
-            let expires_at = expires_at
-                .ok_or_else(|| {
-                    "legacy ReservationCreated WAL entry missing expires_at".to_string()
-                })?;
+            let created_at = created_at.ok_or_else(|| {
+                "legacy ReservationCreated WAL entry missing created_at".to_string()
+            })?;
+            let expires_at = expires_at.ok_or_else(|| {
+                "legacy ReservationCreated WAL entry missing expires_at".to_string()
+            })?;
 
             state
                 .vault
                 .reserve_balance(&client, amount)
                 .map_err(wal_replay_error)?;
-            state.vault.payment_id_index.insert(
-                payment_id.clone(),
-                verification_id.clone(),
-            );
+            state
+                .vault
+                .payment_id_index
+                .insert(payment_id.clone(), verification_id.clone());
             state.vault.reservations.insert(
                 verification_id.clone(),
                 Reservation {
@@ -514,13 +666,17 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 },
             );
         }
-        WalEntry::ReservationCancelled { verification_id, .. } => {
+        WalEntry::ReservationCancelled {
+            verification_id, ..
+        } => {
             let mut reservation = state
                 .vault
                 .reservations
                 .get_mut(&verification_id)
                 .ok_or_else(|| {
-                    format!("missing reservation {verification_id} for ReservationCancelled WAL entry")
+                    format!(
+                        "missing reservation {verification_id} for ReservationCancelled WAL entry"
+                    )
                 })?;
             if reservation.status == ReservationStatus::Reserved {
                 let client = reservation.client;
@@ -541,7 +697,9 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .reservations
                 .get_mut(&verification_id)
                 .ok_or_else(|| {
-                    format!("missing reservation {verification_id} for ReservationExpired WAL entry")
+                    format!(
+                        "missing reservation {verification_id} for ReservationExpired WAL entry"
+                    )
                 })?;
             if reservation.status == ReservationStatus::Reserved {
                 let client = reservation.client;
@@ -607,9 +765,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .get(&provider_id)
                 .map(|provider| provider.settlement_token_account)
                 .ok_or_else(|| {
-                    format!(
-                        "missing provider {provider_id} for SettlementCommitted WAL entry"
-                    )
+                    format!("missing provider {provider_id} for SettlementCommitted WAL entry")
                 })?;
             state.vault.settlement_history.insert(
                 settlement_id.clone(),
@@ -626,6 +782,9 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             provider_id,
             display_name,
             participant_pubkey,
+            participant_attestation_policy_hash,
+            participant_attestation_verified_at_ms,
+            participant_attestation_mode,
             settlement_token_account,
             network,
             asset_mint,
@@ -640,6 +799,19 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             let participant_pubkey = participant_pubkey
                 .as_deref()
                 .map(|value| parse_pubkey("participant_pubkey", value))
+                .transpose()?;
+            let participant_attestation_policy_hash = participant_attestation_policy_hash
+                .map(|value| {
+                    let bytes = hex::decode(&value).map_err(|error| {
+                        format!(
+                            "invalid provider participant_attestation_policy_hash in WAL: {error}"
+                        )
+                    })?;
+                    bytes.try_into().map_err(|_| {
+                        "invalid provider participant_attestation_policy_hash length in WAL"
+                            .to_string()
+                    })
+                })
                 .transpose()?;
             let api_key_hash = api_key_hash
                 .map(|value| {
@@ -661,6 +833,9 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     provider_id,
                     display_name,
                     participant_pubkey,
+                    participant_attestation_policy_hash,
+                    participant_attestation_verified_at_ms,
+                    participant_attestation_mode,
                     settlement_token_account,
                     network,
                     asset_mint,
@@ -742,6 +917,14 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 request_hash,
             )
             .map_err(wal_replay_error)?;
+        }
+        WalEntry::ChannelRequestExpired {
+            channel_id,
+            request_id,
+            amount,
+        } => {
+            asc_manager::expire_replayed_request(&state.vault, &channel_id, &request_id, amount)
+                .map_err(wal_replay_error)?;
         }
         WalEntry::ChannelAdaptorDelivered {
             channel_id,

@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
 
+pub mod asc_claim;
+pub mod batch_hash;
 pub mod constants;
 pub mod ed25519_utils;
 pub mod error;
@@ -60,6 +62,14 @@ pub mod a402_vault {
         records: Vec<AuditRecordData>,
     ) -> Result<()> {
         instructions::record_audit::handler(ctx, batch_id, batch_chunk_hash, records)
+    }
+
+    pub fn asc_close_claim(
+        ctx: Context<AscCloseClaimAccounts>,
+        channel_id_hash: [u8; 32],
+        request_id_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::asc_close_claim::handler(ctx, channel_id_hash, request_id_hash)
     }
 
     pub fn pause_vault(ctx: Context<PauseVault>) -> Result<()> {

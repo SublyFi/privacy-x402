@@ -19,10 +19,10 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{error, info, warn};
 
+use crate::interconnect::{bind_parent_service, InterconnectStream};
 use crate::ParentConfig;
 
 const MAX_BLOB_SIZE: usize = 64 * 1024 * 1024; // 64 MB max blob
@@ -42,17 +42,19 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
     // Ensure snapshot directory exists
     fs::create_dir_all(&config.snapshot_dir).await?;
 
-    let listen_addr = format!("127.0.0.1:{}", config.enclave_snapshot_port);
-    let listener = TcpListener::bind(&listen_addr).await?;
+    let listener =
+        bind_parent_service(config.interconnect_mode, config.enclave_snapshot_port).await?;
     info!(
-        "Snapshot store listening on {listen_addr}, dir={}",
-        config.snapshot_dir
+        mode = config.interconnect_mode.label(),
+        port = config.enclave_snapshot_port,
+        dir = config.snapshot_dir,
+        "Snapshot store listening"
     );
 
     let base_dir = PathBuf::from(&config.snapshot_dir);
 
     loop {
-        let (stream, _) = match listener.accept().await {
+        let (stream, peer_label) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 warn!("Failed to accept snapshot connection: {e}");
@@ -63,14 +65,14 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
         let dir = base_dir.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_snapshot_request(stream, &dir).await {
-                error!("Snapshot store error: {e}");
+                error!("Snapshot store error for {peer_label}: {e}");
             }
         });
     }
 }
 
 async fn handle_snapshot_request(
-    mut stream: tokio::net::TcpStream,
+    mut stream: InterconnectStream,
     base_dir: &Path,
 ) -> io::Result<()> {
     loop {
@@ -93,7 +95,10 @@ async fn handle_snapshot_request(
     }
 }
 
-async fn handle_put(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
+async fn handle_put<S>(stream: &mut S, base_dir: &Path) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let key = read_key(stream).await?;
     let data = read_blob(stream).await?;
 
@@ -111,7 +116,10 @@ async fn handle_put(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::
     send_ok(stream, &[]).await
 }
 
-async fn handle_get(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
+async fn handle_get<S>(stream: &mut S, base_dir: &Path) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let key = read_key(stream).await?;
     let file_path = key_to_path(base_dir, &key);
 
@@ -125,7 +133,10 @@ async fn handle_get(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::
     }
 }
 
-async fn handle_list(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
+async fn handle_list<S>(stream: &mut S, base_dir: &Path) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let prefix = read_key(stream).await?;
 
     let mut entries = Vec::new();
@@ -140,7 +151,10 @@ async fn handle_list(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io:
     send_ok(stream, &result).await
 }
 
-async fn handle_delete(stream: &mut tokio::net::TcpStream, base_dir: &Path) -> io::Result<()> {
+async fn handle_delete<S>(stream: &mut S, base_dir: &Path) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let key = read_key(stream).await?;
     let file_path = key_to_path(base_dir, &key);
 
@@ -195,7 +209,10 @@ fn key_to_path(base_dir: &Path, key: &str) -> PathBuf {
     base_dir.join(subdir).join(key.replace('/', "_"))
 }
 
-async fn read_key(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
+async fn read_key<S>(stream: &mut S) -> io::Result<String>
+where
+    S: AsyncRead + Unpin,
+{
     let len = stream.read_u32_le().await? as usize;
     if len > MAX_KEY_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "key too large"));
@@ -205,7 +222,10 @@ async fn read_key(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-async fn read_blob(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> {
+async fn read_blob<S>(stream: &mut S) -> io::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
     let len = stream.read_u32_le().await? as usize;
     if len > MAX_BLOB_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "blob too large"));
@@ -215,7 +235,10 @@ async fn read_blob(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-async fn send_ok(stream: &mut tokio::net::TcpStream, data: &[u8]) -> io::Result<()> {
+async fn send_ok<S>(stream: &mut S, data: &[u8]) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     stream.write_u8(STATUS_OK).await?;
     stream.write_u32_le(data.len() as u32).await?;
     if !data.is_empty() {
@@ -224,13 +247,19 @@ async fn send_ok(stream: &mut tokio::net::TcpStream, data: &[u8]) -> io::Result<
     stream.flush().await
 }
 
-async fn send_not_found(stream: &mut tokio::net::TcpStream) -> io::Result<()> {
+async fn send_not_found<S>(stream: &mut S) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     stream.write_u8(STATUS_NOT_FOUND).await?;
     stream.write_u32_le(0).await?;
     stream.flush().await
 }
 
-async fn send_error(stream: &mut tokio::net::TcpStream, msg: &str) -> io::Result<()> {
+async fn send_error<S>(stream: &mut S, msg: &str) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     stream.write_u8(STATUS_ERROR).await?;
     let bytes = msg.as_bytes();
     stream.write_u32_le(bytes.len() as u32).await?;

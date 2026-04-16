@@ -1,0 +1,22 @@
+[Unit]
+Description=A402 receipt watchtower
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a402
+Group=a402
+EnvironmentFile=/etc/a402/watchtower.env
+WorkingDirectory=/var/lib/a402
+ExecStart=/opt/a402/bin/a402-watchtower
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/a402 /var/log/a402 /etc/a402
+
+[Install]
+WantedBy=multi-user.target

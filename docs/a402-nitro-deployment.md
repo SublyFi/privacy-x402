@@ -259,6 +259,11 @@ KMS key policy は Nitro attestation condition keys で制限する。
 6. enclave が vault signer seed と snapshot key material を復元する
 7. snapshot/WAL recovery を完了してから facilitator API を `ready` にする
 
+注記:
+
+- step 3 の bootstrap document は KMS recipient key を束縛するためのものであり、client に返す `/v1/attestation` document と同一である必要はない
+- facilitator は serving 時に NSM で新しい runtime attestation document を生成し、`user_data` に `vault_signer`, `attestation_policy_hash`, `snapshot_seqno` を、`public_key` に ingress TLS public key を束縛する
+
 ---
 
 ## 8. Persistence Model

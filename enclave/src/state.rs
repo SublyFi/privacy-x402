@@ -113,6 +113,12 @@ pub struct ProviderRegistration {
     pub display_name: String,
     #[serde(default)]
     pub participant_pubkey: Option<Pubkey>,
+    #[serde(default)]
+    pub participant_attestation_policy_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub participant_attestation_verified_at_ms: Option<i64>,
+    #[serde(default)]
+    pub participant_attestation_mode: Option<String>,
     pub settlement_token_account: Pubkey,
     pub network: String,
     pub asset_mint: Pubkey,
@@ -150,6 +156,17 @@ pub struct ProviderCredit {
     pub credited_amount: u64,
     pub oldest_credit_at: i64,
     pub settlement_ids: Vec<String>,
+}
+
+/// Pending client withdrawal authorized by the enclave but not yet finalized on-chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingWithdrawal {
+    pub client: Pubkey,
+    pub recipient_ata: Pubkey,
+    pub amount: u64,
+    pub withdraw_nonce: u64,
+    pub issued_at: i64,
+    pub expires_at: i64,
 }
 
 /// Solana RPC + account configuration required for on-chain operations.
@@ -191,6 +208,7 @@ pub struct VaultState {
     pub settlement_history: DashMap<String, SettlementRecord>,
     /// Batch confirmation lookup keyed by settlement_id
     pub settlement_batches: DashMap<String, SettlementBatchInfo>,
+    pub pending_withdrawals: DashMap<u64, PendingWithdrawal>,
     /// Active Service Channels (Phase 3 ASC)
     pub active_channels: DashMap<ChannelId, ChannelState>,
     pub receipt_nonce: AtomicU64,
@@ -245,6 +263,7 @@ impl VaultState {
             providers: DashMap::new(),
             settlement_history: DashMap::new(),
             settlement_batches: DashMap::new(),
+            pending_withdrawals: DashMap::new(),
             active_channels: DashMap::new(),
             receipt_nonce: AtomicU64::new(1),
             withdraw_nonce: AtomicU64::new(1),
@@ -279,6 +298,16 @@ impl VaultState {
         balance.total_deposited += amount;
     }
 
+    pub fn rollback_deposit(&self, client: &Pubkey, amount: u64) -> Result<(), EnclaveError> {
+        let mut balance = self
+            .client_balances
+            .get_mut(client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        balance.free = balance.free.saturating_sub(amount);
+        balance.total_deposited = balance.total_deposited.saturating_sub(amount);
+        Ok(())
+    }
+
     /// Reserve funds for a payment
     pub fn reserve_balance(&self, client: &Pubkey, amount: u64) -> Result<(), EnclaveError> {
         let mut balance = self
@@ -301,6 +330,123 @@ impl VaultState {
             .ok_or(EnclaveError::ClientNotFound)?;
         balance.locked = balance.locked.saturating_sub(amount);
         balance.free += amount;
+        Ok(())
+    }
+
+    /// Recompute the latest outstanding reservation expiry for a client.
+    pub fn refresh_client_max_lock_expires_at(&self, client: &Pubkey) -> Result<i64, EnclaveError> {
+        let reservation_max_lock_expires_at = self
+            .reservations
+            .iter()
+            .filter(|reservation| {
+                reservation.client == *client && reservation.status == ReservationStatus::Reserved
+            })
+            .map(|reservation| reservation.expires_at)
+            .max()
+            .unwrap_or(0);
+        let withdrawal_max_lock_expires_at = self
+            .pending_withdrawals
+            .iter()
+            .filter(|withdrawal| withdrawal.client == *client)
+            .map(|withdrawal| withdrawal.expires_at)
+            .max()
+            .unwrap_or(0);
+        let channel_request_max_lock_expires_at = self
+            .active_channels
+            .iter()
+            .filter(|channel| channel.client == *client)
+            .filter_map(|channel| {
+                channel
+                    .active_request
+                    .as_ref()
+                    .map(|request| request.expires_at)
+            })
+            .max()
+            .unwrap_or(0);
+        let max_lock_expires_at = reservation_max_lock_expires_at
+            .max(withdrawal_max_lock_expires_at)
+            .max(channel_request_max_lock_expires_at);
+
+        let mut balance = self
+            .client_balances
+            .get_mut(client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        balance.max_lock_expires_at = max_lock_expires_at;
+        Ok(max_lock_expires_at)
+    }
+
+    pub fn authorize_withdrawal(&self, withdrawal: PendingWithdrawal) -> Result<(), EnclaveError> {
+        let mut balance = self
+            .client_balances
+            .get_mut(&withdrawal.client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        if balance.free < withdrawal.amount {
+            return Err(EnclaveError::InsufficientBalance);
+        }
+        balance.free -= withdrawal.amount;
+        balance.locked += withdrawal.amount;
+        drop(balance);
+
+        self.pending_withdrawals
+            .insert(withdrawal.withdraw_nonce, withdrawal);
+        Ok(())
+    }
+
+    pub fn rollback_authorized_withdrawal(
+        &self,
+        withdraw_nonce: u64,
+    ) -> Result<PendingWithdrawal, EnclaveError> {
+        self.expire_pending_withdrawal(withdraw_nonce)
+    }
+
+    pub fn expire_pending_withdrawal(
+        &self,
+        withdraw_nonce: u64,
+    ) -> Result<PendingWithdrawal, EnclaveError> {
+        let (_, withdrawal) = self
+            .pending_withdrawals
+            .remove(&withdraw_nonce)
+            .ok_or(EnclaveError::ReservationNotFound)?;
+        let mut balance = self
+            .client_balances
+            .get_mut(&withdrawal.client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        balance.locked = balance.locked.saturating_sub(withdrawal.amount);
+        balance.free += withdrawal.amount;
+        Ok(withdrawal)
+    }
+
+    pub fn apply_withdrawal(&self, withdraw_nonce: u64) -> Result<PendingWithdrawal, EnclaveError> {
+        let (_, withdrawal) = self
+            .pending_withdrawals
+            .remove(&withdraw_nonce)
+            .ok_or(EnclaveError::ReservationNotFound)?;
+        let mut balance = self
+            .client_balances
+            .get_mut(&withdrawal.client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        balance.locked = balance.locked.saturating_sub(withdrawal.amount);
+        balance.total_withdrawn = balance
+            .total_withdrawn
+            .checked_add(withdrawal.amount)
+            .ok_or_else(|| EnclaveError::Internal("Withdrawal total overflow".into()))?;
+        Ok(withdrawal)
+    }
+
+    pub fn rollback_applied_withdrawal(
+        &self,
+        withdrawal: PendingWithdrawal,
+    ) -> Result<(), EnclaveError> {
+        let mut balance = self
+            .client_balances
+            .get_mut(&withdrawal.client)
+            .ok_or(EnclaveError::ClientNotFound)?;
+        balance.locked += withdrawal.amount;
+        balance.total_withdrawn = balance.total_withdrawn.saturating_sub(withdrawal.amount);
+        drop(balance);
+
+        self.pending_withdrawals
+            .insert(withdrawal.withdraw_nonce, withdrawal);
         Ok(())
     }
 
@@ -345,6 +491,37 @@ impl VaultState {
         Ok(())
     }
 
+    pub fn rollback_settle_payment(
+        &self,
+        client: &Pubkey,
+        amount: u64,
+        provider_id: &str,
+        settlement_id: &str,
+    ) -> Result<(), EnclaveError> {
+        {
+            let mut balance = self
+                .client_balances
+                .get_mut(client)
+                .ok_or(EnclaveError::ClientNotFound)?;
+            balance.locked += amount;
+        }
+
+        let remove_credit = {
+            let mut credit = self
+                .provider_credits
+                .get_mut(provider_id)
+                .ok_or(EnclaveError::ProviderNotFound)?;
+            credit.credited_amount = credit.credited_amount.saturating_sub(amount);
+            credit.settlement_ids.retain(|value| value != settlement_id);
+            credit.credited_amount == 0 || credit.settlement_ids.is_empty()
+        };
+        if remove_credit {
+            self.provider_credits.remove(provider_id);
+        }
+
+        Ok(())
+    }
+
     /// Apply a confirmed on-chain batch to local reservation/provider-credit state.
     pub fn apply_batch_confirmation(
         &self,
@@ -373,7 +550,8 @@ impl VaultState {
             }) {
                 affected_provider_ids.insert(reservation.provider_id.clone());
                 if let Some(mut credit) = self.provider_credits.get_mut(&reservation.provider_id) {
-                    credit.credited_amount = credit.credited_amount.saturating_sub(reservation.amount);
+                    credit.credited_amount =
+                        credit.credited_amount.saturating_sub(reservation.amount);
                     credit.settlement_ids.retain(|sid| sid != settlement_id);
                 }
                 reservation.status = ReservationStatus::BatchedOnchain;
@@ -383,9 +561,7 @@ impl VaultState {
             for mut credit in self.provider_credits.iter_mut() {
                 if credit.settlement_ids.iter().any(|sid| sid == settlement_id) {
                     affected_provider_ids.insert(credit.provider_id.clone());
-                    credit
-                        .settlement_ids
-                        .retain(|sid| sid != settlement_id);
+                    credit.settlement_ids.retain(|sid| sid != settlement_id);
                     break;
                 }
             }

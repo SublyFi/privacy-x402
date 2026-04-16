@@ -6,6 +6,8 @@ export {
 export { postFacilitatorJson } from "./facilitator";
 export {
   buildAscPaymentMessage,
+  buildAscClaimVoucherMessage,
+  submitAscCloseClaim,
   decryptAscResult,
   deliverAscResult,
   encryptAscResult,

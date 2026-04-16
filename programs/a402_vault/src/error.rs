@@ -85,4 +85,10 @@ pub enum VaultError {
 
     #[msg("Too many settlements in batch")]
     TooManySettlements,
+
+    #[msg("Invalid ASC close claim")]
+    InvalidAscCloseClaim,
+
+    #[msg("Invalid ASC claim voucher")]
+    InvalidAscClaimVoucher,
 }

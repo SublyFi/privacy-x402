@@ -57,11 +57,20 @@ export interface AscDeliveryArtifact {
   adaptorSecret: string;
 }
 
+export interface AscClaimVoucher {
+  message: string;
+  signature: string;
+  issuedAt: number;
+  channelIdHash: string;
+  requestIdHash: string;
+}
+
 /** Facilitator /v1/channel/deliver response */
 export interface AscDeliverResponse {
   ok: boolean;
   channelId: string;
   status: string;
+  claimVoucher: AscClaimVoucher;
 }
 
 /** Pricing function: given a request, return the price in atomic units (or null if free) */

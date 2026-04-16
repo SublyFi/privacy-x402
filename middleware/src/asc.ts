@@ -1,4 +1,5 @@
-import { randomBytes } from "crypto";
+import * as anchor from "@coral-xyz/anchor";
+import { createHash, randomBytes } from "crypto";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256, sha512 } from "@noble/hashes/sha2";
 import {
@@ -9,14 +10,24 @@ import {
 } from "@noble/hashes/utils";
 import type {
   A402ProviderConfig,
+  AscClaimVoucher,
   AscDeliverResponse,
   AscDeliveryArtifact,
   AscDeliveryInput,
 } from "./types";
 import { postFacilitatorJson } from "./facilitator";
+import {
+  Ed25519Program,
+  Keypair,
+  PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  SystemProgram,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
 
 const CURVE_ORDER =
-  723700557733226221397318656304299424085711635937990760600195093828545425857n;
+  7237005577332262213973186563042994240857116359379907606001950938285454250989n;
 
 function mod(value: bigint, order: bigint = CURVE_ORDER): bigint {
   const result = value % order;
@@ -74,7 +85,10 @@ function normalizeResultBytes(
   return Uint8Array.from(result);
 }
 
-function canonicalScalarBytes(source: Uint8Array | string | undefined, field: string): {
+function canonicalScalarBytes(
+  source: Uint8Array | string | undefined,
+  field: string
+): {
   scalar: bigint;
   bytes: Uint8Array;
 } {
@@ -102,7 +116,9 @@ function deriveNonce(
   adaptorPoint: Uint8Array,
   message: Uint8Array
 ): bigint {
-  return mod(bytesToBigIntLE(sha512(concatBytes(prefix, adaptorPoint, message))));
+  return mod(
+    bytesToBigIntLE(sha512(concatBytes(prefix, adaptorPoint, message)))
+  );
 }
 
 function keystreamXor(data: Uint8Array, keyBytes: Uint8Array): Uint8Array {
@@ -136,10 +152,100 @@ export function buildAscPaymentMessage(
   requestHash: string
 ): Uint8Array {
   const hashBytes = normalizeHex32(requestHash, "requestHash");
-  const normalizedHash = bytesToHex(hashBytes);
-  return utf8ToBytes(
-    `${channelId}:${requestId}:${String(amount)}:${normalizedHash}`
+  const channelIdHash = hexToBytes(hashAscIdentifier(channelId));
+  const requestIdHash = hexToBytes(hashAscIdentifier(requestId));
+  const amountBytes = new Uint8Array(8);
+  let current = BigInt(String(amount));
+  for (let i = 0; i < 8; i += 1) {
+    amountBytes[i] = Number(current & 0xffn);
+    current >>= 8n;
+  }
+
+  return concatBytes(
+    utf8ToBytes("a402-asc-pay-v1"),
+    channelIdHash,
+    requestIdHash,
+    amountBytes,
+    hashBytes
   );
+}
+
+export function hashAscIdentifier(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function buildAscClaimVoucherMessage(input: {
+  channelId: string;
+  requestId: string;
+  amount: string | number;
+  requestHash: string;
+  providerPubkey: string;
+  issuedAt: number | bigint;
+  vaultConfig: string;
+}): Uint8Array {
+  const requestHash = bytesToHex(
+    normalizeHex32(input.requestHash, "requestHash")
+  );
+  const providerPubkey = bytesToHex(
+    normalizeHex32(input.providerPubkey, "providerPubkey")
+  );
+  const vaultConfig = bytesToHex(
+    normalizeHex32(input.vaultConfig, "vaultConfig")
+  );
+  const channelIdHash = hexToBytes(hashAscIdentifier(input.channelId));
+  const requestIdHash = hexToBytes(hashAscIdentifier(input.requestId));
+  const amountBytes = new Uint8Array(8);
+  let amountValue = BigInt(String(input.amount));
+  for (let i = 0; i < 8; i += 1) {
+    amountBytes[i] = Number(amountValue & 0xffn);
+    amountValue >>= 8n;
+  }
+  const issuedAtBytes = new Uint8Array(8);
+  let issuedAtValue = BigInt(input.issuedAt.toString());
+  const modulo = 1n << 64n;
+  if (issuedAtValue < 0n) {
+    issuedAtValue = modulo + issuedAtValue;
+  }
+  for (let i = 0; i < 8; i += 1) {
+    issuedAtBytes[i] = Number(issuedAtValue & 0xffn);
+    issuedAtValue >>= 8n;
+  }
+
+  return concatBytes(
+    utf8ToBytes("A402-ASC-CLAIM-VOUCHER"),
+    new Uint8Array([0]),
+    channelIdHash,
+    requestIdHash,
+    amountBytes,
+    hexToBytes(requestHash),
+    hexToBytes(providerPubkey),
+    issuedAtBytes,
+    hexToBytes(vaultConfig)
+  );
+}
+
+export function adaptAscSignature(input: {
+  adaptorPoint: string;
+  preSigRPrime: string;
+  preSigSPrime: string;
+  adaptorSecret: Uint8Array | string;
+}): Uint8Array {
+  const adaptorPoint = ed25519.Point.fromHex(
+    normalizeHex32(input.adaptorPoint, "adaptorPoint")
+  );
+  const rPrime = ed25519.Point.fromHex(
+    normalizeHex32(input.preSigRPrime, "preSigRPrime")
+  );
+  const sPrime = bytesToBigIntLE(
+    normalizeHex32(input.preSigSPrime, "preSigSPrime")
+  );
+  const adaptorSecret = canonicalScalarBytes(
+    input.adaptorSecret,
+    "adaptorSecret"
+  );
+  const adaptedR = rPrime.add(adaptorPoint).toRawBytes();
+  const adaptedS = bigintToBytesLE(sPrime + adaptorSecret.scalar);
+  return concatBytes(adaptedR, adaptedS);
 }
 
 export function encryptAscResult(
@@ -237,4 +343,131 @@ export async function deliverAscResult(
   const delivery = generateAscDeliveryArtifact(input);
   const response = await submitAscDelivery(config, input.channelId, delivery);
   return { delivery, response };
+}
+
+export async function submitAscCloseClaim(input: {
+  program: anchor.Program<any>;
+  caller: Keypair;
+  config: Pick<A402ProviderConfig, "vaultConfig" | "vaultSigner">;
+  channelId: string;
+  requestId: string;
+  amount: string | number;
+  requestHash: string;
+  delivery: AscDeliveryArtifact;
+  claimVoucher: AscClaimVoucher;
+}): Promise<{ signature: string; ascCloseClaim: string }> {
+  const channelIdHashHex = hashAscIdentifier(input.channelId);
+  const requestIdHashHex = hashAscIdentifier(input.requestId);
+  if (input.claimVoucher.channelIdHash.toLowerCase() !== channelIdHashHex) {
+    throw new Error("claimVoucher.channelIdHash mismatch");
+  }
+  if (input.claimVoucher.requestIdHash.toLowerCase() !== requestIdHashHex) {
+    throw new Error("claimVoucher.requestIdHash mismatch");
+  }
+
+  const expectedVoucherMessage = buildAscClaimVoucherMessage({
+    channelId: input.channelId,
+    requestId: input.requestId,
+    amount: input.amount,
+    requestHash: input.requestHash,
+    providerPubkey: input.delivery.providerPubkey,
+    issuedAt: input.claimVoucher.issuedAt,
+    vaultConfig: new PublicKey(input.config.vaultConfig)
+      .toBuffer()
+      .toString("hex"),
+  });
+  const voucherMessage = Buffer.from(input.claimVoucher.message, "base64");
+  if (!voucherMessage.equals(Buffer.from(expectedVoucherMessage))) {
+    throw new Error("claimVoucher.message mismatch");
+  }
+
+  const voucherSignature = Buffer.from(input.claimVoucher.signature, "base64");
+  if (voucherSignature.length !== 64) {
+    throw new Error("claimVoucher.signature must be 64 bytes");
+  }
+
+  const paymentMessage = buildAscPaymentMessage(
+    input.channelId,
+    input.requestId,
+    input.amount,
+    input.requestHash
+  );
+  const fullSig = adaptAscSignature(input.delivery);
+  if (
+    !ed25519.verify(
+      fullSig,
+      paymentMessage,
+      Buffer.from(input.delivery.providerPubkey, "hex")
+    )
+  ) {
+    throw new Error(
+      "delivery artifact does not produce a valid adapted signature"
+    );
+  }
+
+  const voucherEd25519Ix = Ed25519Program.createInstructionWithPublicKey({
+    publicKey: new PublicKey(input.config.vaultSigner).toBytes(),
+    message: voucherMessage,
+    signature: voucherSignature,
+  });
+  const paymentEd25519Ix = Ed25519Program.createInstructionWithPublicKey({
+    publicKey: Buffer.from(input.delivery.providerPubkey, "hex"),
+    message: paymentMessage,
+    signature: fullSig,
+  });
+
+  const vaultConfig = new PublicKey(input.config.vaultConfig);
+  const channelIdHash = Buffer.from(channelIdHashHex, "hex");
+  const requestIdHash = Buffer.from(requestIdHashHex, "hex");
+  const [ascCloseClaimPda] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("asc_close_claim"),
+      vaultConfig.toBuffer(),
+      channelIdHash,
+      requestIdHash,
+    ],
+    input.program.programId
+  );
+
+  const claimIx = await input.program.methods
+    .ascCloseClaim(
+      Array.from(channelIdHash) as any,
+      Array.from(requestIdHash) as any
+    )
+    .accountsPartial({
+      caller: input.caller.publicKey,
+      vaultConfig,
+      ascCloseClaim: ascCloseClaimPda,
+      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+
+  const provider = input.program.provider as anchor.AnchorProvider;
+  const latestBlockhash = await provider.connection.getLatestBlockhash(
+    "confirmed"
+  );
+  const messageV0 = new TransactionMessage({
+    payerKey: input.caller.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    instructions: [voucherEd25519Ix, paymentEd25519Ix, claimIx],
+  }).compileToV0Message();
+
+  const tx = new VersionedTransaction(messageV0);
+  tx.sign([input.caller]);
+
+  const signature = await provider.connection.sendTransaction(tx);
+  await provider.connection.confirmTransaction(
+    {
+      signature,
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    },
+    "confirmed"
+  );
+
+  return {
+    signature,
+    ascCloseClaim: ascCloseClaimPda.toBase58(),
+  };
 }

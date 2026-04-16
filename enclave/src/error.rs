@@ -31,8 +31,20 @@ pub enum EnclaveError {
     #[error("paymentDetails is required")]
     PaymentDetailsRequired,
 
+    #[error("paymentDetails.verifyWindowSec is required")]
+    VerifyWindowSecRequired,
+
+    #[error("paymentDetails.verifyWindowSec must be a positive integer")]
+    InvalidVerifyWindowSec,
+
     #[error("Invalid client signature")]
     InvalidClientSignature,
+
+    #[error("Client request authorization expired")]
+    ClientAuthExpired,
+
+    #[error("Client request authorization window is invalid")]
+    InvalidClientAuthWindow,
 
     #[error("Payment expired")]
     PaymentExpired,
@@ -42,6 +54,9 @@ pub enum EnclaveError {
 
     #[error("Reservation not found")]
     ReservationNotFound,
+
+    #[error("Reservation expired")]
+    ReservationExpired,
 
     #[error("Settlement not found")]
     SettlementNotFound,
@@ -76,6 +91,9 @@ pub enum EnclaveError {
     #[error("Provider ID mismatch")]
     ProviderIdMismatch,
 
+    #[error("Provider already registered")]
+    ProviderAlreadyRegistered,
+
     #[error("Channel not found")]
     ChannelNotFound,
 
@@ -96,6 +114,18 @@ pub enum EnclaveError {
 
     #[error("Provider participant pubkey is invalid")]
     InvalidProviderParticipant,
+
+    #[error("Provider participant pubkey is required for ASC")]
+    ProviderParticipantRequired,
+
+    #[error("Provider participant attestation is required for ASC registration")]
+    ProviderParticipantAttestationRequired,
+
+    #[error("Provider participant pubkey does not match ASC deliver request")]
+    ProviderParticipantMismatch,
+
+    #[error("Provider participant attestation is invalid: {0}")]
+    InvalidProviderParticipantAttestation(String),
 
     #[error("payTo does not match provider registration")]
     PayToMismatch,
@@ -133,21 +163,30 @@ impl IntoResponse for EnclaveError {
             EnclaveError::PaymentDetailsRequired => {
                 (StatusCode::BAD_REQUEST, "payment_details_required")
             }
+            EnclaveError::VerifyWindowSecRequired => {
+                (StatusCode::BAD_REQUEST, "verify_window_sec_required")
+            }
+            EnclaveError::InvalidVerifyWindowSec => {
+                (StatusCode::BAD_REQUEST, "invalid_verify_window_sec")
+            }
             EnclaveError::InvalidClientSignature => {
                 (StatusCode::BAD_REQUEST, "invalid_client_signature")
+            }
+            EnclaveError::ClientAuthExpired => (StatusCode::UNAUTHORIZED, "client_auth_expired"),
+            EnclaveError::InvalidClientAuthWindow => {
+                (StatusCode::BAD_REQUEST, "invalid_client_auth_window")
             }
             EnclaveError::PaymentExpired => (StatusCode::BAD_REQUEST, "payment_expired"),
             EnclaveError::PaymentIdReused => (StatusCode::CONFLICT, "payment_id_reused"),
             EnclaveError::ReservationNotFound => (StatusCode::NOT_FOUND, "reservation_not_found"),
+            EnclaveError::ReservationExpired => (StatusCode::CONFLICT, "reservation_expired"),
             EnclaveError::SettlementNotFound => (StatusCode::NOT_FOUND, "settlement_not_found"),
             EnclaveError::InvalidReservationStatus(ref _s) => {
                 (StatusCode::CONFLICT, "invalid_reservation_status")
             }
             EnclaveError::VaultNotActive => (StatusCode::SERVICE_UNAVAILABLE, "vault_not_active"),
             EnclaveError::VaultPaused => (StatusCode::SERVICE_UNAVAILABLE, "vault_paused"),
-            EnclaveError::VaultMigrating => {
-                (StatusCode::SERVICE_UNAVAILABLE, "vault_migrating")
-            }
+            EnclaveError::VaultMigrating => (StatusCode::SERVICE_UNAVAILABLE, "vault_migrating"),
             EnclaveError::VaultRetired => (StatusCode::SERVICE_UNAVAILABLE, "vault_retired"),
             EnclaveError::VaultStatusUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "vault_status_unavailable")
@@ -160,6 +199,9 @@ impl IntoResponse for EnclaveError {
                 (StatusCode::BAD_REQUEST, "payment_details_hash_mismatch")
             }
             EnclaveError::ProviderIdMismatch => (StatusCode::FORBIDDEN, "provider_id_mismatch"),
+            EnclaveError::ProviderAlreadyRegistered => {
+                (StatusCode::CONFLICT, "provider_already_registered")
+            }
             EnclaveError::ChannelNotFound => (StatusCode::NOT_FOUND, "channel_not_found"),
             EnclaveError::InvalidChannelStatus(ref _s) => {
                 (StatusCode::CONFLICT, "invalid_channel_status")
@@ -180,6 +222,20 @@ impl IntoResponse for EnclaveError {
             EnclaveError::InvalidProviderParticipant => {
                 (StatusCode::BAD_REQUEST, "invalid_provider_participant")
             }
+            EnclaveError::ProviderParticipantRequired => {
+                (StatusCode::CONFLICT, "provider_participant_required")
+            }
+            EnclaveError::ProviderParticipantAttestationRequired => (
+                StatusCode::BAD_REQUEST,
+                "provider_participant_attestation_required",
+            ),
+            EnclaveError::ProviderParticipantMismatch => {
+                (StatusCode::FORBIDDEN, "provider_participant_mismatch")
+            }
+            EnclaveError::InvalidProviderParticipantAttestation(ref _s) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_provider_participant_attestation",
+            ),
             EnclaveError::PayToMismatch => (StatusCode::BAD_REQUEST, "pay_to_mismatch"),
             EnclaveError::AssetMintMismatch => (StatusCode::BAD_REQUEST, "asset_mint_mismatch"),
             EnclaveError::NetworkMismatch => (StatusCode::BAD_REQUEST, "network_mismatch"),

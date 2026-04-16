@@ -29,6 +29,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::handlers::AppState;
+use crate::outbound::OutboundTransport;
 use crate::wal::WalEntry;
 use solana_transaction_status_client_types::{
     option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta,
@@ -48,6 +49,8 @@ pub struct DepositDetector {
     pub rpc_url: String,
     /// WebSocket RPC URL
     pub ws_url: String,
+    /// Outbound transport for Solana RPC calls
+    pub outbound: OutboundTransport,
     /// Whether the detector has completed initial catch-up
     pub is_synced: Arc<AtomicBool>,
     /// Set of already-processed transaction signatures (prevents double-counting)
@@ -65,18 +68,37 @@ pub struct DepositEvent {
     pub slot: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct WithdrawEvent {
+    pub signature: String,
+    pub client: Pubkey,
+    pub recipient_ata: Pubkey,
+    pub amount: u64,
+    pub withdraw_nonce: u64,
+    pub expires_at: i64,
+    pub slot: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum BalanceSyncEvent {
+    Deposit(DepositEvent),
+    Withdraw(WithdrawEvent),
+}
+
 impl DepositDetector {
     pub fn new(
         vault_token_account: Pubkey,
         program_id: Pubkey,
         rpc_url: String,
         ws_url: String,
+        outbound: OutboundTransport,
     ) -> Self {
         Self {
             vault_token_account,
             program_id,
             rpc_url,
             ws_url,
+            outbound,
             is_synced: Arc::new(AtomicBool::new(false)),
             processed_signatures: Arc::new(RwLock::new(HashSet::new())),
             last_processed_signature: Arc::new(RwLock::new(None)),
@@ -235,7 +257,7 @@ pub async fn apply_deposit(
         state.vault.apply_deposit(deposit.client, deposit.amount);
 
         // Record in WAL
-        state
+        if let Err(error) = state
             .wal
             .append(WalEntry::DepositApplied {
                 tx_signature: deposit.signature.clone(),
@@ -243,7 +265,11 @@ pub async fn apply_deposit(
                 amount: deposit.amount,
                 slot: deposit.slot,
             })
-            .await?;
+            .await
+        {
+            let _ = state.vault.rollback_deposit(&deposit.client, deposit.amount);
+            return Err(error.into());
+        }
 
         // Mark as processed
         detector.mark_processed(&deposit.signature).await;
@@ -256,6 +282,9 @@ pub async fn apply_deposit(
             .vault
             .last_finalized_slot
             .store(deposit.slot, std::sync::atomic::Ordering::SeqCst);
+        crate::handlers::issue_client_receipt_locked(state, deposit.client)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
 
     info!(
@@ -273,21 +302,27 @@ async fn process_new_deposits(
     detector: &Arc<DepositDetector>,
     catch_up: bool,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    let deposits = fetch_deposit_events(detector, catch_up).await?;
+    let events = fetch_balance_sync_events(detector, catch_up).await?;
     let mut applied = 0usize;
-    for deposit in deposits {
-        apply_deposit(state, detector, deposit).await?;
+    for event in events {
+        match event {
+            BalanceSyncEvent::Deposit(deposit) => apply_deposit(state, detector, deposit).await?,
+            BalanceSyncEvent::Withdraw(withdrawal) => {
+                apply_withdrawal(state, detector, withdrawal).await?
+            }
+        }
         applied += 1;
     }
     Ok(applied)
 }
 
-async fn fetch_deposit_events(
+async fn fetch_balance_sync_events(
     detector: &Arc<DepositDetector>,
     catch_up: bool,
-) -> Result<Vec<DepositEvent>, Box<dyn std::error::Error + Send + Sync>> {
-    let rpc =
-        RpcClient::new_with_commitment(detector.rpc_url.clone(), CommitmentConfig::finalized());
+) -> Result<Vec<BalanceSyncEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    let rpc: RpcClient = detector
+        .outbound
+        .solana_rpc_client(detector.rpc_url.clone(), CommitmentConfig::finalized());
     let until_signature = if catch_up {
         detector
             .last_processed_signature
@@ -327,7 +362,7 @@ async fn fetch_deposit_events(
         }
     }
 
-    let mut deposits = Vec::new();
+    let mut events = Vec::new();
     for signature_info in signature_infos.into_iter().rev() {
         if detector.is_processed(&signature_info.signature).await {
             continue;
@@ -345,20 +380,21 @@ async fn fetch_deposit_events(
             )
             .await?;
 
-        if let Some(deposit) = parse_deposit_transaction(detector, &tx, &signature_info.signature)?
+        if let Some(event) =
+            parse_balance_sync_transaction(detector, &tx, &signature_info.signature)?
         {
-            deposits.push(deposit);
+            events.push(event);
         }
     }
 
-    Ok(deposits)
+    Ok(events)
 }
 
-fn parse_deposit_transaction(
+fn parse_balance_sync_transaction(
     detector: &DepositDetector,
     tx: &EncodedConfirmedTransactionWithStatusMeta,
     signature: &str,
-) -> Result<Option<DepositEvent>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<BalanceSyncEvent>, Box<dyn std::error::Error + Send + Sync>> {
     if tx
         .transaction
         .meta
@@ -384,39 +420,145 @@ fn parse_deposit_transaction(
         loaded_addresses.as_ref(),
     );
     let deposit_discriminator = instruction_discriminator("deposit");
+    let withdraw_discriminator = instruction_discriminator("withdraw");
 
     for instruction in transaction.message.instructions() {
         let Some(program_id) = account_keys.get(instruction.program_id_index as usize) else {
             continue;
         };
-        if *program_id != detector.program_id
-            || instruction.data.len() < 16
-            || instruction.data[..8] != deposit_discriminator
-            || instruction.accounts.len() < 4
+        if *program_id != detector.program_id {
+            continue;
+        }
+
+        if instruction.data.len() >= 16
+            && instruction.data[..8] == deposit_discriminator
+            && instruction.accounts.len() >= 4
         {
-            continue;
+            let Some(client) = account_keys.get(instruction.accounts[0] as usize) else {
+                continue;
+            };
+            let Some(vault_token_account) = account_keys.get(instruction.accounts[3] as usize)
+            else {
+                continue;
+            };
+            if *vault_token_account != detector.vault_token_account {
+                continue;
+            }
+
+            let amount = u64::from_le_bytes(instruction.data[8..16].try_into()?);
+            return Ok(Some(BalanceSyncEvent::Deposit(DepositEvent {
+                signature: signature.to_string(),
+                client: *client,
+                amount,
+                slot: tx.slot,
+            })));
         }
 
-        let Some(client) = account_keys.get(instruction.accounts[0] as usize) else {
-            continue;
-        };
-        let Some(vault_token_account) = account_keys.get(instruction.accounts[3] as usize) else {
-            continue;
-        };
-        if *vault_token_account != detector.vault_token_account {
-            continue;
-        }
+        if instruction.data.len() >= 32
+            && instruction.data[..8] == withdraw_discriminator
+            && instruction.accounts.len() >= 4
+        {
+            let Some(client) = account_keys.get(instruction.accounts[0] as usize) else {
+                continue;
+            };
+            let Some(vault_token_account) = account_keys.get(instruction.accounts[2] as usize)
+            else {
+                continue;
+            };
+            let Some(recipient_ata) = account_keys.get(instruction.accounts[3] as usize) else {
+                continue;
+            };
+            if *vault_token_account != detector.vault_token_account {
+                continue;
+            }
 
-        let amount = u64::from_le_bytes(instruction.data[8..16].try_into()?);
-        return Ok(Some(DepositEvent {
-            signature: signature.to_string(),
-            client: *client,
-            amount,
-            slot: tx.slot,
-        }));
+            let amount = u64::from_le_bytes(instruction.data[8..16].try_into()?);
+            let withdraw_nonce = u64::from_le_bytes(instruction.data[16..24].try_into()?);
+            let expires_at = i64::from_le_bytes(instruction.data[24..32].try_into()?);
+            return Ok(Some(BalanceSyncEvent::Withdraw(WithdrawEvent {
+                signature: signature.to_string(),
+                client: *client,
+                recipient_ata: *recipient_ata,
+                amount,
+                withdraw_nonce,
+                expires_at,
+                slot: tx.slot,
+            })));
+        }
     }
 
     Ok(None)
+}
+
+pub async fn apply_withdrawal(
+    state: &Arc<AppState>,
+    detector: &Arc<DepositDetector>,
+    withdrawal: WithdrawEvent,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if detector.is_processed(&withdrawal.signature).await {
+        return Ok(());
+    }
+
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+
+        let applied = state
+            .vault
+            .apply_withdrawal(withdrawal.withdraw_nonce)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if applied.client != withdrawal.client
+            || applied.recipient_ata != withdrawal.recipient_ata
+            || applied.amount != withdrawal.amount
+            || applied.expires_at != withdrawal.expires_at
+        {
+            return Err(std::io::Error::other(format!(
+                "withdraw event mismatch for nonce {}",
+                withdrawal.withdraw_nonce
+            ))
+            .into());
+        }
+
+        if let Err(error) = state
+            .wal
+            .append(WalEntry::WithdrawApplied {
+                client: withdrawal.client.to_string(),
+                recipient_ata: withdrawal.recipient_ata.to_string(),
+                amount: withdrawal.amount,
+                withdraw_nonce: withdrawal.withdraw_nonce,
+                expires_at: withdrawal.expires_at,
+                slot: withdrawal.slot,
+                tx_signature: withdrawal.signature.clone(),
+            })
+            .await
+        {
+            let _ = state.vault.rollback_applied_withdrawal(applied);
+            return Err(error.into());
+        }
+
+        detector.mark_processed(&withdrawal.signature).await;
+        *detector.last_processed_signature.write().await = Some(withdrawal.signature.clone());
+        state
+            .vault
+            .last_finalized_slot
+            .store(withdrawal.slot, std::sync::atomic::Ordering::SeqCst);
+        state
+            .vault
+            .refresh_client_max_lock_expires_at(&withdrawal.client)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        crate::handlers::issue_client_receipt_locked(state, withdrawal.client)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+
+    info!(
+        client = %withdrawal.client,
+        amount = withdrawal.amount,
+        withdraw_nonce = withdrawal.withdraw_nonce,
+        signature = %withdrawal.signature,
+        "Withdraw applied to client balance"
+    );
+
+    Ok(())
 }
 
 fn parse_loaded_addresses(meta: &UiTransactionStatusMeta) -> Option<LoadedAddresses> {

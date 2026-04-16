@@ -39,13 +39,30 @@ pub fn verify_ed25519_signature_details(
     instructions_sysvar: &AccountInfo,
     expected_pubkey: &Pubkey,
 ) -> Result<VerifiedEd25519Signature> {
+    verify_ed25519_signature_details_relative(
+        instructions_sysvar,
+        1,
+        expected_pubkey.as_ref().try_into().unwrap(),
+    )
+}
+
+pub fn verify_ed25519_signature_details_relative(
+    instructions_sysvar: &AccountInfo,
+    offset_from_current: usize,
+    expected_pubkey: &[u8; 32],
+) -> Result<VerifiedEd25519Signature> {
     let current_index = sysvar_instructions::load_current_index_checked(instructions_sysvar)
         .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
 
-    require!(current_index > 0, VaultError::InvalidEd25519Instruction);
+    require!(
+        current_index as usize >= offset_from_current,
+        VaultError::InvalidEd25519Instruction
+    );
+
+    let target_index = current_index - offset_from_current as u16;
 
     let ed25519_ix = sysvar_instructions::load_instruction_at_checked(
-        (current_index - 1) as usize,
+        target_index as usize,
         instructions_sysvar,
     )
     .map_err(|_| error!(VaultError::InvalidEd25519Instruction))?;
@@ -54,7 +71,7 @@ pub fn verify_ed25519_signature_details(
         ed25519_ix.program_id == solana_sdk_ids::ed25519_program::ID,
         VaultError::InvalidEd25519Instruction
     );
-    let ed25519_index = current_index - 1;
+    let ed25519_index = target_index;
 
     // Ed25519 instruction data format:
     // [0]: num_signatures (1 byte)
@@ -98,7 +115,7 @@ pub fn verify_ed25519_signature_details(
 
     let pubkey_bytes = &ix_data[pubkey_offset..pubkey_offset + 32];
     require!(
-        pubkey_bytes == expected_pubkey.as_ref(),
+        pubkey_bytes == expected_pubkey,
         VaultError::InvalidVaultSigner
     );
 

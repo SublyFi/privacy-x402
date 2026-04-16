@@ -16,6 +16,7 @@ import {
   Ed25519Program,
   TransactionMessage,
   VersionedTransaction,
+  Transaction,
 } from "@solana/web3.js";
 import { expect } from "chai";
 import BN from "bn.js";
@@ -23,14 +24,80 @@ import { createHash, hkdfSync } from "crypto";
 import { RistrettoPoint } from "@noble/curves/ed25519";
 import nacl from "tweetnacl";
 import { AuditTool } from "../sdk/src/audit";
+import {
+  buildAscClaimVoucherMessage,
+  generateAscDeliveryArtifact,
+  submitAscCloseClaim,
+} from "../middleware/src/asc";
 
 const SCALAR_ORDER = BigInt(
   "7237005577332262213973186563042994240857116359379907606001950938285454250989"
 );
 
 describe("a402_vault", () => {
-  const provider = anchor.AnchorProvider.env();
+  const provider = new anchor.AnchorProvider(
+    anchor.AnchorProvider.env().connection,
+    anchor.AnchorProvider.env().wallet,
+    { commitment: "confirmed", preflightCommitment: "confirmed" }
+  );
   anchor.setProvider(provider);
+
+  // Devnet-friendly funding amount (enough for tx fees + token account creation)
+  const FUND_LAMPORTS = 5_000_000; // 0.005 SOL — enough for a few signed transactions
+  const HEAVY_FUND_LAMPORTS = 15_000_000; // 0.015 SOL — enough for token account creation + repeated tx fees
+  const VAULT_SIGNER_FUND_LAMPORTS = 30_000_000; // 0.03 SOL — covers audit PDA rent across the suite
+
+  // Devnet-safe createAccount wrapper that skips preflight to avoid stale simulation state
+  const devnetConfirmOpts = {
+    skipPreflight: true,
+    commitment: "confirmed" as anchor.web3.Commitment,
+  };
+
+  async function createTokenAccount(
+    payer: Keypair,
+    mint: PublicKey,
+    owner: PublicKey
+  ): Promise<PublicKey> {
+    // Ensure mint is visible on this RPC node before creating token account
+    for (let i = 0; i < 5; i++) {
+      const info = await provider.connection.getAccountInfo(mint, "confirmed");
+      if (info && info.data.length >= 82) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    const kp = Keypair.generate();
+    return createAccount(
+      provider.connection,
+      payer,
+      mint,
+      owner,
+      kp,
+      devnetConfirmOpts
+    );
+  }
+
+  // Helper: fund a keypair from the provider wallet (works on devnet without faucet)
+  async function fundAccount(
+    to: PublicKey,
+    lamports = FUND_LAMPORTS
+  ): Promise<void> {
+    const currentLamports = await provider.connection.getBalance(
+      to,
+      "confirmed"
+    );
+    if (currentLamports >= lamports) {
+      return;
+    }
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: to,
+        lamports: lamports - currentLamports,
+      })
+    );
+    const sig = await provider.sendAndConfirm(tx);
+    // Wait for finalized status so subsequent txs can reliably use the funded account on devnet
+    await provider.connection.confirmTransaction(sig, "finalized");
+  }
 
   const program = anchor.workspace.a402Vault as Program<A402Vault>;
   const governance = provider.wallet as anchor.Wallet;
@@ -39,7 +106,9 @@ describe("a402_vault", () => {
   let vaultConfigPda: PublicKey;
   let vaultConfigBump: number;
   let vaultTokenAccountPda: PublicKey;
-  const vaultId = new BN(1);
+  // Randomize vault IDs so tests can re-run on devnet without PDA collisions
+  const testRunSeed = Date.now();
+  const vaultId = new BN(testRunSeed);
   const vaultSignerKeypair = Keypair.generate();
 
   const auditorMasterPubkey = new Array(32).fill(0);
@@ -48,11 +117,7 @@ describe("a402_vault", () => {
   const newAuditorMasterSecret = new Uint8Array(32).fill(9);
 
   before(async () => {
-    const vaultSignerAirdrop = await provider.connection.requestAirdrop(
-      vaultSignerKeypair.publicKey,
-      2 * anchor.web3.LAMPORTS_PER_SOL
-    );
-    await provider.connection.confirmTransaction(vaultSignerAirdrop);
+    await fundAccount(vaultSignerKeypair.publicKey, VAULT_SIGNER_FUND_LAMPORTS);
 
     // Create USDC mint
     usdcMint = await createMint(
@@ -60,7 +125,9 @@ describe("a402_vault", () => {
       (governance as any).payer,
       governance.publicKey,
       null,
-      6
+      6,
+      undefined,
+      devnetConfirmOpts
     );
 
     // Derive PDAs
@@ -102,6 +169,39 @@ describe("a402_vault", () => {
       provider: providerTokenAccount,
       timestamp: new BN(timestamp ?? Math.floor(Date.now() / 1000)),
     };
+  }
+
+  type SettleEntryInput = {
+    providerTokenAccount: PublicKey;
+    amount: BN;
+  };
+
+  type AuditRecordInput = ReturnType<typeof buildAuditRecord>;
+
+  function computeBatchChunkHash(
+    batchId: BN,
+    settlements: SettleEntryInput[],
+    auditRecords: AuditRecordInput[]
+  ): number[] {
+    const hash = createHash("sha256");
+    hash.update("a402-batch-chunk-v1");
+    hash.update(batchId.toArrayLike(Buffer, "le", 8));
+
+    for (const settlement of settlements) {
+      hash.update(settlement.providerTokenAccount.toBuffer());
+      hash.update(settlement.amount.toArrayLike(Buffer, "le", 8));
+    }
+
+    for (const record of auditRecords) {
+      hash.update(Buffer.from(record.encryptedSender));
+      hash.update(Buffer.from(record.encryptedAmount));
+      hash.update(record.provider.toBuffer());
+      const timestamp = Buffer.alloc(8);
+      timestamp.writeBigInt64LE(BigInt(record.timestamp.toString()));
+      hash.update(timestamp);
+    }
+
+    return Array.from(hash.digest());
   }
 
   function bytesToScalar(bytes: Uint8Array): bigint {
@@ -190,7 +290,10 @@ describe("a402_vault", () => {
   }
 
   async function fetchAuditRecord(address: PublicKey) {
-    const accountInfo = await provider.connection.getAccountInfo(address);
+    const accountInfo = await provider.connection.getAccountInfo(
+      address,
+      "confirmed"
+    );
     expect(accountInfo).to.not.equal(null);
 
     const data = Buffer.from(accountInfo!.data);
@@ -232,11 +335,16 @@ describe("a402_vault", () => {
 
   async function sendAtomicSettleAndAudit(
     batchId: BN,
-    batchChunkHash: number[],
-    settlements: Array<{ providerTokenAccount: PublicKey; amount: BN }>,
-    auditRecords: Array<ReturnType<typeof buildAuditRecord>>,
+    settlements: SettleEntryInput[],
+    auditRecords: AuditRecordInput[],
     auditStartIndex = 0
   ) {
+    const batchChunkHash = computeBatchChunkHash(
+      batchId,
+      settlements,
+      auditRecords
+    );
+
     const settleIx = await program.methods
       .settleVault(batchId, batchChunkHash, settlements)
       .accountsPartial({
@@ -283,11 +391,14 @@ describe("a402_vault", () => {
     tx.sign([(governance as any).payer, vaultSignerKeypair]);
 
     const txSig = await provider.connection.sendTransaction(tx);
-    await provider.connection.confirmTransaction({
-      signature: txSig,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-    });
+    await provider.connection.confirmTransaction(
+      {
+        signature: txSig,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      "confirmed"
+    );
 
     return txSig;
   }
@@ -313,7 +424,7 @@ describe("a402_vault", () => {
         .rpc();
 
       const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
-      expect(vault.vaultId.toNumber()).to.equal(1);
+      expect(vault.vaultId.toNumber()).to.equal(vaultId.toNumber());
       expect(vault.governance.toBase58()).to.equal(
         governance.publicKey.toBase58()
       );
@@ -337,16 +448,11 @@ describe("a402_vault", () => {
     before(async () => {
       clientKeypair = Keypair.generate();
 
-      // Airdrop SOL to client
-      const sig = await provider.connection.requestAirdrop(
-        clientKeypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      // Fund SOL to client
+      await fundAccount(clientKeypair.publicKey, HEAVY_FUND_LAMPORTS);
 
       // Create client token account
-      clientTokenAccount = await createAccount(
-        provider.connection,
+      clientTokenAccount = await createTokenAccount(
         clientKeypair,
         usdcMint,
         clientKeypair.publicKey
@@ -359,7 +465,9 @@ describe("a402_vault", () => {
         usdcMint,
         clientTokenAccount,
         governance.publicKey,
-        depositAmount * 10
+        depositAmount * 10,
+        [],
+        devnetConfirmOpts
       );
     });
 
@@ -413,15 +521,10 @@ describe("a402_vault", () => {
 
     before(async () => {
       withdrawClient = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        withdrawClient.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(withdrawClient.publicKey, HEAVY_FUND_LAMPORTS);
 
       // Create client token account
-      withdrawClientTokenAccount = await createAccount(
-        provider.connection,
+      withdrawClientTokenAccount = await createTokenAccount(
         withdrawClient,
         usdcMint,
         withdrawClient.publicKey
@@ -433,7 +536,8 @@ describe("a402_vault", () => {
         withdrawClient,
         usdcMint,
         withdrawClient.publicKey,
-        Keypair.generate() // separate account for deposit
+        Keypair.generate(), // separate account for deposit
+        devnetConfirmOpts
       );
       await mintTo(
         provider.connection,
@@ -441,7 +545,9 @@ describe("a402_vault", () => {
         usdcMint,
         depositTokenAccount,
         governance.publicKey,
-        2_000_000
+        2_000_000,
+        [],
+        devnetConfirmOpts
       );
       await program.methods
         .deposit(new BN(2_000_000))
@@ -792,14 +898,9 @@ describe("a402_vault", () => {
     before(async () => {
       // Create provider
       providerKeypair = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        providerKeypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(providerKeypair.publicKey, HEAVY_FUND_LAMPORTS);
 
-      providerTokenAccount = await createAccount(
-        provider.connection,
+      providerTokenAccount = await createTokenAccount(
         providerKeypair,
         usdcMint,
         providerKeypair.publicKey
@@ -807,14 +908,9 @@ describe("a402_vault", () => {
 
       // Deposit more funds to vault
       clientKeypair = Keypair.generate();
-      const sig2 = await provider.connection.requestAirdrop(
-        clientKeypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig2);
+      await fundAccount(clientKeypair.publicKey, HEAVY_FUND_LAMPORTS);
 
-      clientTokenAccount = await createAccount(
-        provider.connection,
+      clientTokenAccount = await createTokenAccount(
         clientKeypair,
         usdcMint,
         clientKeypair.publicKey
@@ -826,7 +922,9 @@ describe("a402_vault", () => {
         usdcMint,
         clientTokenAccount,
         governance.publicKey,
-        5_000_000
+        5_000_000,
+        [],
+        devnetConfirmOpts
       );
 
       await program.methods
@@ -844,11 +942,9 @@ describe("a402_vault", () => {
 
     it("settles vault atomically with audit records", async () => {
       const batchId = new BN(1);
-      const batchChunkHash = new Array(32).fill(11);
 
       await sendAtomicSettleAndAudit(
         batchId,
-        batchChunkHash,
         [
           {
             providerTokenAccount,
@@ -860,24 +956,23 @@ describe("a402_vault", () => {
 
       const providerToken = await getAccount(
         provider.connection,
-        providerTokenAccount
+        providerTokenAccount,
+        "confirmed"
       );
       expect(Number(providerToken.amount)).to.equal(settleAmount);
 
-      const vault = await program.account.vaultConfig.fetch(vaultConfigPda);
+      const vault = await program.account.vaultConfig.fetch(
+        vaultConfigPda,
+        "confirmed"
+      );
       expect(vault.lifetimeSettled.toNumber()).to.equal(settleAmount);
     });
 
     it("settles to multiple providers in one batch", async () => {
       const provider2Keypair = Keypair.generate();
-      const sig3 = await provider.connection.requestAirdrop(
-        provider2Keypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig3);
+      await fundAccount(provider2Keypair.publicKey, HEAVY_FUND_LAMPORTS);
 
-      const provider2TokenAccount = await createAccount(
-        provider.connection,
+      const provider2TokenAccount = await createTokenAccount(
         provider2Keypair,
         usdcMint,
         provider2Keypair.publicKey
@@ -893,7 +988,6 @@ describe("a402_vault", () => {
 
       await sendAtomicSettleAndAudit(
         new BN(10),
-        new Array(32).fill(22),
         [
           {
             providerTokenAccount,
@@ -926,11 +1020,7 @@ describe("a402_vault", () => {
 
     it("rejects settlement from non-vault-signer", async () => {
       const fakeSigner = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        fakeSigner.publicKey,
-        anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(fakeSigner.publicKey, FUND_LAMPORTS);
 
       try {
         await program.methods
@@ -998,7 +1088,7 @@ describe("a402_vault", () => {
     // Use a separate vault for pause tests
     let pauseVaultConfigPda: PublicKey;
     let pauseVaultTokenPda: PublicKey;
-    const pauseVaultId = new BN(100);
+    const pauseVaultId = new BN(testRunSeed + 100);
 
     before(async () => {
       [pauseVaultConfigPda] = PublicKey.findProgramAddressSync(
@@ -1050,14 +1140,9 @@ describe("a402_vault", () => {
 
     it("rejects deposit on paused vault", async () => {
       const clientKeypair = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        clientKeypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(clientKeypair.publicKey, HEAVY_FUND_LAMPORTS);
 
-      const clientTokenAccount = await createAccount(
-        provider.connection,
+      const clientTokenAccount = await createTokenAccount(
         clientKeypair,
         usdcMint,
         clientKeypair.publicKey
@@ -1069,7 +1154,9 @@ describe("a402_vault", () => {
         usdcMint,
         clientTokenAccount,
         governance.publicKey,
-        1_000_000
+        1_000_000,
+        [],
+        devnetConfirmOpts
       );
 
       try {
@@ -1094,7 +1181,7 @@ describe("a402_vault", () => {
   describe("announce_migration", () => {
     let migrateVaultConfigPda: PublicKey;
     let migrateVaultTokenPda: PublicKey;
-    const migrateVaultId = new BN(200);
+    const migrateVaultId = new BN(testRunSeed + 200);
     const successorVault = Keypair.generate().publicKey;
 
     before(async () => {
@@ -1156,14 +1243,9 @@ describe("a402_vault", () => {
   describe("rotate_auditor", () => {
     it("rotates auditor key", async () => {
       const rotatingProvider = Keypair.generate();
-      const providerAirdrop = await provider.connection.requestAirdrop(
-        rotatingProvider.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(providerAirdrop);
+      await fundAccount(rotatingProvider.publicKey, HEAVY_FUND_LAMPORTS);
 
-      const rotatingProviderTokenAccount = await createAccount(
-        provider.connection,
+      const rotatingProviderTokenAccount = await createTokenAccount(
         rotatingProvider,
         usdcMint,
         rotatingProvider.publicKey
@@ -1174,7 +1256,6 @@ describe("a402_vault", () => {
       const oldAuditPda = findAuditPda(oldBatchId, 0);
       await sendAtomicSettleAndAudit(
         oldBatchId,
-        new Array(32).fill(3),
         [
           {
             providerTokenAccount: rotatingProviderTokenAccount,
@@ -1214,7 +1295,6 @@ describe("a402_vault", () => {
       const newAuditPda = findAuditPda(newBatchId, 0);
       await sendAtomicSettleAndAudit(
         newBatchId,
-        new Array(32).fill(4),
         [
           {
             providerTokenAccount: rotatingProviderTokenAccount,
@@ -1290,11 +1370,7 @@ describe("a402_vault", () => {
   describe("record_audit", () => {
     it("rejects record_audit from non-vault-signer", async () => {
       const fakeSigner = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        fakeSigner.publicKey,
-        anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(fakeSigner.publicKey, FUND_LAMPORTS);
 
       try {
         await program.methods
@@ -1351,21 +1427,15 @@ describe("a402_vault", () => {
     it("creates audit record atomically with settle_vault", async () => {
       // Set up: create a provider with token account and fund vault
       const auditProviderKeypair = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        auditProviderKeypair.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(auditProviderKeypair.publicKey, HEAVY_FUND_LAMPORTS);
 
-      const auditProviderTokenAccount = await createAccount(
-        provider.connection,
+      const auditProviderTokenAccount = await createTokenAccount(
         auditProviderKeypair,
         usdcMint,
         auditProviderKeypair.publicKey
       );
 
       const batchId = new BN(50);
-      const batchChunkHash = new Array(32).fill(0);
       const settleAmount = 10_000;
       const now = Math.floor(Date.now() / 1000);
       const auditRecord = buildAuditRecord(
@@ -1377,7 +1447,6 @@ describe("a402_vault", () => {
 
       await sendAtomicSettleAndAudit(
         batchId,
-        batchChunkHash,
         [
           {
             providerTokenAccount: auditProviderTokenAccount,
@@ -1400,16 +1469,60 @@ describe("a402_vault", () => {
       expect(auditAccount.encryptedAmount.length).to.equal(64);
     });
 
+    it("supports provider-aggregated settlement with per-request audit records", async () => {
+      const aggregatedProvider = Keypair.generate();
+      await fundAccount(aggregatedProvider.publicKey, HEAVY_FUND_LAMPORTS);
+
+      const aggregatedProviderTokenAccount = await createTokenAccount(
+        aggregatedProvider,
+        usdcMint,
+        aggregatedProvider.publicKey
+      );
+
+      const amount1 = 12_000;
+      const amount2 = 18_000;
+      const batchId = new BN(76);
+      const auditZero = findAuditPda(batchId, 0);
+      const auditOne = findAuditPda(batchId, 1);
+
+      await sendAtomicSettleAndAudit(
+        batchId,
+        [
+          {
+            providerTokenAccount: aggregatedProviderTokenAccount,
+            amount: new BN(amount1 + amount2),
+          },
+        ],
+        [
+          buildAuditRecord(aggregatedProviderTokenAccount, 61),
+          buildAuditRecord(aggregatedProviderTokenAccount, 62),
+        ]
+      );
+
+      const providerToken = await getAccount(
+        provider.connection,
+        aggregatedProviderTokenAccount,
+        "confirmed"
+      );
+      expect(Number(providerToken.amount)).to.equal(amount1 + amount2);
+
+      const firstAudit = await fetchAuditRecord(auditZero);
+      const secondAudit = await fetchAuditRecord(auditOne);
+      expect(firstAudit.index).to.equal(0);
+      expect(secondAudit.index).to.equal(1);
+      expect(firstAudit.provider.toBase58()).to.equal(
+        aggregatedProviderTokenAccount.toBase58()
+      );
+      expect(secondAudit.provider.toBase58()).to.equal(
+        aggregatedProviderTokenAccount.toBase58()
+      );
+    });
+
     it("supports multiple atomic chunks for the same batch_id", async () => {
       const multiChunkProvider = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        multiChunkProvider.publicKey,
-        2 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(multiChunkProvider.publicKey, HEAVY_FUND_LAMPORTS);
 
-      const multiChunkProviderTokenAccount = await createAccount(
-        provider.connection,
+      const multiChunkProviderTokenAccount = await createTokenAccount(
         multiChunkProvider,
         usdcMint,
         multiChunkProvider.publicKey
@@ -1419,7 +1532,6 @@ describe("a402_vault", () => {
 
       await sendAtomicSettleAndAudit(
         batchId,
-        new Array(32).fill(7),
         [
           {
             providerTokenAccount: multiChunkProviderTokenAccount,
@@ -1439,7 +1551,6 @@ describe("a402_vault", () => {
 
       await sendAtomicSettleAndAudit(
         batchId,
-        new Array(32).fill(8),
         [
           {
             providerTokenAccount: multiChunkProviderTokenAccount,
@@ -1474,7 +1585,7 @@ describe("a402_vault", () => {
   describe("retire_vault", () => {
     let retireVaultConfigPda: PublicKey;
     let retireVaultTokenPda: PublicKey;
-    const retireVaultId = new BN(300);
+    const retireVaultId = new BN(testRunSeed + 300);
 
     before(async () => {
       [retireVaultConfigPda] = PublicKey.findProgramAddressSync(
@@ -1511,22 +1622,24 @@ describe("a402_vault", () => {
 
     it("retires a paused vault", async () => {
       // First pause
-      await program.methods
+      const pauseSig = await program.methods
         .pauseVault()
         .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: retireVaultConfigPda,
         })
         .rpc();
+      await provider.connection.confirmTransaction(pauseSig, "confirmed");
 
       // Then retire
-      await program.methods
+      const retireSig = await program.methods
         .retireVault()
         .accountsPartial({
           governance: governance.publicKey,
           vaultConfig: retireVaultConfigPda,
         })
         .rpc();
+      await provider.connection.confirmTransaction(retireSig, "confirmed");
 
       const vault = await program.account.vaultConfig.fetch(
         retireVaultConfigPda
@@ -1536,7 +1649,7 @@ describe("a402_vault", () => {
 
     it("rejects retire on active vault", async () => {
       // Create another vault
-      const activeVaultId = new BN(301);
+      const activeVaultId = new BN(testRunSeed + 301);
       const [activeVaultPda] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("vault_config"),
@@ -1583,12 +1696,126 @@ describe("a402_vault", () => {
     });
   });
 
+  describe("asc_close_claim", () => {
+    it("records an on-chain ASC close claim from voucher + adapted signature", async () => {
+      const caller = (governance as any).payer as Keypair;
+      const channelId = "ch_claim_test";
+      const requestId = "req_claim_test";
+      const amount = 1_250_000;
+      const requestHash = "ab".repeat(32);
+      const claimVaultId = new BN(testRunSeed + 350);
+      const [claimVaultConfigPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("vault_config"),
+          governance.publicKey.toBuffer(),
+          claimVaultId.toArrayLike(Buffer, "le", 8),
+        ],
+        program.programId
+      );
+      const [claimVaultTokenPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("vault_token"), claimVaultConfigPda.toBuffer()],
+        program.programId
+      );
+
+      const existingVault = await provider.connection.getAccountInfo(
+        claimVaultConfigPda,
+        "confirmed"
+      );
+      if (!existingVault) {
+        await program.methods
+          .initializeVault(
+            claimVaultId,
+            vaultSignerKeypair.publicKey,
+            auditorMasterPubkey,
+            attestationPolicyHash
+          )
+          .accountsPartial({
+            governance: governance.publicKey,
+            vaultConfig: claimVaultConfigPda,
+            usdcMint,
+            vaultTokenAccount: claimVaultTokenPda,
+            systemProgram: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .rpc();
+      }
+
+      const delivery = generateAscDeliveryArtifact({
+        channelId,
+        requestId,
+        amount,
+        requestHash,
+        result: JSON.stringify({ ok: true, value: "claim" }),
+        providerSecretKey: "11".repeat(32),
+        adaptorSecret: "22".repeat(32),
+      });
+
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const voucherMessage = buildAscClaimVoucherMessage({
+        channelId,
+        requestId,
+        amount,
+        requestHash,
+        providerPubkey: delivery.providerPubkey,
+        issuedAt,
+        vaultConfig: Buffer.from(claimVaultConfigPda.toBytes()).toString("hex"),
+      });
+
+      const deliverResponse = {
+        ok: true,
+        channelId,
+        status: "pending",
+        claimVoucher: {
+          message: Buffer.from(voucherMessage).toString("base64"),
+          signature: Buffer.from(
+            nacl.sign.detached(voucherMessage, vaultSignerKeypair.secretKey)
+          ).toString("base64"),
+          issuedAt,
+          channelIdHash: createHash("sha256").update(channelId).digest("hex"),
+          requestIdHash: createHash("sha256").update(requestId).digest("hex"),
+        },
+      };
+
+      const { ascCloseClaim } = await submitAscCloseClaim({
+        program,
+        caller,
+        config: {
+          vaultConfig: claimVaultConfigPda.toBase58(),
+          vaultSigner: vaultSignerKeypair.publicKey.toBase58(),
+        },
+        channelId,
+        requestId,
+        amount,
+        requestHash,
+        delivery,
+        claimVoucher: deliverResponse.claimVoucher,
+      });
+
+      const ascCloseClaimPda = new PublicKey(ascCloseClaim);
+      const claim = await program.account.ascCloseClaim.fetch(ascCloseClaimPda);
+      expect(Buffer.from(claim.channelIdHash).toString("hex")).to.equal(
+        createHash("sha256").update(channelId).digest("hex")
+      );
+      expect(Buffer.from(claim.requestIdHash).toString("hex")).to.equal(
+        createHash("sha256").update(requestId).digest("hex")
+      );
+      expect(Buffer.from(claim.requestHash).toString("hex")).to.equal(
+        requestHash
+      );
+      expect(Buffer.from(claim.providerPubkey).toString("hex")).to.equal(
+        delivery.providerPubkey
+      );
+      expect(claim.amount.toNumber()).to.equal(amount);
+    });
+  });
+
   describe("force_settle", () => {
     let fsClient: Keypair;
     let fsClientTokenAccount: PublicKey;
     let fsVaultConfigPda: PublicKey;
     let fsVaultTokenPda: PublicKey;
-    const fsVaultId = new BN(400);
+    const fsVaultId = new BN(testRunSeed + 400);
     const fsVaultSignerKeypair = Keypair.generate();
     const fsDepositAmount = 5_000_000; // 5 USDC
 
@@ -1670,14 +1897,9 @@ describe("a402_vault", () => {
 
       // Create client and deposit funds
       fsClient = Keypair.generate();
-      const sig = await provider.connection.requestAirdrop(
-        fsClient.publicKey,
-        5 * anchor.web3.LAMPORTS_PER_SOL
-      );
-      await provider.connection.confirmTransaction(sig);
+      await fundAccount(fsClient.publicKey, HEAVY_FUND_LAMPORTS);
 
-      fsClientTokenAccount = await createAccount(
-        provider.connection,
+      fsClientTokenAccount = await createTokenAccount(
         fsClient,
         usdcMint,
         fsClient.publicKey
@@ -1689,7 +1911,9 @@ describe("a402_vault", () => {
         usdcMint,
         fsClientTokenAccount,
         governance.publicKey,
-        fsDepositAmount
+        fsDepositAmount,
+        [],
+        devnetConfirmOpts
       );
 
       await program.methods
@@ -1886,7 +2110,7 @@ describe("a402_vault", () => {
         const participantKind = 0; // Client
         const fakeSigner = Keypair.generate();
         // Use a different vault_id to avoid PDA collision
-        const fsVaultId2 = new BN(401);
+        const fsVaultId2 = new BN(testRunSeed + 401);
         const [fsVaultConfigPda2] = PublicKey.findProgramAddressSync(
           [
             Buffer.from("vault_config"),
@@ -1998,11 +2222,7 @@ describe("a402_vault", () => {
       it("rejects ed25519 instructions that reference another instruction's data", async () => {
         const participantKind = 0;
         const altClient = Keypair.generate();
-        const sig = await provider.connection.requestAirdrop(
-          altClient.publicKey,
-          anchor.web3.LAMPORTS_PER_SOL
-        );
-        await provider.connection.confirmTransaction(sig);
+        await fundAccount(altClient.publicKey, FUND_LAMPORTS);
 
         const recipientAta = Keypair.generate().publicKey;
         const slot = await provider.connection.getSlot();
@@ -2145,11 +2365,7 @@ describe("a402_vault", () => {
 
         // Anyone can challenge — use a new keypair
         const challenger = Keypair.generate();
-        const sig = await provider.connection.requestAirdrop(
-          challenger.publicKey,
-          anchor.web3.LAMPORTS_PER_SOL
-        );
-        await provider.connection.confirmTransaction(sig);
+        await fundAccount(challenger.publicKey, FUND_LAMPORTS);
 
         const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
           privateKey: fsVaultSignerKeypair.secretKey,
@@ -2238,11 +2454,7 @@ describe("a402_vault", () => {
         );
 
         const challenger = Keypair.generate();
-        const sig = await provider.connection.requestAirdrop(
-          challenger.publicKey,
-          anchor.web3.LAMPORTS_PER_SOL
-        );
-        await provider.connection.confirmTransaction(sig);
+        await fundAccount(challenger.publicKey, FUND_LAMPORTS);
 
         const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
           privateKey: fsVaultSignerKeypair.secretKey,

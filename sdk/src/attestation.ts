@@ -348,6 +348,41 @@ function verifyA402UserDataBinding(
       "A402 user_data vaultSigner does not match the expected vault signer"
     );
   }
+  if (attestation.snapshotSeqno !== undefined) {
+    if (parsed.snapshotSeqno !== attestation.snapshotSeqno) {
+      throw new Error(
+        "A402 user_data snapshotSeqno does not match attestation response"
+      );
+    }
+  }
+  assertMatchingOptionalField(
+    parsed.tlsPublicKeySha256,
+    attestation.tlsPublicKeySha256,
+    "tlsPublicKeySha256"
+  );
+  assertMatchingOptionalField(
+    parsed.manifestHash,
+    attestation.manifestHash,
+    "manifestHash"
+  );
+  if (attestation.tlsPublicKeySha256) {
+    if (!document.publicKeyDerB64) {
+      throw new Error(
+        "Attestation document is missing the TLS public key bound to the response"
+      );
+    }
+    const publicKeyHash = sha256hex(
+      Buffer.from(document.publicKeyDerB64, "base64")
+    );
+    if (
+      normalizeHex(publicKeyHash) !==
+      normalizeHex(attestation.tlsPublicKeySha256)
+    ) {
+      throw new Error(
+        "Attestation document TLS public key does not match attestation response"
+      );
+    }
+  }
 }
 
 export function parseA402UserDataEnvelope(
@@ -362,13 +397,37 @@ export function parseA402UserDataEnvelope(
       typeof parsed.vaultConfig !== "string" ||
       typeof parsed.vaultSigner !== "string" ||
       typeof parsed.attestationPolicyHash !== "string" ||
-      typeof parsed.snapshotSeqno !== "number"
+      typeof parsed.snapshotSeqno !== "number" ||
+      (parsed.tlsPublicKeySha256 !== undefined &&
+        typeof parsed.tlsPublicKeySha256 !== "string") ||
+      (parsed.manifestHash !== undefined &&
+        typeof parsed.manifestHash !== "string")
     ) {
       return null;
     }
     return parsed as A402NitroUserDataEnvelope;
   } catch {
     return null;
+  }
+}
+
+function assertMatchingOptionalField(
+  documentValue: string | undefined,
+  responseValue: string | undefined,
+  field: string
+): void {
+  if (documentValue === undefined && responseValue === undefined) {
+    return;
+  }
+  if (documentValue === undefined || responseValue === undefined) {
+    throw new Error(
+      `Attestation response ${field} is not consistently bound in user_data`
+    );
+  }
+  if (normalizeHex(documentValue) !== normalizeHex(responseValue)) {
+    throw new Error(
+      `A402 user_data ${field} does not match attestation response`
+    );
   }
 }
 

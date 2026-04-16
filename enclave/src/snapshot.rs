@@ -17,8 +17,8 @@ use tracing::{info, warn};
 use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{
-    ChannelState, ClientBalance, ProviderCredit, ProviderRegistration, Reservation,
-    SettlementBatchInfo, SettlementRecord,
+    ChannelState, ClientBalance, PendingWithdrawal, ProviderCredit, ProviderRegistration,
+    Reservation, SettlementBatchInfo, SettlementRecord,
 };
 
 const DEFAULT_SNAPSHOT_EVERY_SEC: u64 = 30;
@@ -63,6 +63,8 @@ struct StateSnapshot {
     settlement_history: Vec<SettlementRecord>,
     #[serde(default)]
     settlement_batches: Vec<SnapshotSettlementBatch>,
+    #[serde(default)]
+    pending_withdrawals: Vec<PendingWithdrawal>,
     active_channels: Vec<ChannelState>,
     auditor_master_secret: String,
     auditor_epoch: u32,
@@ -347,6 +349,13 @@ async fn capture_snapshot(
         })
         .collect::<Vec<_>>();
     settlement_batches.sort_by(|a, b| a.settlement_id.cmp(&b.settlement_id));
+    let mut pending_withdrawals = state
+        .vault
+        .pending_withdrawals
+        .iter()
+        .map(|entry| entry.clone())
+        .collect::<Vec<_>>();
+    pending_withdrawals.sort_by(|a, b| a.withdraw_nonce.cmp(&b.withdraw_nonce));
 
     let mut active_channels = state
         .vault
@@ -386,6 +395,7 @@ async fn capture_snapshot(
         providers,
         settlement_history,
         settlement_batches,
+        pending_withdrawals,
         active_channels,
         auditor_master_secret: BASE64.encode(auditor_master_secret),
         auditor_epoch: state.vault.auditor_epoch.load(Ordering::SeqCst),
@@ -406,6 +416,7 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
     state.vault.providers.clear();
     state.vault.settlement_history.clear();
     state.vault.settlement_batches.clear();
+    state.vault.pending_withdrawals.clear();
     state.vault.active_channels.clear();
 
     for item in &snapshot.client_balances {
@@ -456,6 +467,13 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
             .insert(item.settlement_id.clone(), item.batch.clone());
     }
 
+    for withdrawal in &snapshot.pending_withdrawals {
+        state
+            .vault
+            .pending_withdrawals
+            .insert(withdrawal.withdraw_nonce, withdrawal.clone());
+    }
+
     for channel in &snapshot.active_channels {
         state
             .vault
@@ -497,6 +515,19 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
         .vault
         .last_finalized_slot
         .store(snapshot.last_finalized_slot, Ordering::SeqCst);
+
+    let clients: Vec<Pubkey> = state
+        .vault
+        .client_balances
+        .iter()
+        .map(|entry| *entry.key())
+        .collect();
+    for client in clients {
+        state
+            .vault
+            .refresh_client_max_lock_expires_at(&client)
+            .map_err(|error| format!("failed to recompute client lock expiry: {error}"))?;
+    }
 
     Ok(())
 }
@@ -624,18 +655,24 @@ mod tests {
             solana.program_id,
             solana.rpc_url,
             solana.ws_url,
+            crate::outbound::OutboundTransport::direct(),
         ));
 
         Arc::new(AppState {
             vault,
             wal,
             deposit_detector: detector,
+            batch_privacy: crate::batch::BatchPrivacyConfig::default(),
+            attestation_provider: Arc::new(
+                crate::attestation::AttestationProvider::test_local_dev(),
+            ),
             asc_ops_lock: TokioMutex::new(()),
             persistence_lock: TokioMutex::new(()),
             watchtower_url: None,
             attestation_document: String::new(),
             attestation_is_local_dev: true,
             provider_mtls_enabled: false,
+            outbound: crate::outbound::OutboundTransport::direct(),
         })
     }
 
@@ -659,6 +696,9 @@ mod tests {
                 provider_id: "provider".to_string(),
                 display_name: "Provider".to_string(),
                 participant_pubkey: None,
+                participant_attestation_policy_hash: None,
+                participant_attestation_verified_at_ms: None,
+                participant_attestation_mode: None,
                 settlement_token_account: Pubkey::new_unique(),
                 network: "solana:localnet".to_string(),
                 asset_mint: Pubkey::new_unique(),

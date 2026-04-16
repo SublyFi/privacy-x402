@@ -1,6 +1,7 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod announce_migration;
+pub mod asc_close_claim;
 pub mod deposit;
 pub mod force_settle_challenge;
 pub mod force_settle_finalize;
@@ -14,6 +15,7 @@ pub mod settle_vault;
 pub mod withdraw;
 
 pub use announce_migration::*;
+pub use asc_close_claim::*;
 pub use deposit::*;
 pub use force_settle_challenge::*;
 pub use force_settle_finalize::*;

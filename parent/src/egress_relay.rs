@@ -13,26 +13,25 @@
 //!   4. Parent responds "OK\n" on success or "ERR <reason>\n" on failure
 
 use std::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{split, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tracing::{error, info, warn};
 
+use crate::interconnect::{bind_parent_service, InterconnectStream};
 use crate::ParentConfig;
-
-const RELAY_BUF_SIZE: usize = 65536;
 
 /// Run the egress relay: listen on vsock (or TCP for dev), forward to external targets.
 pub async fn run(config: &ParentConfig) -> io::Result<()> {
-    // Production: listen on vsock for enclave egress requests
-    //   let listener = VsockListener::bind(VMADDR_CID_ANY, config.enclave_egress_port)?;
-    //
-    // Local dev: listen on TCP loopback
-    let listen_addr = format!("127.0.0.1:{}", config.enclave_egress_port);
-    let listener = TcpListener::bind(&listen_addr).await?;
-    info!("Egress relay listening on {listen_addr}");
+    let listener =
+        bind_parent_service(config.interconnect_mode, config.enclave_egress_port).await?;
+    info!(
+        mode = config.interconnect_mode.label(),
+        port = config.enclave_egress_port,
+        "Egress relay listening"
+    );
 
     loop {
-        let (enclave_stream, _) = match listener.accept().await {
+        let (enclave_stream, peer_label) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 warn!("Failed to accept egress connection: {e}");
@@ -42,15 +41,15 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
 
         tokio::spawn(async move {
             if let Err(e) = handle_egress_request(enclave_stream).await {
-                error!("Egress relay error: {e}");
+                error!("Egress relay error for {peer_label}: {e}");
             }
         });
     }
 }
 
 /// Handle a single egress request from the enclave.
-async fn handle_egress_request(enclave_stream: TcpStream) -> io::Result<()> {
-    let (enclave_read, mut enclave_write) = enclave_stream.into_split();
+async fn handle_egress_request(enclave_stream: InterconnectStream) -> io::Result<()> {
+    let (enclave_read, mut enclave_write) = split(enclave_stream);
     let mut reader = BufReader::new(enclave_read);
 
     // Read the target address line: "host:port\n"
@@ -79,12 +78,11 @@ async fn handle_egress_request(enclave_stream: TcpStream) -> io::Result<()> {
     };
 
     let (mut target_read, mut target_write) = target_stream.into_split();
-    let enclave_read = reader.into_inner();
+    let mut enclave_read = reader.into_inner();
 
     // Bidirectional relay
     let enclave_to_target = async {
-        let mut buf = vec![0u8; RELAY_BUF_SIZE];
-        let mut enclave_read = enclave_read;
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = enclave_read.read(&mut buf).await?;
             if n == 0 {
@@ -97,7 +95,7 @@ async fn handle_egress_request(enclave_stream: TcpStream) -> io::Result<()> {
     };
 
     let target_to_enclave = async {
-        let mut buf = vec![0u8; RELAY_BUF_SIZE];
+        let mut buf = vec![0u8; 65536];
         loop {
             let n = target_read.read(&mut buf).await?;
             if n == 0 {

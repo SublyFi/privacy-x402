@@ -91,6 +91,9 @@ export interface AttestationResponse {
   vaultSigner: string;
   attestationPolicyHash: string;
   attestationDocument: string;
+  snapshotSeqno?: number;
+  tlsPublicKeySha256?: string;
+  manifestHash?: string;
   issuedAt: string;
   expiresAt: string;
 }
@@ -109,6 +112,8 @@ export interface A402NitroUserDataEnvelope {
   vaultSigner: string;
   attestationPolicyHash: string;
   snapshotSeqno: number;
+  tlsPublicKeySha256?: string;
+  manifestHash?: string;
 }
 
 export interface NitroAttestationDocument {
@@ -207,11 +212,20 @@ export interface ChannelRequestResponse {
   status: ChannelStatus;
 }
 
+export interface AscClaimVoucher {
+  message: string;
+  signature: string;
+  issuedAt: number;
+  channelIdHash: string;
+  requestIdHash: string;
+}
+
 /** Facilitator /v1/channel/deliver response */
 export interface ChannelDeliverResponse {
   ok: boolean;
   channelId: string;
   status: ChannelStatus;
+  claimVoucher: AscClaimVoucher;
 }
 
 /** Facilitator /v1/channel/finalize response */

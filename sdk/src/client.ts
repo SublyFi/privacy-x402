@@ -1,4 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
+import { X509Certificate } from "node:crypto";
+import { isIP } from "node:net";
+import tls from "node:tls";
 import {
   createAccount,
   getAssociatedTokenAddressSync,
@@ -54,12 +57,74 @@ type LocalDevAttestationDocument = {
   attestationPolicyHash: string;
   recipientPublicKeyPem: string;
   recipientPublicKeySha256: string;
+  tlsPublicKeyPem?: string;
+  tlsPublicKeySha256?: string;
+  manifestHash?: string;
+  snapshotSeqno?: number;
   issuedAt: string;
   expiresAt: string;
 };
 
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
+}
+
+export async function probeTlsPublicKeySha256(urlString: string): Promise<string> {
+  const url = new URL(urlString);
+  if (url.protocol !== "https:") {
+    throw new Error("TLS endpoint binding requires an https:// enclaveUrl");
+  }
+
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({
+      host: url.hostname,
+      port: Number(url.port || 443),
+      servername: isIP(url.hostname) === 0 ? url.hostname : undefined,
+      rejectUnauthorized: false,
+    });
+
+    socket.once("secureConnect", () => {
+      try {
+        const certificate = socket.getPeerCertificate(true);
+        if (!certificate || !certificate.raw) {
+          throw new Error("TLS peer certificate is missing");
+        }
+        const x509 = new X509Certificate(certificate.raw);
+        const publicKeyDer = x509.publicKey.export({
+          format: "der",
+          type: "spki",
+        }) as Buffer;
+        resolve(sha256hex(publicKeyDer));
+      } catch (error) {
+        reject(error);
+      } finally {
+        socket.end();
+      }
+    });
+
+    socket.once("error", (error) => {
+      reject(error);
+    });
+  });
+}
+
+async function verifyAttestedTlsEndpointBinding(
+  enclaveUrl: string,
+  expectedTlsPublicKeySha256: string | undefined
+): Promise<void> {
+  if (!expectedTlsPublicKeySha256) {
+    return;
+  }
+
+  const observedTlsPublicKeySha256 = await probeTlsPublicKeySha256(enclaveUrl);
+  if (
+    normalizeHex(observedTlsPublicKeySha256) !==
+    normalizeHex(expectedTlsPublicKeySha256)
+  ) {
+    throw new Error(
+      "Enclave TLS endpoint certificate does not match attested tlsPublicKeySha256"
+    );
+  }
 }
 
 /**
@@ -144,6 +209,11 @@ export class A402Client {
       );
     }
 
+    await verifyAttestedTlsEndpointBinding(
+      this.enclaveUrl,
+      attestation.tlsPublicKeySha256
+    );
+
     this.cachedAttestation = attestation;
     return attestation;
   }
@@ -169,6 +239,60 @@ export class A402Client {
     }
     if (!document.recipientPublicKeyPem.includes("BEGIN PUBLIC KEY")) {
       throw new Error("Local attestation document recipient key is invalid");
+    }
+    if (
+      document.tlsPublicKeyPem &&
+      !document.tlsPublicKeyPem.includes("BEGIN PUBLIC KEY")
+    ) {
+      throw new Error("Local attestation document TLS public key is invalid");
+    }
+    if (
+      document.snapshotSeqno !== undefined &&
+      !Number.isFinite(document.snapshotSeqno)
+    ) {
+      throw new Error("Local attestation document snapshotSeqno is invalid");
+    }
+    if (
+      document.snapshotSeqno !== undefined &&
+      attestation.snapshotSeqno === undefined
+    ) {
+      throw new Error(
+        "Local attestation response is missing snapshotSeqno binding"
+      );
+    }
+    if (
+      document.snapshotSeqno !== undefined &&
+      document.snapshotSeqno !== attestation.snapshotSeqno
+    ) {
+      throw new Error("Local attestation document snapshotSeqno mismatch");
+    }
+    if (
+      document.tlsPublicKeySha256 !== undefined &&
+      attestation.tlsPublicKeySha256 === undefined
+    ) {
+      throw new Error(
+        "Local attestation response is missing TLS public key binding"
+      );
+    }
+    if (
+      document.tlsPublicKeySha256 !== undefined &&
+      normalizeHex(document.tlsPublicKeySha256) !==
+        normalizeHex(attestation.tlsPublicKeySha256 ?? "")
+    ) {
+      throw new Error("Local attestation document TLS public key mismatch");
+    }
+    if (
+      document.manifestHash !== undefined &&
+      attestation.manifestHash === undefined
+    ) {
+      throw new Error("Local attestation response is missing manifestHash");
+    }
+    if (
+      document.manifestHash !== undefined &&
+      normalizeHex(document.manifestHash) !==
+        normalizeHex(attestation.manifestHash ?? "")
+    ) {
+      throw new Error("Local attestation document manifestHash mismatch");
     }
 
     const docIssuedAtMs = Date.parse(document.issuedAt);
@@ -233,6 +357,17 @@ export class A402Client {
       usdcMint,
       this.wallet.publicKey
     );
+    const authRequest = this.buildClientAuth((issuedAt, expiresAt) =>
+      [
+        "A402-CLIENT-WITHDRAW-AUTH",
+        this.wallet.publicKey.toBase58(),
+        clientAta.toBase58(),
+        String(amount),
+        String(issuedAt),
+        String(expiresAt),
+        "",
+      ].join("\n")
+    );
 
     // Request withdraw authorization from enclave
     const authRes = await globalThis.fetch(
@@ -244,6 +379,9 @@ export class A402Client {
           client: this.wallet.publicKey.toBase58(),
           recipientAta: clientAta.toBase58(),
           amount,
+          issuedAt: authRequest.issuedAt,
+          expiresAt: authRequest.expiresAt,
+          clientSig: authRequest.clientSig,
         }),
       }
     );
@@ -327,11 +465,23 @@ export class A402Client {
 
   /** Query client balance from enclave. */
   async getBalance(): Promise<BalanceResponse> {
+    const auth = this.buildClientAuth((issuedAt, expiresAt) =>
+      [
+        "A402-CLIENT-BALANCE",
+        this.wallet.publicKey.toBase58(),
+        String(issuedAt),
+        String(expiresAt),
+        "",
+      ].join("\n")
+    );
     const res = await globalThis.fetch(`${this.enclaveUrl}/v1/balance`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         client: this.wallet.publicKey.toBase58(),
+        issuedAt: auth.issuedAt,
+        expiresAt: auth.expiresAt,
+        clientSig: auth.clientSig,
       }),
     });
 
@@ -354,6 +504,16 @@ export class A402Client {
       usdcMint,
       this.wallet.publicKey
     );
+    const auth = this.buildClientAuth((issuedAt, expiresAt) =>
+      [
+        "A402-CLIENT-RECEIPT",
+        this.wallet.publicKey.toBase58(),
+        recipientAta.toBase58(),
+        String(issuedAt),
+        String(expiresAt),
+        "",
+      ].join("\n")
+    );
 
     const res = await globalThis.fetch(`${this.enclaveUrl}/v1/receipt`, {
       method: "POST",
@@ -361,6 +521,9 @@ export class A402Client {
       body: JSON.stringify({
         client: this.wallet.publicKey.toBase58(),
         recipientAta: recipientAta.toBase58(),
+        issuedAt: auth.issuedAt,
+        expiresAt: auth.expiresAt,
+        clientSig: auth.clientSig,
       }),
     });
 
@@ -715,6 +878,15 @@ export class A402Client {
     return (await res.json()) as CloseChannelResponse;
   }
 
+  private buildClientAuth(
+    buildMessage: (issuedAt: number, expiresAt: number) => string
+  ): { issuedAt: number; expiresAt: number; clientSig: string } {
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiresAt = issuedAt + 300;
+    const clientSig = this.signTextMessage(buildMessage(issuedAt, expiresAt));
+    return { issuedAt, expiresAt, clientSig };
+  }
+
   // ── Internal helpers ──
 
   private async buildPaymentPayload(
@@ -786,4 +958,8 @@ export class A402Client {
     const signature = ed25519Sign(messageBytes, this.wallet.secretKey);
     return Buffer.from(signature).toString("base64");
   }
+}
+
+function normalizeHex(value: string): string {
+  return value.toLowerCase().replace(/^0x/, "");
 }

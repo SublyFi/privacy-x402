@@ -14,10 +14,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::{error, info, warn};
 
+use crate::interconnect::{bind_parent_service, InterconnectStream};
 use crate::ParentConfig;
 
 /// Maximum KMS request/response size (256 KB)
@@ -73,9 +73,12 @@ struct KmsProxyErrorResponse<'a> {
 
 /// Run the KMS proxy: listen for enclave KMS requests, forward to AWS KMS.
 pub async fn run(config: &ParentConfig) -> io::Result<()> {
-    let listen_addr = format!("127.0.0.1:{}", config.enclave_kms_port);
-    let listener = TcpListener::bind(&listen_addr).await?;
-    info!("KMS proxy listening on {listen_addr}");
+    let listener = bind_parent_service(config.interconnect_mode, config.enclave_kms_port).await?;
+    info!(
+        mode = config.interconnect_mode.label(),
+        port = config.enclave_kms_port,
+        "KMS proxy listening"
+    );
 
     let region_provider =
         RegionProviderChain::first_try(Some(Region::new(config.kms_region.clone())))
@@ -87,7 +90,7 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
     let client = Client::new(&shared_config);
 
     loop {
-        let (stream, _) = match listener.accept().await {
+        let (stream, peer_label) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 warn!("Failed to accept KMS proxy connection: {e}");
@@ -98,14 +101,14 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
         let kms = client.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_kms_request(stream, kms).await {
-                error!("KMS proxy error: {e}");
+                error!("KMS proxy error for {peer_label}: {e}");
             }
         });
     }
 }
 
 /// Handle a single KMS request from the enclave.
-async fn handle_kms_request(mut stream: tokio::net::TcpStream, kms: Client) -> io::Result<()> {
+async fn handle_kms_request(mut stream: InterconnectStream, kms: Client) -> io::Result<()> {
     let len = stream.read_u32_le().await? as usize;
     if len > MAX_KMS_MSG_SIZE {
         return write_error(
@@ -166,8 +169,13 @@ async fn generate_data_key(
         .key_id
         .clone()
         .ok_or_else(|| missing_field("TrentService.GenerateDataKey", "keyId"))?;
-    let key_spec = parse_data_key_spec(request.key_spec.as_deref())
-        .map_err(|message| ("TrentService.GenerateDataKey".to_string(), "invalid_request".to_string(), message))?;
+    let key_spec = parse_data_key_spec(request.key_spec.as_deref()).map_err(|message| {
+        (
+            "TrentService.GenerateDataKey".to_string(),
+            "invalid_request".to_string(),
+            message,
+        )
+    })?;
 
     let mut builder = kms.generate_data_key().key_id(key_id.clone());
     if let Some(spec) = key_spec {
@@ -179,8 +187,14 @@ async fn generate_data_key(
     if let Some(context) = request.encryption_context {
         builder = builder.set_encryption_context(Some(context));
     }
-    if let Some(recipient) = build_recipient(request.recipient_attestation_document)
-        .map_err(|message| ("TrentService.GenerateDataKey".to_string(), "invalid_request".to_string(), message))?
+    if let Some(recipient) =
+        build_recipient(request.recipient_attestation_document).map_err(|message| {
+            (
+                "TrentService.GenerateDataKey".to_string(),
+                "invalid_request".to_string(),
+                message,
+            )
+        })?
     {
         builder = builder.recipient(recipient);
     }
@@ -227,8 +241,14 @@ async fn decrypt(
     if let Some(context) = request.encryption_context {
         builder = builder.set_encryption_context(Some(context));
     }
-    if let Some(recipient) = build_recipient(request.recipient_attestation_document)
-        .map_err(|message| ("TrentService.Decrypt".to_string(), "invalid_request".to_string(), message))?
+    if let Some(recipient) =
+        build_recipient(request.recipient_attestation_document).map_err(|message| {
+            (
+                "TrentService.Decrypt".to_string(),
+                "invalid_request".to_string(),
+                message,
+            )
+        })?
     {
         builder = builder.recipient(recipient);
     }
@@ -260,8 +280,14 @@ async fn generate_random(
         .ok_or_else(|| missing_field("TrentService.GenerateRandom", "numberOfBytes"))?;
 
     let mut builder = kms.generate_random().number_of_bytes(number_of_bytes);
-    if let Some(recipient) = build_recipient(request.recipient_attestation_document)
-        .map_err(|message| ("TrentService.GenerateRandom".to_string(), "invalid_request".to_string(), message))?
+    if let Some(recipient) =
+        build_recipient(request.recipient_attestation_document).map_err(|message| {
+            (
+                "TrentService.GenerateRandom".to_string(),
+                "invalid_request".to_string(),
+                message,
+            )
+        })?
     {
         builder = builder.recipient(recipient);
     }
@@ -331,19 +357,25 @@ fn missing_field(action: &str, field: &str) -> (String, String, String) {
     )
 }
 
-async fn write_response(stream: &mut tokio::net::TcpStream, data: &[u8]) -> io::Result<()> {
+async fn write_response<S>(stream: &mut S, data: &[u8]) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     stream.write_u32_le(data.len() as u32).await?;
     stream.write_all(data).await?;
     stream.flush().await?;
     Ok(())
 }
 
-async fn write_error(
-    stream: &mut tokio::net::TcpStream,
+async fn write_error<S>(
+    stream: &mut S,
     action: &str,
     error: &str,
     message: String,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let body = serde_json::to_vec(&KmsProxyErrorResponse {
         ok: false,
         action,

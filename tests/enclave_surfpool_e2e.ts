@@ -21,6 +21,7 @@ import { AuditTool } from "../sdk/src/audit";
 import { computePaymentDetailsHash } from "../sdk/src/crypto";
 import { decodeVerificationReceiptEnvelope } from "../sdk/src/receipt";
 import { A402Vault } from "../target/types/a402_vault";
+import { buildTestProviderParticipantAttestation } from "./provider_attestation";
 import {
   generateTlsFixture,
   requestJson,
@@ -149,6 +150,25 @@ function signPaymentPayload(
   ).toString("base64");
 }
 
+function signClientTextRequest(client: Keypair, message: string): string {
+  return Buffer.from(
+    nacl.sign.detached(Buffer.from(message), client.secretKey)
+  ).toString("base64");
+}
+
+function buildClientRequestAuth(
+  client: Keypair,
+  buildMessage: (issuedAt: number, expiresAt: number) => string
+) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const expiresAt = issuedAt + 300;
+  const clientSig = signClientTextRequest(
+    client,
+    buildMessage(issuedAt, expiresAt)
+  );
+  return { issuedAt, expiresAt, clientSig };
+}
+
 async function postJson(
   baseUrl: string,
   path: string,
@@ -219,17 +239,25 @@ async function waitForWatchtower(maxAttempts = 120) {
 
 async function waitForClientBalance(
   baseUrl: string,
-  client: PublicKey,
+  client: Keypair,
   expectedFree: number,
   tls?: RequestTlsOptions,
   maxAttempts = 90
 ): Promise<BalanceResponse> {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const auth = buildClientRequestAuth(
+      client,
+      (issuedAt, expiresAt) =>
+        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+    );
     const response = await postJson(
       baseUrl,
       "/v1/balance",
       {
-        client: client.toBase58(),
+        client: client.publicKey.toBase58(),
+        issuedAt: auth.issuedAt,
+        expiresAt: auth.expiresAt,
+        clientSig: auth.clientSig,
       },
       undefined,
       tls
@@ -245,7 +273,7 @@ async function waitForClientBalance(
   }
 
   throw new Error(
-    `Timed out waiting for enclave balance ${expectedFree} for ${client.toBase58()}`
+    `Timed out waiting for enclave balance ${expectedFree} for ${client.publicKey.toBase58()}`
   );
 }
 
@@ -436,6 +464,8 @@ describe("enclave_surfpool_e2e", function () {
           A402_SOLANA_WS_URL: "ws://127.0.0.1:8900",
           A402_WAL_PATH: walPath,
           A402_WATCHTOWER_URL: WATCHTOWER_URL,
+          A402_ENABLE_PROVIDER_REGISTRATION_API: "1",
+          A402_ENABLE_ADMIN_API: "1",
           ...(options.enclaveExtraEnv ?? {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -540,6 +570,10 @@ describe("enclave_surfpool_e2e", function () {
           providerId,
           displayName: "Surfpool E2E Provider",
           participantPubkey: providerOwner.publicKey.toBase58(),
+          participantAttestation: buildTestProviderParticipantAttestation(
+            providerId,
+            providerOwner.publicKey.toBase58()
+          ),
           settlementTokenAccount: providerTokenAccount.toBase58(),
           network: "solana:localnet",
           assetMint: usdcMint.toBase58(),
@@ -548,7 +582,9 @@ describe("enclave_surfpool_e2e", function () {
           apiKeyHash:
             options.authMode === "bearer" ? sha256Hex(providerApiKey) : "",
           mtlsCertFingerprint:
-            options.authMode === "mtls" ? options.mtlsFingerprintHex : undefined,
+            options.authMode === "mtls"
+              ? options.mtlsFingerprintHex
+              : undefined,
         },
         undefined,
         options.sharedTls
@@ -557,7 +593,7 @@ describe("enclave_surfpool_e2e", function () {
 
       const syncedBalance = await waitForClientBalance(
         options.enclaveUrl,
-        client.publicKey,
+        client,
         depositAmount,
         options.sharedTls
       );
@@ -695,9 +731,13 @@ describe("enclave_surfpool_e2e", function () {
         providerHeaders,
         options.providerTls ?? options.sharedTls
       );
-      expect(settlementStatusRes.status, await settlementStatusRes.text()).to.equal(200);
-      const settlementStatusBody =
-        await readJson<SettlementStatusResponse>(settlementStatusRes);
+      expect(
+        settlementStatusRes.status,
+        await settlementStatusRes.text()
+      ).to.equal(200);
+      const settlementStatusBody = await readJson<SettlementStatusResponse>(
+        settlementStatusRes
+      );
       expect(settlementStatusBody.ok).to.equal(true);
       expect(settlementStatusBody.settlementId).to.equal(
         settleBody.settlementId

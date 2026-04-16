@@ -5,3 +5,16 @@ target
 node_modules
 test-ledger
 .yarn
+.env.local
+.env.*.local
+.env.devnet.generated
+data/devnet-state.json
+data/*.pid
+data/logs
+data/wal-devnet.jsonl
+data/watchtower_receipts.json
+infra/nitro/terraform/.terraform
+infra/nitro/terraform/*.tfstate
+infra/nitro/terraform/*.tfstate.*
+infra/nitro/terraform/terraform.tfvars
+infra/nitro/terraform/*.auto.tfvars

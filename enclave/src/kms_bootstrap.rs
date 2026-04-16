@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use solana_sdk::pubkey::Pubkey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::attestation::{
     build_local_dev_attestation, build_static_nitro_attestation, AttestationBundle,
 };
+use crate::interconnect::{connect_tcp, ParentInterconnect};
 use crate::snapshot_store::SnapshotStoreClient;
 
 const DEFAULT_KMS_PROXY_ADDR: &str = "127.0.0.1:5002";
@@ -253,14 +253,28 @@ async fn decrypt_kms_ciphertext(
 }
 
 async fn call_kms_proxy(request: KmsProxyRequest<'_>) -> Result<KmsProxyResponse, String> {
-    let addr = std::env::var("A402_KMS_PROXY_ADDR")
-        .unwrap_or_else(|_| DEFAULT_KMS_PROXY_ADDR.to_string());
-    let payload =
-        serde_json::to_vec(&request).map_err(|error| format!("failed to serialize KMS request: {error}"))?;
+    let parent_interconnect = ParentInterconnect::from_env();
+    let addr = std::env::var("A402_KMS_PROXY_ADDR").ok();
+    let port = std::env::var("A402_ENCLAVE_KMS_PORT")
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .unwrap_or_else(|_| panic!("A402_ENCLAVE_KMS_PORT must be a valid u32"))
+        })
+        .unwrap_or(5002);
+    let payload = serde_json::to_vec(&request)
+        .map_err(|error| format!("failed to serialize KMS request: {error}"))?;
 
-    let mut stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|error| format!("failed to connect to KMS proxy {addr}: {error}"))?;
+    let mut stream = match addr {
+        Some(addr) => connect_tcp(&addr)
+            .await
+            .map_err(|error| format!("failed to connect to KMS proxy {addr}: {error}"))?,
+        None => parent_interconnect
+            .connect(port, DEFAULT_KMS_PROXY_ADDR.to_string())
+            .await
+            .map_err(|error| format!("failed to connect to KMS proxy on port {port}: {error}"))?,
+    };
     stream
         .write_u32_le(payload.len() as u32)
         .await
@@ -289,9 +303,9 @@ async fn call_kms_proxy(request: KmsProxyRequest<'_>) -> Result<KmsProxyResponse
         Err(format!(
             "KMS proxy {} failed: {}",
             response.action,
-            response
-                .message
-                .unwrap_or_else(|| response.error.unwrap_or_else(|| "unknown error".to_string()))
+            response.message.unwrap_or_else(|| response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string()))
         ))
     }
 }
@@ -361,7 +375,10 @@ fn signer_encryption_context(vault_config: Pubkey) -> std::collections::HashMap<
 
 fn storage_encryption_context(vault_config: Pubkey) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([
-        ("a402:component".to_string(), "snapshot-data-key".to_string()),
+        (
+            "a402:component".to_string(),
+            "snapshot-data-key".to_string(),
+        ),
         ("a402:vaultConfig".to_string(), vault_config.to_string()),
     ])
 }

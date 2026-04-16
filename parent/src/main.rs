@@ -3,13 +3,18 @@ use tracing::info;
 
 mod egress_relay;
 mod ingress_relay;
+mod interconnect;
 mod kms_proxy;
 mod snapshot_store;
+
+use interconnect::InterconnectMode;
 
 /// Configuration for the parent instance services.
 pub struct ParentConfig {
     /// TCP listen address for client/provider ingress (e.g., "0.0.0.0:443")
     pub ingress_listen_addr: String,
+    /// Transport used between the parent instance and enclave
+    pub interconnect_mode: InterconnectMode,
     /// vsock CID of the enclave
     pub enclave_cid: u32,
     /// vsock port the enclave listens on for ingress
@@ -30,6 +35,7 @@ impl Default for ParentConfig {
     fn default() -> Self {
         Self {
             ingress_listen_addr: "0.0.0.0:443".to_string(),
+            interconnect_mode: InterconnectMode::Tcp,
             enclave_cid: 16, // Default Nitro enclave CID
             enclave_ingress_port: 5000,
             enclave_egress_port: 5001,
@@ -47,6 +53,10 @@ impl ParentConfig {
         Self {
             ingress_listen_addr: env::var("A402_PARENT_INGRESS_LISTEN")
                 .unwrap_or(defaults.ingress_listen_addr),
+            interconnect_mode: InterconnectMode::from_env_var(
+                "A402_PARENT_INTERCONNECT_MODE",
+                defaults.interconnect_mode,
+            ),
             enclave_cid: read_env_u32("A402_ENCLAVE_CID").unwrap_or(defaults.enclave_cid),
             enclave_ingress_port: read_env_u32("A402_ENCLAVE_INGRESS_PORT")
                 .unwrap_or(defaults.enclave_ingress_port),
@@ -72,6 +82,7 @@ async fn main() {
 
     info!("Starting A402 parent instance services");
     info!("  Ingress listen: {}", config.ingress_listen_addr);
+    info!("  Interconnect: {}", config.interconnect_mode.label());
     info!("  Enclave CID: {}", config.enclave_cid);
     info!("  Snapshot dir: {}", config.snapshot_dir);
 

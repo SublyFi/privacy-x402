@@ -1,6 +1,11 @@
 {
   "license": "ISC",
   "scripts": {
+    "devnet:bootstrap": "node scripts/devnet/bootstrap.js",
+    "devnet:smoke": "node scripts/devnet/smoke.js",
+    "devnet:start": "node scripts/devnet/start.js",
+    "devnet:status": "node scripts/devnet/status.js",
+    "devnet:stop": "bash scripts/devnet/stop-stack.sh",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },

@@ -11,13 +11,15 @@
 //!   - Secret extraction and result decryption
 //!   - Settlement crediting
 
+use a402_vault::asc_claim::build_asc_payment_message;
 use chrono::Utc;
-use curve25519_dalek::edwards::CompressedEdwardsY;
+use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+use curve25519_dalek::scalar::Scalar;
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
 use tracing::info;
 
-use crate::adaptor_sig::{self, AdaptorPreSignature};
+use crate::adaptor_sig::{self, AdaptedSignature, AdaptorPreSignature};
 use crate::error::EnclaveError;
 use crate::state::{
     ChannelBalance, ChannelId, ChannelRequest, ChannelState, ChannelStatus, ProviderCredit,
@@ -42,6 +44,13 @@ pub struct CloseOutcome {
     pub settlement_id: Option<String>,
     pub closed_channel: ChannelState,
     pub previous_provider_credit: Option<ProviderCredit>,
+}
+
+pub struct ExpiredRequestOutcome {
+    pub channel_id: String,
+    pub client: Pubkey,
+    pub previous_status: ChannelStatus,
+    pub request: ChannelRequest,
 }
 
 /// Open a new ASC between a client and provider.
@@ -254,13 +263,6 @@ pub fn deliver_adaptor(
     // Check request hasn't expired
     let now = Utc::now().timestamp();
     if now > request.expires_at {
-        // Unlock funds and reset to Open
-        let amount = request.amount;
-        channel.balance.client_locked -= amount;
-        channel.balance.client_free += amount;
-        channel.status = ChannelStatus::Open;
-        channel.active_request = None;
-        channel.updated_at = now;
         return Err(EnclaveError::ChannelRequestExpired);
     }
 
@@ -350,6 +352,115 @@ pub fn finalize_offchain(
     channel_id: &str,
     adaptor_secret_bytes: [u8; 32],
 ) -> Result<FinalizeOutcome, EnclaveError> {
+    let t = Scalar::from_canonical_bytes(adaptor_secret_bytes)
+        .into_option()
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+    finalize_with_secret(
+        vault,
+        channel_id,
+        &t,
+        Some(adaptor_secret_bytes),
+        "Off-chain finalization complete",
+    )
+}
+
+pub fn finalize_onchain_claim(
+    vault: &VaultState,
+    channel_id: &str,
+    full_sig_r: [u8; 32],
+    full_sig_s: [u8; 32],
+) -> Result<FinalizeOutcome, EnclaveError> {
+    let pending = pending_request_crypto_materials(vault, channel_id)?;
+    let full_sig = AdaptedSignature {
+        r_bytes: full_sig_r,
+        s_bytes: full_sig_s,
+    };
+    let extracted = adaptor_sig::extract(&full_sig, &pending.pre_sig)
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+    let secret_bytes = extracted.to_bytes();
+    let expected_r = CompressedEdwardsY(pending.pre_sig.r_prime)
+        .decompress()
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?
+        + pending.adaptor_point;
+    if expected_r.compress().to_bytes() != full_sig_r {
+        return Err(EnclaveError::InvalidAdaptorSignature);
+    }
+    let payment_message = build_payment_message(
+        channel_id,
+        &pending.request.request_id,
+        pending.request.amount,
+        &pending.request.request_hash,
+    );
+    if !adaptor_sig::verify_adapted(&pending.provider_pubkey, &payment_message, &full_sig) {
+        return Err(EnclaveError::InvalidAdaptorSignature);
+    }
+    finalize_with_secret(
+        vault,
+        channel_id,
+        &extracted,
+        Some(secret_bytes),
+        "On-chain ASC claim recovered",
+    )
+}
+
+struct PendingRequestCryptoMaterial {
+    request: ChannelRequest,
+    pre_sig: AdaptorPreSignature,
+    adaptor_point: EdwardsPoint,
+    provider_pubkey: [u8; 32],
+}
+
+fn pending_request_crypto_materials(
+    vault: &VaultState,
+    channel_id: &str,
+) -> Result<PendingRequestCryptoMaterial, EnclaveError> {
+    let channel = vault
+        .active_channels
+        .get(channel_id)
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    if channel.status != ChannelStatus::Pending {
+        return Err(EnclaveError::InvalidChannelStatus(format!(
+            "expected Pending, got {:?}",
+            channel.status
+        )));
+    }
+
+    let request = channel
+        .active_request
+        .as_ref()
+        .cloned()
+        .ok_or(EnclaveError::ChannelNotFound)?;
+    let pre_sig = request
+        .provider_pre_sig
+        .clone()
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+    let adaptor_point = CompressedEdwardsY(
+        request
+            .adaptor_point
+            .ok_or(EnclaveError::InvalidAdaptorSignature)?,
+    )
+    .decompress()
+    .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+    let provider_pubkey = request
+        .provider_pubkey
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+
+    Ok(PendingRequestCryptoMaterial {
+        request,
+        pre_sig,
+        adaptor_point,
+        provider_pubkey,
+    })
+}
+
+fn finalize_with_secret(
+    vault: &VaultState,
+    channel_id: &str,
+    adaptor_secret: &Scalar,
+    secret_bytes_override: Option<[u8; 32]>,
+    success_message: &str,
+) -> Result<FinalizeOutcome, EnclaveError> {
     let mut channel = vault
         .active_channels
         .get_mut(channel_id)
@@ -366,7 +477,6 @@ pub fn finalize_offchain(
         .active_request
         .as_ref()
         .ok_or(EnclaveError::ChannelNotFound)?;
-
     let pre_sig = request
         .provider_pre_sig
         .as_ref()
@@ -374,54 +484,38 @@ pub fn finalize_offchain(
     let adaptor_point_bytes = request
         .adaptor_point
         .ok_or(EnclaveError::InvalidAdaptorSignature)?;
+    let adaptor_point = CompressedEdwardsY(adaptor_point_bytes)
+        .decompress()
+        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
     let provider_pubkey = request
         .provider_pubkey
         .ok_or(EnclaveError::InvalidAdaptorSignature)?;
     let request_id = request.request_id.clone();
     let request_snapshot = request.clone();
 
-    // Reconstruct adaptor point
-    let adaptor_point = CompressedEdwardsY(adaptor_point_bytes)
-        .decompress()
-        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
-
-    // Verify that t·G == T (the provided secret matches the adaptor point)
-    use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
-    use curve25519_dalek::scalar::Scalar;
-
-    let t = Scalar::from_canonical_bytes(adaptor_secret_bytes)
-        .into_option()
-        .ok_or(EnclaveError::InvalidAdaptorSignature)?;
-
-    let expected_t_point = &t * ED25519_BASEPOINT_POINT;
-    if expected_t_point != adaptor_point {
+    if adaptor_point != EdwardsPoint::mul_base(adaptor_secret) {
         return Err(EnclaveError::InvalidAdaptorSignature);
     }
 
-    // Defense-in-depth: adapt pre-signature with t and verify as valid Ed25519 signature
-    let full_sig = adaptor_sig::adapt(pre_sig, &t, &adaptor_point)
+    let full_sig = adaptor_sig::adapt(pre_sig, adaptor_secret, &adaptor_point)
         .ok_or(EnclaveError::InvalidAdaptorSignature)?;
-
     let message = build_payment_message(
         &channel.channel_id,
         &request.request_id,
         request.amount,
         &request.request_hash,
     );
-
-    // Retrieve provider pubkey from channel to verify adapted signature
     if !adaptor_sig::verify_adapted(&provider_pubkey, &message, &full_sig) {
         return Err(EnclaveError::InvalidAdaptorSignature);
     }
 
-    // Decrypt result using t as symmetric key
     let encrypted_result = request
         .encrypted_result
         .clone()
         .ok_or(EnclaveError::ChannelNotFound)?;
-    let decrypted = decrypt_with_scalar(&encrypted_result, &adaptor_secret_bytes);
+    let secret_bytes = secret_bytes_override.unwrap_or_else(|| adaptor_secret.to_bytes());
+    let decrypted = decrypt_with_scalar(&encrypted_result, &secret_bytes);
 
-    // Verify result hash
     if let Some(expected_hash) = request.result_hash {
         let actual_hash = sha256_hash(&decrypted);
         if actual_hash != expected_hash {
@@ -433,8 +527,6 @@ pub fn finalize_offchain(
 
     let amount = request.amount;
     let now = Utc::now().timestamp();
-
-    // Credit provider, unlock client_locked
     channel.balance.client_locked -= amount;
     channel.balance.provider_earned += amount;
     channel.status = ChannelStatus::Open;
@@ -442,7 +534,7 @@ pub fn finalize_offchain(
     channel.nonce += 1;
     channel.updated_at = now;
 
-    info!(channel_id, amount, "Off-chain finalization complete");
+    info!(channel_id, amount, message = success_message);
 
     Ok(FinalizeOutcome {
         request_id,
@@ -666,35 +758,117 @@ pub fn rollback_close_channel(
     Ok(())
 }
 
-/// Expire timed-out requests in locked channels.
-/// Called from the background task loop.
-pub fn expire_stale_requests(vault: &VaultState) {
-    let now = Utc::now().timestamp();
+pub fn expire_request(
+    vault: &VaultState,
+    channel_id: &str,
+    now: i64,
+) -> Result<Option<ExpiredRequestOutcome>, EnclaveError> {
+    let mut channel = vault
+        .active_channels
+        .get_mut(channel_id)
+        .ok_or(EnclaveError::ChannelNotFound)?;
 
-    for mut entry in vault.active_channels.iter_mut() {
-        let channel = entry.value_mut();
-        if channel.status != ChannelStatus::Locked && channel.status != ChannelStatus::Pending {
-            continue;
-        }
-
-        if let Some(ref request) = channel.active_request {
-            if now > request.expires_at {
-                let amount = request.amount;
-                info!(
-                    channel_id = %channel.channel_id,
-                    request_id = %request.request_id,
-                    "Expiring stale channel request"
-                );
-
-                channel.balance.client_locked -= amount;
-                channel.balance.client_free += amount;
-                channel.status = ChannelStatus::Open;
-                channel.active_request = None;
-                channel.nonce += 1;
-                channel.updated_at = now;
-            }
-        }
+    if channel.status != ChannelStatus::Locked && channel.status != ChannelStatus::Pending {
+        return Ok(None);
     }
+
+    let Some(request) = channel.active_request.as_ref().cloned() else {
+        return Ok(None);
+    };
+    if now <= request.expires_at {
+        return Ok(None);
+    }
+
+    info!(
+        channel_id = %channel.channel_id,
+        request_id = %request.request_id,
+        "Expiring stale channel request"
+    );
+
+    channel.balance.client_locked = channel.balance.client_locked.saturating_sub(request.amount);
+    channel.balance.client_free += request.amount;
+    let previous_status = channel.status.clone();
+    channel.status = ChannelStatus::Open;
+    channel.active_request = None;
+    channel.nonce += 1;
+    channel.updated_at = now;
+
+    Ok(Some(ExpiredRequestOutcome {
+        channel_id: channel.channel_id.clone(),
+        client: channel.client,
+        previous_status,
+        request,
+    }))
+}
+
+pub fn rollback_expire_request(
+    vault: &VaultState,
+    outcome: ExpiredRequestOutcome,
+) -> Result<(), EnclaveError> {
+    let mut channel = vault
+        .active_channels
+        .get_mut(&outcome.channel_id)
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    if channel.status != ChannelStatus::Open || channel.active_request.is_some() {
+        return Err(EnclaveError::InvalidChannelStatus(format!(
+            "expected Open without active request, got {:?}",
+            channel.status
+        )));
+    }
+
+    channel.balance.client_free = channel
+        .balance
+        .client_free
+        .saturating_sub(outcome.request.amount);
+    channel.balance.client_locked += outcome.request.amount;
+    channel.status = outcome.previous_status;
+    channel.active_request = Some(outcome.request);
+    channel.nonce = channel.nonce.saturating_sub(1);
+    channel.updated_at = Utc::now().timestamp();
+
+    Ok(())
+}
+
+pub fn expire_replayed_request(
+    vault: &VaultState,
+    channel_id: &str,
+    request_id: &str,
+    amount: u64,
+) -> Result<(), EnclaveError> {
+    let mut channel = vault
+        .active_channels
+        .get_mut(channel_id)
+        .ok_or(EnclaveError::ChannelNotFound)?;
+
+    if channel.status != ChannelStatus::Locked && channel.status != ChannelStatus::Pending {
+        return Err(EnclaveError::InvalidChannelStatus(format!(
+            "expected Locked or Pending, got {:?}",
+            channel.status
+        )));
+    }
+
+    let request = channel
+        .active_request
+        .as_ref()
+        .ok_or(EnclaveError::ChannelNotFound)?;
+    if request.request_id != request_id {
+        return Err(EnclaveError::ChannelNotFound);
+    }
+    if request.amount != amount {
+        return Err(EnclaveError::Internal(
+            "WAL replay amount mismatch for expired channel request".into(),
+        ));
+    }
+
+    channel.balance.client_locked = channel.balance.client_locked.saturating_sub(amount);
+    channel.balance.client_free += amount;
+    channel.status = ChannelStatus::Open;
+    channel.active_request = None;
+    channel.nonce += 1;
+    channel.updated_at = Utc::now().timestamp();
+
+    Ok(())
 }
 
 // ── Helpers ──
@@ -706,14 +880,7 @@ fn build_payment_message(
     amount: u64,
     request_hash: &[u8; 32],
 ) -> Vec<u8> {
-    format!(
-        "{}:{}:{}:{}",
-        channel_id,
-        request_id,
-        amount,
-        hex::encode(request_hash)
-    )
-    .into_bytes()
+    build_asc_payment_message(channel_id, request_id, amount, request_hash)
 }
 
 /// Decrypt data encrypted with adaptor secret t as XOR key (SHA256-CTR stream).
@@ -787,6 +954,9 @@ mod tests {
                 provider_id: provider_id.to_string(),
                 display_name: "Test Provider".to_string(),
                 participant_pubkey: Some(provider_pubkey),
+                participant_attestation_policy_hash: None,
+                participant_attestation_verified_at_ms: None,
+                participant_attestation_mode: None,
                 settlement_token_account: provider_pubkey,
                 network: "solana-localnet".to_string(),
                 asset_mint: Pubkey::new_unique(),
@@ -944,6 +1114,53 @@ mod tests {
         assert_eq!(ch.balance.client_locked, 0);
         assert_eq!(ch.balance.provider_earned, 1_000_000);
         assert!(ch.active_request.is_none());
+    }
+
+    #[test]
+    fn test_finalize_onchain_claim_recovers_pending_request() {
+        let vault = setup_vault();
+        let client = Pubkey::new_unique();
+        register_provider(&vault, "provider-1");
+        vault.apply_deposit(client, 10_000_000);
+
+        let channel_id = open_channel(&vault, &client, "provider-1", 5_000_000).unwrap();
+        submit_request(&vault, &channel_id, "req-claim", 1_500_000, [8u8; 32]).unwrap();
+
+        let provider_signing_key = SigningKey::generate(&mut OsRng);
+        let provider_pubkey = provider_signing_key.verifying_key().to_bytes();
+        let adaptor = AdaptorKeyPair::generate();
+        let message = build_payment_message(&channel_id, "req-claim", 1_500_000, &[8u8; 32]);
+        let pre_sig =
+            adaptor_sig::pre_sign(&provider_signing_key.to_bytes(), &message, &adaptor.public);
+        let full_sig = adaptor_sig::adapt(&pre_sig, &adaptor.secret, &adaptor.public).unwrap();
+
+        let plaintext = b"onchain recovery result".to_vec();
+        let encrypted_result = encrypt_with_scalar(&plaintext, &adaptor.secret.to_bytes());
+        let result_hash = sha256_hash(&plaintext);
+
+        deliver_adaptor(
+            &vault,
+            &channel_id,
+            adaptor.public_compressed,
+            pre_sig,
+            encrypted_result,
+            result_hash,
+            &provider_pubkey,
+        )
+        .unwrap();
+
+        let outcome =
+            finalize_onchain_claim(&vault, &channel_id, full_sig.r_bytes, full_sig.s_bytes)
+                .unwrap();
+
+        assert_eq!(outcome.request_id, "req-claim");
+        assert_eq!(outcome.result_bytes, plaintext);
+        assert_eq!(outcome.amount, 1_500_000);
+
+        let ch = vault.active_channels.get(&channel_id).unwrap();
+        assert_eq!(ch.status, ChannelStatus::Open);
+        assert_eq!(ch.balance.client_locked, 0);
+        assert_eq!(ch.balance.provider_earned, 1_500_000);
     }
 
     #[test]

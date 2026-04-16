@@ -3,6 +3,7 @@ use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::sysvar::instructions as sysvar_instructions;
 use sha2::{Digest, Sha256};
 
+use crate::batch_hash::compute_batch_chunk_hash;
 use crate::constants::{MAX_ATOMIC_AUDITS_PER_TX, VAULT_STATUS_ACTIVE, VAULT_STATUS_MIGRATING};
 use crate::error::VaultError;
 use crate::instructions::settle_vault::SettlementEntry;
@@ -183,17 +184,12 @@ fn verify_settle_vault_pairing(
             continue;
         }
 
+        let computed_hash =
+            compute_batch_chunk_hash(expected_batch_id, &parsed.settlements, expected_records);
         require!(
-            parsed.settlements.len() == expected_records.len(),
+            computed_hash == expected_batch_chunk_hash,
             VaultError::AtomicChunkHashMismatch
         );
-
-        for (settlement, record) in parsed.settlements.iter().zip(expected_records.iter()) {
-            require!(
-                settlement.provider_token_account == record.provider,
-                VaultError::AuditRecordIndexOutOfOrder
-            );
-        }
 
         return Ok(());
     }
