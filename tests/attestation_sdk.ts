@@ -307,6 +307,107 @@ describe("attestation_sdk", () => {
     expect(verifierCalls).to.equal(1);
   });
 
+  it("reads PAYMENT-REQUIRED from the x402 header and retries with Base64 PAYMENT-SIGNATURE", async () => {
+    const wallet = Keypair.generate();
+    const vaultAddress = Keypair.generate().publicKey;
+    const attestation = buildLocalAttestationWithDocument(
+      {
+        vaultConfig: vaultAddress.toBase58(),
+      },
+      {
+        vaultConfig: vaultAddress.toBase58(),
+      }
+    );
+    const paymentDetails = {
+      scheme: "a402-svm-v1",
+      network: "solana:localnet",
+      amount: "1234",
+      asset: {
+        kind: "spl-token",
+        mint: Keypair.generate().publicKey.toBase58(),
+        decimals: 6,
+        symbol: "USDC",
+      },
+      payTo: Keypair.generate().publicKey.toBase58(),
+      providerId: "prov_test",
+      facilitatorUrl: "http://facilitator.example/v1",
+      vault: {
+        config: vaultAddress.toBase58(),
+        signer: attestation.vaultSigner,
+        attestationPolicyHash: attestation.attestationPolicyHash,
+      },
+      paymentDetailsId: "paydet_test",
+      verifyWindowSec: 60,
+      maxSettlementDelaySec: 900,
+      privacyMode: "vault-batched-v1",
+    };
+
+    let requestCount = 0;
+    let observedPaymentSignature = "";
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.endsWith("/v1/attestation")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => attestation,
+        } as any;
+      }
+
+      requestCount += 1;
+      if (requestCount === 1) {
+        return {
+          ok: false,
+          status: 402,
+          headers: new Headers({
+            "PAYMENT-REQUIRED": Buffer.from(
+              JSON.stringify({ accepts: [paymentDetails] }),
+              "utf8"
+            ).toString("base64"),
+          }),
+          json: async () => {
+            throw new Error("client should prefer PAYMENT-REQUIRED header");
+          },
+        } as any;
+      }
+
+      const headers = new Headers(init?.headers || {});
+      observedPaymentSignature = headers.get("PAYMENT-SIGNATURE") || "";
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ ok: true }),
+      } as any;
+    }) as typeof fetch;
+
+    const client = new A402Client({
+      walletKeypair: {
+        publicKey: wallet.publicKey,
+        secretKey: wallet.secretKey,
+      },
+      vaultAddress,
+      enclaveUrl: "http://127.0.0.1:3100",
+    });
+
+    const response = await client.fetch("https://provider.example/data");
+    expect(response.status).to.equal(200);
+    expect(requestCount).to.equal(2);
+    expect(observedPaymentSignature).to.not.equal("");
+
+    const payload = JSON.parse(
+      Buffer.from(observedPaymentSignature, "base64").toString("utf8")
+    ) as { scheme: string; providerId: string; amount: string };
+    expect(payload.scheme).to.equal("a402-svm-v1");
+    expect(payload.providerId).to.equal("prov_test");
+    expect(payload.amount).to.equal("1234");
+  });
+
   it("binds attested tlsPublicKeySha256 to the live HTTPS endpoint certificate", async () => {
     const wallet = Keypair.generate();
     const tlsPublicKeySha256 = computeTlsPublicKeySha256(TLS_CERT_PEM);

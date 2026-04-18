@@ -2,11 +2,20 @@
 
 このディレクトリは、A402 を AWS Nitro Enclaves 上で公開 Devnet 配備するための雛形です。
 
+最短手順は [`docs/nitro-devnet-deploy.md`](../../docs/nitro-devnet-deploy.md) を参照してください。
+
 入っているもの:
 
 - `terraform/`: parent EC2 / NLB / IAM / KMS / snapshot bucket の骨格
 - `env/`: `parent` と `watchtower` の env テンプレート
 - `systemd/`: parent / watchtower 常駐化ユニット
+- `enclave/`: EIF build 用 Dockerfile と entrypoint
+
+追加した automation:
+
+- `yarn nitro:prepare`: vault signer ciphertext と runtime env を生成
+- `yarn nitro:build-eif`: EIF build と measurements 出力
+- `yarn nitro:provision`: PCR から policy hash を確定して on-chain initialize
 
 前提:
 
@@ -27,12 +36,13 @@
 重要:
 
 - この turn で `ingress`, `KMS`, `snapshot_store` は `tcp(dev)` / `vsock(prod)` 両対応にした
-- まだ `deposit_detector`, `batch`, `handlers`, `ensure_watchtower_ready` は enclave 内から Solana RPC / HTTP へ直接出る
-- つまり、Nitro 本番で完全に動かすには outbound egress を `parent egress_relay` 経由に差し替える追加実装がまだ必要
+- enclave の outbound HTTP / HTTPS / Solana RPC は `parent egress_relay` 経由で出る
+- bootstrap 用の Nitro attestation document は enclave 内で NSM から生成し、KMS decrypt / data key 取得に使う
+- `deposit_detector` は `logsSubscribe(finalized)` で vault token account を監視し、切断時は catch-up する
+- 本番では `A402_EGRESS_ALLOWLIST` を設定して parent relay の接続先を絞る
 
 公開 URL を生かすまでの残タスク:
 
-1. enclave の outbound HTTP / WebSocket / Solana RPC を egress relay 経由の connector に置き換える
+1. `A402_EGRESS_ALLOWLIST` と AWS 側 egress 制御を本番値で固定する
 2. EIF build と PCR 計測を CI か build script に乗せる
 3. KMS key policy を実 PCR に束縛する
-4. watchtower への疎通を Nitro egress 経由に寄せる

@@ -42,8 +42,8 @@ async fn main() {
 
     let vault_config = read_pubkey_env("A402_VAULT_CONFIG", Pubkey::default());
     let usdc_mint = read_pubkey_env("A402_USDC_MINT", Pubkey::default());
-    let attestation_policy_hash =
-        read_fixed_bytes_env("A402_ATTESTATION_POLICY_HASH_HEX", [0u8; 32]);
+    let attestation_policy_hash = attestation::resolve_attestation_policy_hash_from_env()
+        .expect("attestation policy hash must resolve from env or Nitro measurements");
     let solana = SolanaRuntimeConfig {
         program_id: read_pubkey_env("A402_PROGRAM_ID", a402_vault::ID),
         vault_token_account: read_pubkey_env("A402_VAULT_TOKEN_ACCOUNT", Pubkey::default()),
@@ -247,18 +247,6 @@ fn read_pubkey_env(name: &str, default: Pubkey) -> Pubkey {
             value
                 .parse()
                 .unwrap_or_else(|_| panic!("{name} must be a valid Pubkey"))
-        })
-        .unwrap_or(default)
-}
-
-fn read_fixed_bytes_env<const N: usize>(name: &str, default: [u8; N]) -> [u8; N] {
-    env::var(name)
-        .ok()
-        .map(|value| {
-            let bytes = hex::decode(value).unwrap_or_else(|_| panic!("{name} must be valid hex"));
-            bytes
-                .try_into()
-                .unwrap_or_else(|_| panic!("{name} must decode to exactly {N} bytes"))
         })
         .unwrap_or(default)
 }

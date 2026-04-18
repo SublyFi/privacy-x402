@@ -29,6 +29,8 @@ pub struct ParentConfig {
     pub enclave_snapshot_port: u32,
     /// AWS region for KMS
     pub kms_region: String,
+    /// Optional outbound allowlist for the parent egress relay.
+    pub egress_allowlist: Vec<String>,
 }
 
 impl Default for ParentConfig {
@@ -43,6 +45,7 @@ impl Default for ParentConfig {
             snapshot_dir: "/var/lib/a402/snapshots".to_string(),
             enclave_snapshot_port: 5003,
             kms_region: "us-east-1".to_string(),
+            egress_allowlist: Vec::new(),
         }
     }
 }
@@ -70,6 +73,17 @@ impl ParentConfig {
             kms_region: env::var("A402_KMS_REGION")
                 .or_else(|_| env::var("AWS_REGION"))
                 .unwrap_or(defaults.kms_region),
+            egress_allowlist: env::var("A402_EGRESS_ALLOWLIST")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or(defaults.egress_allowlist),
         }
     }
 }
@@ -85,6 +99,14 @@ async fn main() {
     info!("  Interconnect: {}", config.interconnect_mode.label());
     info!("  Enclave CID: {}", config.enclave_cid);
     info!("  Snapshot dir: {}", config.snapshot_dir);
+    if config.egress_allowlist.is_empty() {
+        info!("  Egress allowlist: disabled");
+    } else {
+        info!(
+            "  Egress allowlist: {} rule(s)",
+            config.egress_allowlist.len()
+        );
+    }
 
     // Launch all relay services concurrently
     tokio::select! {

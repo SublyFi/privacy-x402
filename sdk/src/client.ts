@@ -69,7 +69,43 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function probeTlsPublicKeySha256(urlString: string): Promise<string> {
+function decodeJsonHeader<T>(value: string, headerName: string): T {
+  const encodings: Array<"base64" | "base64url"> = ["base64", "base64url"];
+  let lastError: unknown;
+
+  for (const encoding of encodings) {
+    try {
+      const decoded = Buffer.from(value, encoding).toString("utf8");
+      return JSON.parse(decoded) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const reason =
+    lastError instanceof Error ? lastError.message : "invalid encoded JSON";
+  throw new Error(`Invalid ${headerName} header: ${reason}`);
+}
+
+async function readPaymentRequiredResponse(
+  response: Response
+): Promise<PaymentRequiredResponse> {
+  const header =
+    response.headers.get("PAYMENT-REQUIRED") ??
+    response.headers.get("payment-required");
+  if (header) {
+    return decodeJsonHeader<PaymentRequiredResponse>(
+      header,
+      "PAYMENT-REQUIRED"
+    );
+  }
+
+  return readJson<PaymentRequiredResponse>(response);
+}
+
+export async function probeTlsPublicKeySha256(
+  urlString: string
+): Promise<string> {
   const url = new URL(urlString);
   if (url.protocol !== "https:") {
     throw new Error("TLS endpoint binding requires an https:// enclaveUrl");
@@ -715,7 +751,7 @@ export class A402Client {
     }
 
     // Parse 402 response
-    const body = await readJson<PaymentRequiredResponse>(initialRes);
+    const body = await readPaymentRequiredResponse(initialRes);
     const details = body.accepts?.find((a) => a.scheme === "a402-svm-v1");
 
     if (!details) {
@@ -730,10 +766,8 @@ export class A402Client {
     // Build payment payload
     const payload = await this.buildPaymentPayload(url, options, details);
 
-    // Base64URL encode payload
-    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString(
-      "base64url"
-    );
+    // x402 v2 headers are standard Base64-encoded JSON.
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64");
 
     // Retry with payment signature
     const retryHeaders = new Headers(options?.headers || {});

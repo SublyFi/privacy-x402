@@ -11,7 +11,8 @@ use solana_sdk::pubkey::Pubkey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::attestation::{
-    build_local_dev_attestation, build_static_nitro_attestation, AttestationBundle,
+    build_bootstrap_recipient_attestation, build_local_dev_attestation,
+    build_static_nitro_attestation, AttestationBundle,
 };
 use crate::interconnect::{connect_tcp, ParentInterconnect};
 use crate::snapshot_store::SnapshotStoreClient;
@@ -31,7 +32,10 @@ pub async fn bootstrap_materials(
     snapshot_store: Option<SnapshotStoreClient>,
 ) -> Result<BootstrapMaterials, String> {
     let recipient_keys = RecipientKeyPair::generate()?;
-    let nitro_document = std::env::var("A402_NITRO_ATTESTATION_DOCUMENT_B64").ok();
+    let nitro_document = match std::env::var("A402_NITRO_ATTESTATION_DOCUMENT_B64") {
+        Ok(document) => Some(document),
+        Err(_) => build_bootstrap_recipient_attestation(recipient_keys.public_key_der())?,
+    };
 
     let signing_key =
         load_signing_key(vault_config, nitro_document.as_deref(), &recipient_keys).await?;
@@ -65,6 +69,7 @@ pub async fn bootstrap_materials(
 
 struct RecipientKeyPair {
     private_key: RsaPrivateKey,
+    public_key_der: Vec<u8>,
     public_key_pem: String,
 }
 
@@ -72,18 +77,30 @@ impl RecipientKeyPair {
     fn generate() -> Result<Self, String> {
         let private_key = RsaPrivateKey::new(&mut OsRng, 2048)
             .map_err(|error| format!("failed to generate bootstrap recipient key: {error}"))?;
-        let public_key_pem = private_key
-            .to_public_key()
+        let public_key = private_key.to_public_key();
+        let public_key_pem = public_key
             .to_public_key_pem(LineEnding::LF)
             .map_err(|error| format!("failed to encode bootstrap recipient public key: {error}"))?;
+        let public_key_der = public_key
+            .to_public_key_der()
+            .map_err(|error| {
+                format!("failed to encode bootstrap recipient public key DER: {error}")
+            })?
+            .as_bytes()
+            .to_vec();
         Ok(Self {
             private_key,
+            public_key_der,
             public_key_pem,
         })
     }
 
     fn public_key_pem(&self) -> &str {
         &self.public_key_pem
+    }
+
+    fn public_key_der(&self) -> &[u8] {
+        &self.public_key_der
     }
 
     fn decrypt_b64(&self, ciphertext_b64: &str) -> Result<Vec<u8>, String> {

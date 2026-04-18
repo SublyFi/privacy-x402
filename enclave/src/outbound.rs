@@ -20,8 +20,10 @@ use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::io;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsConnector;
@@ -37,6 +39,51 @@ pub struct OutboundTransport {
 pub struct OutboundResponse {
     pub status: StatusCode,
     pub body: Vec<u8>,
+}
+
+pub enum OutboundStream {
+    Plain(InterconnectStream),
+    Tls(tokio_rustls::client::TlsStream<InterconnectStream>),
+}
+
+impl AsyncRead for OutboundStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for OutboundStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
 }
 
 impl OutboundTransport {
@@ -97,6 +144,14 @@ impl OutboundTransport {
     ) -> Result<OutboundResponse, String> {
         let url =
             Url::parse(url).map_err(|error| format!("invalid outbound URL {url}: {error}"))?;
+        let path = request_path(&url);
+        let host_header = host_header_value(&url)?;
+        let stream = self.connect_url(&url).await?;
+        let request = build_request(method, &path, host_header, headers, body)?;
+        self.send_on_stream(stream, request).await
+    }
+
+    pub async fn connect_url(&self, url: &Url) -> Result<OutboundStream, String> {
         let host = url
             .host_str()
             .ok_or_else(|| format!("outbound URL {url} is missing a host"))?
@@ -108,21 +163,15 @@ impl OutboundTransport {
             .connect_target(&host, port)
             .await
             .map_err(|error| format!("failed to connect to {host}:{port}: {error}"))?;
-        let path = request_path(&url);
-        let host_header = host_header_value(&url)?;
 
         match url.scheme() {
-            "http" => {
-                let request = build_request(method, &path, host_header, headers, body)?;
-                self.send_on_stream(stream, request).await
-            }
-            "https" => {
+            "http" | "ws" => Ok(OutboundStream::Plain(stream)),
+            "https" | "wss" => {
                 let tls_stream = tls_connector()
                     .connect(server_name(&host)?, stream)
                     .await
                     .map_err(|error| format!("TLS handshake failed for {host}:{port}: {error}"))?;
-                let request = build_request(method, &path, host_header, headers, body)?;
-                self.send_on_stream(tls_stream, request).await
+                Ok(OutboundStream::Tls(tls_stream))
             }
             other => Err(format!("unsupported outbound URL scheme {other}")),
         }

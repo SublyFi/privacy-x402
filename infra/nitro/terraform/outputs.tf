@@ -11,7 +11,7 @@ output "nlb_dns_name" {
 }
 
 output "runtime_kms_key_arn" {
-  value = aws_kms_key.runtime.arn
+  value = local.runtime_kms_key_arn
 }
 
 output "snapshot_bucket_name" {

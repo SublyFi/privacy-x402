@@ -12,10 +12,12 @@ a402_vault = { path = "../programs/a402_vault", features = ["cpi"] }
 async-trait = "0.1"
 axum = { version = "0.7", features = ["json"] }
 bytes = "1"
+futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.20.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

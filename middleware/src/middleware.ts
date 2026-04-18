@@ -8,6 +8,10 @@ import {
 } from "./types";
 import { postFacilitatorJson } from "./facilitator";
 
+const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
+const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
+const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
+
 /**
  * In-memory execution cache for the Provider Single-Execution Rule (§8.4).
  *
@@ -26,6 +30,45 @@ interface ExecutionEntry {
 }
 
 const executionCache = new Map<string, ExecutionEntry>();
+
+function encodeJsonHeader(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+}
+
+function decodeJsonHeader<T>(value: string, headerName: string): T {
+  const encodings: Array<"base64" | "base64url"> = ["base64", "base64url"];
+  let lastError: unknown;
+
+  for (const encoding of encodings) {
+    try {
+      const decoded = Buffer.from(value, encoding).toString("utf8");
+      return JSON.parse(decoded) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const reason =
+    lastError instanceof Error ? lastError.message : "invalid encoded JSON";
+  throw new Error(`Invalid ${headerName} header: ${reason}`);
+}
+
+function buildResultHash(
+  verificationId: string,
+  statusCode: number,
+  body: unknown
+): string {
+  const hash = createHash("sha256");
+  hash.update("A402-SVM-V1-RESULT\n");
+  hash.update(verificationId);
+  hash.update("\n");
+  hash.update(String(statusCode));
+  hash.update("\n");
+  if (body !== undefined) {
+    hash.update(JSON.stringify(body));
+  }
+  return hash.digest("hex");
+}
 
 /**
  * Express middleware implementing the a402-svm-v1 payment protocol.
@@ -54,10 +97,10 @@ export function a402Middleware(options: A402MiddlewareOptions) {
 
     // Decode and verify payment
     try {
-      const payloadJson = Buffer.from(paymentSig, "base64url").toString(
-        "utf-8"
+      const payload = decodeJsonHeader<any>(
+        paymentSig,
+        PAYMENT_SIGNATURE_HEADER
       );
-      const payload = JSON.parse(payloadJson);
 
       // Build paymentDetails from config for this request (§8.2 requirement)
       const paymentDetails = buildPaymentDetails(config, price, requestContext);
@@ -74,7 +117,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
       );
 
       if (!verifyRes.ok) {
-        return res.status(402).json({
+        return send402(res, config, price, requestContext, {
           error: "payment_verification_failed",
           message: verifyRes.message || "Payment verification failed",
         });
@@ -91,13 +134,13 @@ export function a402Middleware(options: A402MiddlewareOptions) {
             existing.waiters.push({ resolve });
           });
           if (completed.paymentResponse) {
-            res.setHeader("payment-response", completed.paymentResponse);
+            res.setHeader(PAYMENT_RESPONSE_HEADER, completed.paymentResponse);
           }
           return res.status(completed.statusCode ?? 200).json(completed.body);
         }
         // Already served — return cached result (idempotent replay)
         if (existing.paymentResponse) {
-          res.setHeader("payment-response", existing.paymentResponse);
+          res.setHeader(PAYMENT_RESPONSE_HEADER, existing.paymentResponse);
         }
         return res.status(existing.statusCode ?? 200).json(existing.body);
       }
@@ -116,23 +159,45 @@ export function a402Middleware(options: A402MiddlewareOptions) {
 
       // Capture the response body from the handler
       const originalJson = res.json;
+      const originalEnd = res.end.bind(res);
       let capturedBody: any;
       let capturedStatus: number;
+      let resolveHandler: (() => void) | undefined;
+      let handlerFinished = false;
+
+      const finishHandler = () => {
+        if (handlerFinished) {
+          return;
+        }
+        handlerFinished = true;
+        resolveHandler?.();
+      };
 
       res.json = function (this: Response, body: any) {
         capturedBody = body;
         capturedStatus = res.statusCode;
         // Don't send yet — we settle first
+        finishHandler();
         return this;
       };
 
       // Execute handler via next(), then settle synchronously before responding
-      await new Promise<void>((resolve, reject) => {
-        const originalEnd = res.end;
+      await new Promise<void>((resolve) => {
+        resolveHandler = resolve;
+
         // Intercept end() to prevent premature send
-        res.end = ((..._args: any[]) => {
+        res.end = ((chunk?: any, ..._args: any[]) => {
+          if (
+            capturedBody === undefined &&
+            chunk !== undefined &&
+            chunk !== null
+          ) {
+            capturedBody = Buffer.isBuffer(chunk)
+              ? chunk.toString("utf8")
+              : chunk;
+          }
           capturedStatus = capturedStatus ?? res.statusCode;
-          resolve();
+          finishHandler();
           return res;
         }) as any;
 
@@ -140,9 +205,9 @@ export function a402Middleware(options: A402MiddlewareOptions) {
         next();
 
         // If handler calls res.json() it will set capturedBody and call our
-        // patched end() via Express internals. For handlers that call next()
-        // or don't respond, we need a timeout fallback.
-        setTimeout(() => resolve(), 30000);
+        // patched hook above. For handlers that call next() or don't respond,
+        // we still need a timeout fallback.
+        setTimeout(() => finishHandler(), 30000);
       });
 
       // C2: Settle BEFORE returning response (§8.3 WAL durability)
@@ -151,14 +216,43 @@ export function a402Middleware(options: A402MiddlewareOptions) {
         settleResult = await settlePayment(
           config,
           verificationId,
-          capturedStatus ?? 200
+          capturedStatus ?? 200,
+          capturedBody
         );
       } catch (err: any) {
-        console.error("Settlement failed:", err);
+        const failureBody = {
+          error: "payment_settlement_failed",
+          message: err?.message || "Payment settlement failed",
+        };
+        const failurePaymentResponse = encodeJsonHeader({
+          scheme: "a402-svm-v1",
+          paymentId: payload.paymentId,
+          verificationId,
+          settlementId: null,
+          batchId: null,
+          txSignature: null,
+          participantReceipt: null,
+          error: "payment_settlement_failed",
+        });
+
+        res.setHeader(PAYMENT_RESPONSE_HEADER, failurePaymentResponse);
+        entry.status = "served_error";
+        entry.statusCode = 502;
+        entry.body = failureBody;
+        entry.paymentResponse = failurePaymentResponse;
+
+        for (const waiter of entry.waiters) {
+          waiter.resolve(entry);
+        }
+        entry.waiters = [];
+
+        res.json = originalJson;
+        res.end = originalEnd as any;
+        return res.status(502).json(failureBody);
       }
 
       // C1: Build PAYMENT-RESPONSE header (§8.6)
-      const paymentResponse = JSON.stringify({
+      const paymentResponse = encodeJsonHeader({
         scheme: "a402-svm-v1",
         paymentId: payload.paymentId,
         verificationId,
@@ -168,7 +262,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
         participantReceipt: settleResult?.participantReceipt ?? null,
       });
 
-      res.setHeader("payment-response", paymentResponse);
+      res.setHeader(PAYMENT_RESPONSE_HEADER, paymentResponse);
 
       // Update execution cache (C3)
       entry.status =
@@ -184,6 +278,8 @@ export function a402Middleware(options: A402MiddlewareOptions) {
       entry.waiters = [];
 
       // Now send the actual response
+      res.json = originalJson;
+      res.end = originalEnd as any;
       return originalJson.call(res, capturedBody);
     } catch (err: any) {
       return res.status(400).json({
@@ -318,10 +414,16 @@ function send402(
     origin: string;
     pathAndQuery: string;
     bodySha256: string;
-  }
-): void {
-  res.status(402).json({
+  },
+  extraBody: Record<string, unknown> = {}
+): Response {
+  const paymentRequired = {
     accepts: [buildPaymentDetails(config, amount, requestContext)],
+  };
+  res.setHeader(PAYMENT_REQUIRED_HEADER, encodeJsonHeader(paymentRequired));
+  return res.status(402).json({
+    ...paymentRequired,
+    ...extraBody,
   });
 }
 
@@ -349,15 +451,14 @@ export async function lookupSettlementStatus(
 async function settlePayment(
   config: A402ProviderConfig,
   verificationId: string,
-  statusCode: number
+  statusCode: number,
+  responseBody: unknown
 ): Promise<{
   settlementId: string;
   batchId: number | null;
   participantReceipt: string;
 }> {
-  const resultHash = createHash("sha256")
-    .update(`${verificationId}:${statusCode}`)
-    .digest("hex");
+  const resultHash = buildResultHash(verificationId, statusCode, responseBody);
 
   const res = await callFacilitator(
     `${config.facilitatorUrl}/v1/settle`,

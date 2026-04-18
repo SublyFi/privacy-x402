@@ -38,9 +38,10 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
                 continue;
             }
         };
+        let allowlist = config.egress_allowlist.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_egress_request(enclave_stream).await {
+            if let Err(e) = handle_egress_request(enclave_stream, &allowlist).await {
                 error!("Egress relay error for {peer_label}: {e}");
             }
         });
@@ -48,7 +49,10 @@ pub async fn run(config: &ParentConfig) -> io::Result<()> {
 }
 
 /// Handle a single egress request from the enclave.
-async fn handle_egress_request(enclave_stream: InterconnectStream) -> io::Result<()> {
+async fn handle_egress_request(
+    enclave_stream: InterconnectStream,
+    allowlist: &[String],
+) -> io::Result<()> {
     let (enclave_read, mut enclave_write) = split(enclave_stream);
     let mut reader = BufReader::new(enclave_read);
 
@@ -62,10 +66,25 @@ async fn handle_egress_request(enclave_stream: InterconnectStream) -> io::Result
         return Ok(());
     }
 
+    let (host, port) = match parse_target(target) {
+        Ok(parts) => parts,
+        Err(reason) => {
+            let msg = format!("ERR {reason}\n");
+            enclave_write.write_all(msg.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    if !allowlist.is_empty() && !allowlist_matches(allowlist, &host, port) {
+        let msg = format!("ERR target {host}:{port} is not allowed\n");
+        enclave_write.write_all(msg.as_bytes()).await?;
+        return Ok(());
+    }
+
     info!("Egress: connecting to {target}");
 
     // Connect to external target
-    let target_stream = match TcpStream::connect(target).await {
+    let target_stream = match TcpStream::connect(format!("{host}:{port}")).await {
         Ok(s) => {
             enclave_write.write_all(b"OK\n").await?;
             s
@@ -113,4 +132,119 @@ async fn handle_egress_request(enclave_stream: InterconnectStream) -> io::Result
     }
 
     Ok(())
+}
+
+fn parse_target(target: &str) -> Result<(String, u16), &'static str> {
+    if let Some(host_end) = target.find("]:").filter(|_| target.starts_with('[')) {
+        let host = &target[1..host_end];
+        let port = target[host_end + 2..]
+            .parse::<u16>()
+            .map_err(|_| "invalid port")?;
+        if host.is_empty() {
+            return Err("empty host");
+        }
+        return Ok((host.to_string(), port));
+    }
+
+    let (host, port) = target.rsplit_once(':').ok_or("missing port")?;
+    if host.is_empty() {
+        return Err("empty host");
+    }
+    let port = port.parse::<u16>().map_err(|_| "invalid port")?;
+    Ok((host.to_string(), port))
+}
+
+fn allowlist_matches(allowlist: &[String], host: &str, port: u16) -> bool {
+    allowlist
+        .iter()
+        .any(|rule| allow_rule_matches(rule, host, port))
+}
+
+fn allow_rule_matches(rule: &str, host: &str, port: u16) -> bool {
+    let (host_rule, port_rule) = parse_allow_rule(rule);
+    let port_matches = port_rule.map(|expected| expected == port).unwrap_or(true);
+    if !port_matches {
+        return false;
+    }
+
+    if host_rule == "*" {
+        return true;
+    }
+    if let Some(suffix) = host_rule.strip_prefix("*.") {
+        return host == suffix
+            || host
+                .strip_suffix(suffix)
+                .map(|prefix| prefix.ends_with('.'))
+                .unwrap_or(false);
+    }
+
+    host_rule.eq_ignore_ascii_case(host)
+}
+
+fn parse_allow_rule(rule: &str) -> (&str, Option<u16>) {
+    if let Some(host_end) = rule.find("]:").filter(|_| rule.starts_with('[')) {
+        let host = &rule[1..host_end];
+        let port = rule[host_end + 2..].parse::<u16>().ok();
+        return (host, port);
+    }
+
+    if let Some((host, port)) = rule.rsplit_once(':') {
+        if let Ok(port) = port.parse::<u16>() {
+            return (host, Some(port));
+        }
+    }
+
+    (rule, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allow_rule_matches, allowlist_matches, parse_target};
+
+    #[test]
+    fn parse_target_accepts_host_port() {
+        let parsed = parse_target("api.example.com:443").unwrap();
+        assert_eq!(parsed.0, "api.example.com");
+        assert_eq!(parsed.1, 443);
+    }
+
+    #[test]
+    fn allowlist_matches_exact_and_wildcard_rules() {
+        assert!(allow_rule_matches(
+            "api.example.com:443",
+            "api.example.com",
+            443
+        ));
+        assert!(allow_rule_matches(
+            "*.example.com:443",
+            "rpc.example.com",
+            443
+        ));
+        assert!(allow_rule_matches("*.example.com", "example.com", 443));
+        assert!(!allow_rule_matches(
+            "api.example.com:443",
+            "api.example.com",
+            80
+        ));
+        assert!(!allow_rule_matches(
+            "*.example.com:443",
+            "api.other.com",
+            443
+        ));
+    }
+
+    #[test]
+    fn allowlist_matches_any_rule() {
+        let allowlist = vec![
+            "rpc.example.com:443".to_string(),
+            "*.amazonaws.com:443".to_string(),
+        ];
+        assert!(allowlist_matches(
+            &allowlist,
+            "kms.us-east-1.amazonaws.com",
+            443
+        ));
+        assert!(allowlist_matches(&allowlist, "rpc.example.com", 443));
+        assert!(!allowlist_matches(&allowlist, "rpc.example.com", 80));
+    }
 }

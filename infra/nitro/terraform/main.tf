@@ -1,3 +1,39 @@
+data "aws_caller_identity" "current" {}
+
+data "aws_partition" "current" {}
+
+data "aws_kms_key" "existing_runtime" {
+  count  = var.existing_runtime_kms_key_arn == null ? 0 : 1
+  key_id = var.existing_runtime_kms_key_arn
+}
+
+locals {
+  runtime_kms_key_arn = var.existing_runtime_kms_key_arn != null ? data.aws_kms_key.existing_runtime[0].arn : aws_kms_key.runtime[0].arn
+  runtime_kms_key_id  = var.existing_runtime_kms_key_arn != null ? data.aws_kms_key.existing_runtime[0].key_id : aws_kms_key.runtime[0].key_id
+  normalized_attestation_pcrs = {
+    for key, value in var.kms_attestation_pcrs :
+    tostring(key) => trimprefix(lower(value), "0x")
+  }
+  attestation_image_sha384 = coalesce(
+    var.kms_attestation_image_sha384,
+    lookup(local.normalized_attestation_pcrs, "0", null)
+  )
+  attestation_conditions = concat(
+    local.attestation_image_sha384 == null ? [] : [
+      {
+        variable = "kms:RecipientAttestation:ImageSha384"
+        value    = local.attestation_image_sha384
+      }
+    ],
+    [
+      for key, value in local.normalized_attestation_pcrs : {
+        variable = "kms:RecipientAttestation:PCR${key}"
+        value    = value
+      }
+    ]
+  )
+}
+
 resource "aws_security_group" "parent" {
   name        = "${var.project_name}-parent"
   description = "A402 parent ingress"
@@ -73,7 +109,7 @@ data "aws_iam_policy_document" "parent_runtime" {
       "kms:GenerateRandom",
     ]
 
-    resources = [aws_kms_key.runtime.arn]
+    resources = [local.runtime_kms_key_arn]
   }
 
   statement {
@@ -103,6 +139,76 @@ data "aws_iam_policy_document" "parent_runtime" {
   }
 }
 
+data "aws_iam_policy_document" "runtime_kms" {
+  statement {
+    sid    = "EnableRootPermissions"
+    effect = "Allow"
+
+    principals {
+      type = "AWS"
+      identifiers = [
+        "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root",
+      ]
+    }
+
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  dynamic "statement" {
+    for_each = length(var.kms_provisioner_principal_arns) == 0 ? [] : [1]
+
+    content {
+      sid    = "AllowProvisionerEncrypt"
+      effect = "Allow"
+
+      principals {
+        type        = "AWS"
+        identifiers = var.kms_provisioner_principal_arns
+      }
+
+      actions = [
+        "kms:Encrypt",
+        "kms:DescribeKey",
+      ]
+      resources = ["*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.attestation_conditions) == 0 ? [] : [1]
+
+    content {
+      sid    = "AllowAttestedParentRuntime"
+      effect = "Allow"
+
+      principals {
+        type        = "AWS"
+        identifiers = [aws_iam_role.parent.arn]
+      }
+
+      actions = [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:GenerateRandom",
+      ]
+      resources = ["*"]
+
+      dynamic "condition" {
+        for_each = {
+          for idx, item in local.attestation_conditions : idx => item
+        }
+
+        content {
+          test     = "StringEqualsIgnoreCase"
+          variable = condition.value.variable
+          values   = [condition.value.value]
+        }
+      }
+    }
+  }
+}
+
 resource "aws_iam_role_policy" "parent_runtime" {
   name   = "${var.project_name}-parent-runtime"
   role   = aws_iam_role.parent.id
@@ -127,14 +233,23 @@ resource "aws_s3_bucket_versioning" "snapshots" {
 }
 
 resource "aws_kms_key" "runtime" {
+  count                   = var.existing_runtime_kms_key_arn == null ? 1 : 0
   description             = "A402 Nitro runtime key"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.runtime_kms.json
 }
 
 resource "aws_kms_alias" "runtime" {
+  count         = var.existing_runtime_kms_key_arn == null ? 1 : 0
   name          = "alias/${var.project_name}-runtime"
-  target_key_id = aws_kms_key.runtime.key_id
+  target_key_id = aws_kms_key.runtime[0].key_id
+}
+
+resource "aws_kms_key_policy" "existing_runtime" {
+  count  = var.existing_runtime_kms_key_arn == null ? 0 : 1
+  key_id = data.aws_kms_key.existing_runtime[0].key_id
+  policy = data.aws_iam_policy_document.runtime_kms.json
 }
 
 resource "aws_instance" "parent" {

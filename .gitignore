@@ -18,3 +18,5 @@ infra/nitro/terraform/*.tfstate
 infra/nitro/terraform/*.tfstate.*
 infra/nitro/terraform/terraform.tfvars
 infra/nitro/terraform/*.auto.tfvars
+infra/nitro/generated
+.nitro-build
