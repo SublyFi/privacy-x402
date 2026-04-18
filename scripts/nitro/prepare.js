@@ -9,6 +9,7 @@ const {
   awsKmsEncryptBase64,
   buildSignerEncryptionContext,
   buildStorageMetadataKey,
+  computeParentRolePcr3,
   ensureFunded,
   keypairFromSeedBase64,
   keypairToBase64,
@@ -21,6 +22,8 @@ const {
   randomSeedBase64,
   resolveEifSigningCertSha256,
   resolveKmsKeyArnSha256,
+  resolveNitroProjectName,
+  resolveParentRoleArn,
   saveJson,
   writeEnvFile,
 } = require("./common");
@@ -44,6 +47,8 @@ async function main() {
     randomSeedBase64();
   const localSigner = keypairFromSeedBase64(localSignerSeedBase64);
   const reuseExistingVault = process.env.A402_REUSE_EXISTING_VAULT === "1";
+  const projectName = resolveNitroProjectName(args);
+  const parentRoleArn = resolveParentRoleArn({ ...args, projectName });
   const kmsKeyId =
     args.kmsKeyId ||
     process.env.A402_KMS_KEY_ID ||
@@ -202,6 +207,9 @@ async function main() {
     auditorMasterPubkeyHex,
     protocol,
     awsRegion,
+    projectName,
+    parentRoleArn,
+    parentRolePcr3: computeParentRolePcr3(parentRoleArn),
     existingVault: Boolean(planned.vaultConfigInfo),
     generatedFiles: {
       enclaveEnv: path.join(GENERATED_DIR, "enclave.env"),

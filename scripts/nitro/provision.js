@@ -6,6 +6,7 @@ const {
   GENERATED_DIR,
   PLAN_PATH,
   anchor,
+  computeParentRolePcr3,
   computeAttestationPolicy,
   decodeHex32,
   ensureFunded,
@@ -15,6 +16,8 @@ const {
   loadProvider,
   parseArgs,
   readJson,
+  resolveNitroProjectName,
+  resolveParentRoleArn,
   saveJson,
   writeEnvFile,
 } = require("./common");
@@ -33,10 +36,16 @@ async function main() {
     path.join(GENERATED_DIR, "eif-measurements.json");
   const plan = readJson(planPath);
   const measurements = loadMeasurements(measurementsPath);
+  const projectName = plan.projectName || resolveNitroProjectName(args);
+  const parentRoleArn =
+    plan.parentRoleArn || resolveParentRoleArn({ ...args, projectName });
+  const parentRolePcr3 =
+    plan.parentRolePcr3 || computeParentRolePcr3(parentRoleArn);
   const { policy, hashHex } = computeAttestationPolicy({
     measurements,
     eifSigningCertSha256: plan.eifSigningCertSha256,
     kmsKeyArnSha256: plan.kmsKeyArnSha256,
+    parentRolePcr3,
     protocol: plan.protocol,
   });
 
@@ -127,6 +136,7 @@ async function main() {
   saveJson(policyPath, policy);
   saveJson(tfvarsPath, {
     aws_region: plan.awsRegion,
+    project_name: projectName,
     kms_attestation_pcrs: policy.pcrs,
     kms_eif_signing_cert_sha256: plan.eifSigningCertSha256,
     kms_attestation_image_sha384: policy.pcrs["0"],
@@ -140,6 +150,9 @@ async function main() {
   require("fs").writeFileSync(policyHashPath, `${hashHex}\n`);
   saveJson(statePath, {
     ...plan,
+    projectName,
+    parentRoleArn,
+    parentRolePcr3,
     attestationPolicyHashHex: hashHex,
     measurements,
     initialized,

@@ -105,6 +105,9 @@ yarn nitro:build-eif
 
 EIF の実測値から policy hash を作り、`initialize_vault` に固定する。
 
+この step では parent EC2 用 IAM role ARN から `PCR3` も導出する。
+Terraform の `project_name` を default (`a402-devnet`) から変える場合は、`A402_NITRO_PROJECT_NAME` を同じ値で設定してから実行する。
+
 ```bash
 yarn nitro:provision
 ```

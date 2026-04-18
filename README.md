@@ -191,9 +191,14 @@ yarn nitro:provision
 この step で次を行います。
 
 - EIF 実測値から `attestation_policy_hash` を算出
+- parent EC2 用 IAM role ARN から `PCR3` を導出
 - `initialize_vault` を必要なら実行
 - `terraform.attestation.auto.tfvars.json` を生成
 - client 用参照 env を生成
+
+補足:
+
+- `project_name` を Terraform default (`a402-devnet`) から変える場合は、`yarn nitro:prepare` と `yarn nitro:provision` の前に `A402_NITRO_PROJECT_NAME` を同じ値で設定する
 
 生成されるファイル:
 

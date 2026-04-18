@@ -89,6 +89,10 @@ function sha256hex(data) {
   return crypto.createHash("sha256").update(data).digest("hex");
 }
 
+function sha384hex(data) {
+  return crypto.createHash("sha384").update(data).digest("hex");
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
@@ -108,17 +112,24 @@ function computeAttestationPolicy({
   measurements,
   eifSigningCertSha256,
   kmsKeyArnSha256,
+  parentRolePcr3,
   protocol = "a402-svm-v1",
 }) {
   const normalizedMeasurements = normalizeMeasurements(measurements);
+  const pcr8 = normalizedMeasurements.PCR8;
+  if (!pcr8) {
+    throw new Error(
+      "measurements file is missing PCR8; build a signed EIF with --private-key and --signing-certificate"
+    );
+  }
   const policy = {
     version: 1,
     pcrs: {
       0: normalizedMeasurements.PCR0,
       1: normalizedMeasurements.PCR1,
       2: normalizedMeasurements.PCR2,
-      3: normalizedMeasurements.PCR3,
-      8: normalizedMeasurements.PCR8,
+      3: normalizeHex(requireValue("parent role PCR3", parentRolePcr3), "PCR3"),
+      8: pcr8,
     },
     eifSigningCertSha256: normalizeHex(
       eifSigningCertSha256,
@@ -136,12 +147,15 @@ function computeAttestationPolicy({
 function normalizeMeasurements(raw) {
   const measurements = raw.Measurements || raw.measurements || raw;
   const out = {};
-  for (const key of ["PCR0", "PCR1", "PCR2", "PCR3", "PCR8"]) {
+  for (const key of ["PCR0", "PCR1", "PCR2"]) {
     const value = measurements[key];
     if (!value) {
       throw new Error(`measurements file is missing ${key}`);
     }
     out[key] = normalizeHex(value, key);
+  }
+  if (measurements.PCR8) {
+    out.PCR8 = normalizeHex(measurements.PCR8, "PCR8");
   }
   return out;
 }
@@ -183,6 +197,75 @@ function resolveEifSigningCertSha256(args) {
 
 function fileSha256(filePath) {
   return sha256hex(fs.readFileSync(filePath));
+}
+
+function resolveNitroProjectName(args = {}) {
+  return (
+    args.projectName ||
+    process.env.A402_NITRO_PROJECT_NAME ||
+    "a402-devnet"
+  );
+}
+
+function resolveAwsCallerIdentity(args = {}) {
+  const accountId =
+    args.awsAccountId || process.env.A402_AWS_ACCOUNT_ID || process.env.AWS_ACCOUNT_ID;
+  const partition = args.awsPartition || process.env.A402_AWS_PARTITION;
+  if (accountId) {
+    return {
+      accountId: String(accountId).trim(),
+      partition: partition || "aws",
+    };
+  }
+
+  try {
+    const output = execFileSync(
+      "aws",
+      ["sts", "get-caller-identity", "--output", "json"],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    const identity = JSON.parse(output);
+    const arn = requireValue("caller identity ARN", identity.Arn);
+    return {
+      accountId: requireValue("caller identity Account", identity.Account),
+      partition: arn.split(":")[1] || "aws",
+    };
+  } catch (error) {
+    const stderr =
+      error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+    throw new Error(
+      stderr
+        ? `failed to resolve AWS caller identity: ${stderr}`
+        : `failed to resolve AWS caller identity: ${error.message}`
+    );
+  }
+}
+
+function resolveParentRoleArn(args = {}) {
+  const explicitArn =
+    args.parentRoleArn ||
+    process.env.A402_PARENT_ROLE_ARN ||
+    process.env.A402_NITRO_PARENT_ROLE_ARN;
+  if (explicitArn) {
+    return explicitArn.trim();
+  }
+
+  const { accountId, partition } = resolveAwsCallerIdentity(args);
+  const projectName = resolveNitroProjectName(args);
+  return `arn:${partition}:iam::${accountId}:role/${projectName}-parent`;
+}
+
+function computeParentRolePcr3(parentRoleArn) {
+  const roleArn = requireValue("parent role ARN", parentRoleArn);
+  const padded = Buffer.concat([
+    Buffer.alloc(48, 0),
+    Buffer.from(roleArn, "utf8"),
+  ]);
+  return sha384hex(padded);
 }
 
 function awsKmsEncryptBase64({ keyId, plaintext, encryptionContext, region }) {
@@ -350,6 +433,7 @@ module.exports = {
   buildSignerEncryptionContext,
   buildStorageMetadataKey,
   canonicalJson,
+  computeParentRolePcr3,
   computeAttestationPolicy,
   decodeHex32,
   ensureDir,
@@ -367,9 +451,13 @@ module.exports = {
   planVault,
   randomSeedBase64,
   readJson,
+  resolveAwsCallerIdentity,
   resolveEifSigningCertSha256,
   resolveKmsKeyArnSha256,
+  resolveNitroProjectName,
+  resolveParentRoleArn,
   saveJson,
   sha256hex,
+  sha384hex,
   writeEnvFile,
 };
