@@ -341,7 +341,7 @@ mod tests {
     fn test_full_protocol_flow() {
         // Simulates the full Phase 3 Exec-Pay-Deliver protocol
         let (provider_sk, provider_pk) = test_keypair();
-        let (vault_sk, vault_pk) = test_keypair();
+        let (vault_sk, _vault_pk) = test_keypair();
 
         // Stage 1: Provider TEE generates adaptor key pair
         let adaptor = AdaptorKeyPair::generate();
