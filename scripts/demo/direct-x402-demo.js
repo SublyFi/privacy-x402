@@ -41,15 +41,29 @@ async function main() {
   }
 
   const paymentAmount = Number(
-    process.env.A402_DEMO_PAYMENT_AMOUNT ||
-      process.env.A402_NITRO_E2E_PAYMENT_AMOUNT ||
-      "1100000"
+    readPositiveIntEnv(
+      "A402_DEMO_PAYMENT_AMOUNT",
+      readPositiveIntEnv("A402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
+    )
   );
   const clientSolLamports = Number(
-    process.env.A402_DEMO_CLIENT_SOL_LAMPORTS ||
-      process.env.A402_NITRO_E2E_CLIENT_SOL_LAMPORTS ||
-      "50000000"
+    readPositiveIntEnv(
+      "A402_DEMO_CLIENT_SOL_LAMPORTS",
+      readPositiveIntEnv("A402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
+    )
   );
+
+  const plan = {
+    mode: "direct-x402-style-baseline",
+    cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
+    anchorWallet: process.env.ANCHOR_WALLET || null,
+    usdcMint,
+    providerId: demoProvider.id,
+    providerTokenAccount: demoProvider.tokenAccount,
+    paymentAmount,
+    note: "This is a direct on-chain settlement baseline for comparison with Subly.",
+  };
+  requireDemoConfirmation(plan);
 
   const provider = loadProvider();
   anchor.setProvider(provider);
@@ -60,18 +74,6 @@ async function main() {
       "Mint authority is required for this devnet direct baseline. Set A402_USDC_MINT_AUTHORITY_WALLET."
     );
   }
-
-  const plan = {
-    mode: "direct-x402-style-baseline",
-    cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
-    feePayer: provider.wallet.publicKey.toBase58(),
-    usdcMint,
-    providerId: demoProvider.id,
-    providerTokenAccount: demoProvider.tokenAccount,
-    paymentAmount,
-    note: "This is a direct on-chain settlement baseline for comparison with Subly.",
-  };
-  requireDemoConfirmation(plan);
 
   printHeader("Direct x402-style baseline: public on-chain payment edge");
   logStep(1, 'AI agent requests: "summarize private market data"');

@@ -36,7 +36,10 @@ function parseEnvAssignment(rawValue) {
   return expandEnv(value);
 }
 
-function loadEnvFile(filePath, { required = false } = {}) {
+function loadEnvFile(
+  filePath,
+  { required = false, protectedKeys = new Set() } = {}
+) {
   if (!fs.existsSync(filePath)) {
     if (required) {
       throw new Error(`env file is missing: ${filePath}`);
@@ -57,22 +60,29 @@ function loadEnvFile(filePath, { required = false } = {}) {
     }
 
     const [, key, rawValue] = match;
+    if (protectedKeys.has(key)) {
+      continue;
+    }
     process.env[key] = parseEnvAssignment(rawValue);
   }
   return true;
 }
 
 function loadNitroEnv() {
-  loadEnvFile(path.join(ROOT, ".env.devnet.local"));
+  const shellEnvKeys = new Set(Object.keys(process.env));
+
+  loadEnvFile(path.join(ROOT, ".env.devnet.local"), {
+    protectedKeys: shellEnvKeys,
+  });
 
   const clientEnv =
     process.env.A402_NITRO_CLIENT_ENV ||
     path.join(ROOT, "infra", "nitro", "generated", "client.env");
-  loadEnvFile(clientEnv, { required: true });
+  loadEnvFile(clientEnv, { required: true, protectedKeys: shellEnvKeys });
 
   const providerEnv =
     process.env.A402_DEMO_PROVIDERS_ENV || "/root/a402-demo-providers.env";
-  loadEnvFile(providerEnv, { required: true });
+  loadEnvFile(providerEnv, { required: true, protectedKeys: shellEnvKeys });
 }
 
 function loadDemoProviders() {
@@ -118,7 +128,13 @@ function loadMintAuthority(provider, mintAuthority) {
   }
   const walletPath = process.env.A402_USDC_MINT_AUTHORITY_WALLET;
   if (walletPath) {
-    return loadKeypairFromFile(walletPath);
+    const keypair = loadKeypairFromFile(walletPath);
+    if (!keypair.publicKey.equals(mintAuthority)) {
+      throw new Error(
+        `A402_USDC_MINT_AUTHORITY_WALLET public key ${keypair.publicKey.toBase58()} does not match mint authority ${mintAuthority.toBase58()}`
+      );
+    }
+    return keypair;
   }
   if (mintAuthority.equals(provider.wallet.publicKey)) {
     return provider.wallet.payer;
@@ -162,28 +178,18 @@ async function postOrThrow(enclaveUrl, route, body, headers) {
   return response.json();
 }
 
-async function assertFinalRoutes(enclaveUrl) {
-  const registerRes = await fetch(`${enclaveUrl}/v1/provider/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  if (registerRes.status !== 404) {
+async function assertRouteAbsent(enclaveUrl, route) {
+  const response = await fetch(`${enclaveUrl}${route}`, { method: "GET" });
+  if (response.status !== 404) {
     throw new Error(
-      `expected final EIF to return 404 for /v1/provider/register, got ${registerRes.status}`
+      `expected final EIF to have ${route} disabled; safe GET returned ${response.status}`
     );
   }
+}
 
-  const adminRes = await fetch(`${enclaveUrl}/v1/admin/fire-batch`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  if (adminRes.status !== 404) {
-    throw new Error(
-      `expected final EIF to return 404 for /v1/admin/fire-batch, got ${adminRes.status}`
-    );
-  }
+async function assertFinalRoutes(enclaveUrl) {
+  await assertRouteAbsent(enclaveUrl, "/v1/provider/register");
+  await assertRouteAbsent(enclaveUrl, "/v1/admin/fire-batch");
 }
 
 function buildPayment({

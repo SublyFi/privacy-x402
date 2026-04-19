@@ -92,19 +92,22 @@ async function main() {
     process.env.A402_REQUEST_ORIGIN || "https://demo.subly.dev";
   const network = process.env.A402_NETWORK || "solana:devnet";
   const depositAmount = Number(
-    process.env.A402_DEMO_DEPOSIT_AMOUNT ||
-      process.env.A402_NITRO_E2E_DEPOSIT_AMOUNT ||
-      "3000000"
+    readPositiveIntEnv(
+      "A402_DEMO_DEPOSIT_AMOUNT",
+      readPositiveIntEnv("A402_NITRO_E2E_DEPOSIT_AMOUNT", 3000000)
+    )
   );
   const paymentAmount = Number(
-    process.env.A402_DEMO_PAYMENT_AMOUNT ||
-      process.env.A402_NITRO_E2E_PAYMENT_AMOUNT ||
-      "1100000"
+    readPositiveIntEnv(
+      "A402_DEMO_PAYMENT_AMOUNT",
+      readPositiveIntEnv("A402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
+    )
   );
   const clientSolLamports = Number(
-    process.env.A402_DEMO_CLIENT_SOL_LAMPORTS ||
-      process.env.A402_NITRO_E2E_CLIENT_SOL_LAMPORTS ||
-      "50000000"
+    readPositiveIntEnv(
+      "A402_DEMO_CLIENT_SOL_LAMPORTS",
+      readPositiveIntEnv("A402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
+    )
   );
   const batchWaitAttempts = readPositiveIntEnv(
     "A402_DEMO_BATCH_WAIT_ATTEMPTS",
@@ -120,16 +123,10 @@ async function main() {
     throw new Error("deposit amount must cover all provider payment amounts");
   }
 
-  const provider = loadProvider();
-  anchor.setProvider(provider);
-  const program = loadProgram(provider);
-  const mint = await getMint(provider.connection, new PublicKey(usdcMint));
-  const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
-
   const plan = {
     mode: "subly-private-x402",
     cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
-    feePayer: provider.wallet.publicKey.toBase58(),
+    anchorWallet: process.env.ANCHOR_WALLET || null,
     enclaveUrl,
     vaultConfig,
     vaultTokenAccount,
@@ -142,6 +139,12 @@ async function main() {
     batchWaitDelayMs,
   };
   requireDemoConfirmation(plan);
+
+  const provider = loadProvider();
+  anchor.setProvider(provider);
+  const program = loadProgram(provider);
+  const mint = await getMint(provider.connection, new PublicKey(usdcMint));
+  const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
 
   printHeader("Subly privacy-first x402: private vault + batched settlement");
   logStep(1, 'AI agent requests: "summarize private market data"');
@@ -320,6 +323,25 @@ async function main() {
     settlements,
     providers
   );
+  const pendingStatuses = settlementStatuses.filter((settlement) => {
+    const body = settlement.body;
+    return (
+      settlement.httpStatus !== 200 ||
+      !body ||
+      body.status !== "BatchedOnchain" ||
+      !body.batchId ||
+      !body.txSignature
+    );
+  });
+  if (pendingStatuses.length > 0) {
+    throw new Error(
+      `settlement status did not reach BatchedOnchain: ${JSON.stringify(
+        pendingStatuses,
+        null,
+        2
+      )}`
+    );
+  }
 
   const finalBalanceAuth = buildClientRequestAuth(
     client,

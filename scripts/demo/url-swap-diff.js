@@ -40,7 +40,7 @@ const envDiff = String.raw`# direct x402-style settlement
 # Subly privacy-first settlement
 + PAYMENT_FACILITATOR_URL=https://a402-devnet-nlb-3e6035bc92639ed3.elb.us-east-1.amazonaws.com`;
 
-printHeader("App-level diff: direct x402-style -> Subly");
+printHeader("App-level pseudo diff: direct x402-style -> Subly");
 
 console.log("[Provider app code]");
 console.log(appCode);
@@ -54,7 +54,7 @@ console.log("[Diff to show in the demo]");
 console.log(envDiff);
 console.log("");
 
-logKV("What changed in app code", "only the payment facilitator URL");
+logKV("What changed in product code", "only the payment facilitator URL");
 logKV(
   "What Subly changes underneath",
   "vault deposit, private reservation, batched provider payout"
