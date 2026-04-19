@@ -168,40 +168,42 @@ function verifyCertificateChain(
   trustedRoots: X509Certificate[]
 ): void {
   const now = new Date();
-  const chain = [leaf, ...bundle];
 
-  for (const certificate of chain) {
+  for (const certificate of [leaf, ...bundle]) {
     assertCertificateValidAt(certificate, now);
   }
   for (const root of trustedRoots) {
     assertCertificateValidAt(root, now);
   }
 
-  for (let i = 0; i < chain.length - 1; i += 1) {
-    const subject = chain[i];
-    const issuer = chain[i + 1];
-    if (!subject.checkIssued(issuer)) {
-      throw new Error(`Attestation certificate chain is broken at depth ${i}`);
+  const remaining = [...bundle];
+  let current = leaf;
+  for (let depth = 0; depth <= bundle.length; depth += 1) {
+    const trusted = trustedRoots.some((root) => {
+      if (current.raw.equals(root.raw)) {
+        return true;
+      }
+      return current.checkIssued(root) && current.verify(root.publicKey);
+    });
+    if (trusted) {
+      return;
     }
-    if (!subject.verify(issuer.publicKey)) {
+
+    const issuerIndex = remaining.findIndex(
+      (issuer) =>
+        current.checkIssued(issuer) && current.verify(issuer.publicKey)
+    );
+    if (issuerIndex === -1) {
       throw new Error(
-        `Attestation certificate signature is invalid at depth ${i}`
+        `Attestation certificate chain is broken at depth ${depth}`
       );
     }
+    current = remaining.splice(issuerIndex, 1)[0];
   }
 
-  const last = chain[chain.length - 1];
-  const trusted = trustedRoots.some((root) => {
-    if (last.raw.equals(root.raw)) {
-      return true;
-    }
-    return last.checkIssued(root) && last.verify(root.publicKey);
-  });
-  if (!trusted) {
-    throw new Error(
-      "Attestation certificate chain does not terminate at a trusted Nitro root"
-    );
-  }
+  throw new Error(
+    "Attestation certificate chain does not terminate at a trusted Nitro root"
+  );
 }
 
 function verifyCoseSignature(
@@ -524,10 +526,19 @@ function unwrapTagged(value: unknown): unknown {
 
 function mapFromUnknown(value: unknown): Map<unknown, unknown> {
   const unwrapped = unwrapTagged(value);
-  if (!(unwrapped instanceof Map)) {
-    throw new Error("Expected a CBOR map in attestation document");
+  if (unwrapped instanceof Map) {
+    return unwrapped;
   }
-  return unwrapped;
+  if (
+    unwrapped &&
+    typeof unwrapped === "object" &&
+    !Array.isArray(unwrapped) &&
+    !Buffer.isBuffer(unwrapped) &&
+    !(unwrapped instanceof Uint8Array)
+  ) {
+    return new Map(Object.entries(unwrapped as Record<string, unknown>));
+  }
+  throw new Error("Expected a CBOR map in attestation document");
 }
 
 function expectArray(value: unknown, field: string): unknown[] {
@@ -545,7 +556,7 @@ function expectBuffer(value: unknown, field: string): Buffer {
 }
 
 function optionalBuffer(value: unknown): Buffer | undefined {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return undefined;
   }
   return expectBuffer(value, "optional byte string");
