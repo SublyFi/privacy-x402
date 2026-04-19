@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use crate::audit;
 use crate::handlers::AppState;
-use crate::state::{PendingWithdrawal, ReservationStatus};
+use crate::state::{PendingWithdrawal, ReservationStatus, SettlementRecord};
 use crate::wal::WalEntry;
 
 const BATCH_WINDOW_SEC: u64 = 120;
@@ -349,10 +349,27 @@ async fn prepare_batch(
 
     let mut prepared: Vec<PreparedSettlement> = Vec::new();
     for (provider_id, sid) in select_batch_settlement_ids(cursors, MAX_SETTLEMENTS_PER_TX) {
-        let Some(record) = state.vault.settlement_history.get(&sid) else {
-            return Err(format!(
-                "missing settlement_history entry for settlement_id={sid} provider_id={provider_id}"
-            ));
+        let record = if let Some(record) = state.vault.settlement_history.get(&sid) {
+            record.clone()
+        } else if let Some(record) = reconstruct_settlement_record(state, &provider_id, &sid) {
+            warn!(
+                settlement_id = %sid,
+                provider_id = %provider_id,
+                "Reconstructed missing settlement_history entry from reservation state"
+            );
+            state
+                .vault
+                .settlement_history
+                .insert(sid.clone(), record.clone());
+            record
+        } else {
+            warn!(
+                settlement_id = %sid,
+                provider_id = %provider_id,
+                "Pruning provider credit with missing settlement_history and reservation state"
+            );
+            prune_missing_settlement_reference(state, &provider_id, &sid);
+            continue;
         };
 
         let encrypted = audit::generate_audit_record_at(
@@ -381,6 +398,69 @@ async fn prepare_batch(
     }
 
     Ok(prepared)
+}
+
+fn reconstruct_settlement_record(
+    state: &Arc<AppState>,
+    provider_id: &str,
+    settlement_id: &str,
+) -> Option<SettlementRecord> {
+    let reservation = state
+        .vault
+        .reservations
+        .iter()
+        .find(|entry| entry.settlement_id.as_deref() == Some(settlement_id))?
+        .clone();
+    if reservation.provider_id != provider_id
+        || reservation.status != ReservationStatus::SettledOffchain
+    {
+        return None;
+    }
+
+    let provider = state.vault.providers.get(provider_id)?;
+    Some(SettlementRecord {
+        settlement_id: settlement_id.to_string(),
+        client: reservation.client,
+        provider: provider.settlement_token_account,
+        amount: reservation.amount,
+        timestamp: reservation.settled_at.unwrap_or(reservation.created_at),
+    })
+}
+
+fn prune_missing_settlement_reference(
+    state: &Arc<AppState>,
+    provider_id: &str,
+    settlement_id: &str,
+) {
+    let Some(mut credit) = state.vault.provider_credits.get_mut(provider_id) else {
+        return;
+    };
+
+    credit.settlement_ids.retain(|sid| sid != settlement_id);
+
+    let mut credited_amount = 0u64;
+    let mut oldest_credit_at: Option<i64> = None;
+    for sid in &credit.settlement_ids {
+        if let Some(record) = state.vault.settlement_history.get(sid) {
+            credited_amount = credited_amount.saturating_add(record.amount);
+            oldest_credit_at = Some(
+                oldest_credit_at
+                    .map(|current| current.min(record.timestamp))
+                    .unwrap_or(record.timestamp),
+            );
+        }
+    }
+
+    credit.credited_amount = credited_amount;
+    if let Some(oldest_credit_at) = oldest_credit_at {
+        credit.oldest_credit_at = oldest_credit_at;
+    }
+
+    let should_remove = credit.credited_amount == 0 || credit.settlement_ids.is_empty();
+    drop(credit);
+    if should_remove {
+        state.vault.provider_credits.remove(provider_id);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1053,11 +1133,20 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
 
         // Clean up orphaned settlement_history entries that are older than the max age.
         // These can accumulate when batches don't fire (e.g., provider count < MIN_BATCH_PROVIDERS).
+        let referenced_settlement_ids: HashSet<String> = state
+            .vault
+            .provider_credits
+            .iter()
+            .flat_map(|credit| credit.settlement_ids.clone())
+            .collect();
         let stale_sids: Vec<String> = state
             .vault
             .settlement_history
             .iter()
-            .filter(|r| now - r.timestamp > SETTLEMENT_HISTORY_MAX_AGE_SEC)
+            .filter(|r| {
+                now - r.timestamp > SETTLEMENT_HISTORY_MAX_AGE_SEC
+                    && !referenced_settlement_ids.contains(&r.settlement_id)
+            })
             .map(|r| r.settlement_id.clone())
             .collect();
 
