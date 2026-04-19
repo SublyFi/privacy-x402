@@ -2,8 +2,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
+use openssl::cms::CmsContentInfo;
+use openssl::pkey::{PKey, Private};
 use rand::rngs::OsRng;
-use rsa::pkcs8::{EncodePublicKey, LineEnding};
+use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{Oaep, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -107,9 +109,29 @@ impl RecipientKeyPair {
         let ciphertext = BASE64
             .decode(ciphertext_b64)
             .map_err(|error| format!("invalid base64 ciphertextForRecipient: {error}"))?;
+        if let Ok(plaintext) = self.decrypt_cms_envelope(&ciphertext) {
+            return Ok(plaintext);
+        }
         self.private_key
             .decrypt(Oaep::new::<Sha256>(), &ciphertext)
             .map_err(|error| format!("failed to decrypt ciphertextForRecipient: {error}"))
+    }
+
+    fn decrypt_cms_envelope(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+        let cms = CmsContentInfo::from_der(ciphertext)
+            .map_err(|error| format!("ciphertextForRecipient is not CMS DER: {error}"))?;
+        let pkey = self.openssl_private_key()?;
+        cms.decrypt_without_cert_check(&pkey)
+            .map_err(|error| format!("failed to decrypt CMS ciphertextForRecipient: {error}"))
+    }
+
+    fn openssl_private_key(&self) -> Result<PKey<Private>, String> {
+        let der = self
+            .private_key
+            .to_pkcs8_der()
+            .map_err(|error| format!("failed to encode recipient private key: {error}"))?;
+        PKey::private_key_from_der(der.as_bytes())
+            .map_err(|error| format!("failed to load recipient private key for CMS: {error}"))
     }
 }
 
@@ -398,4 +420,68 @@ fn storage_encryption_context(vault_config: Pubkey) -> std::collections::HashMap
         ),
         ("a402:vaultConfig".to_string(), vault_config.to_string()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openssl::asn1::Asn1Time;
+    use openssl::cms::CMSOptions;
+    use openssl::hash::MessageDigest;
+    use openssl::stack::Stack;
+    use openssl::symm::Cipher;
+    use openssl::x509::{X509NameBuilder, X509};
+
+    #[test]
+    fn decrypts_kms_style_cms_ciphertext_for_recipient() {
+        let recipient = RecipientKeyPair::generate().unwrap();
+        let pkey = recipient.openssl_private_key().unwrap();
+        let cert = self_signed_cert(&pkey);
+        let mut certs = Stack::new().unwrap();
+        certs.push(cert).unwrap();
+
+        let plaintext = b"vault signer seed";
+        let cms = CmsContentInfo::encrypt(
+            &certs,
+            plaintext,
+            Cipher::aes_256_cbc(),
+            CMSOptions::BINARY,
+        )
+        .unwrap();
+        let ciphertext_b64 = BASE64.encode(cms.to_der().unwrap());
+
+        assert_eq!(recipient.decrypt_b64(&ciphertext_b64).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn still_accepts_raw_rsa_oaep_ciphertext_for_compatibility() {
+        let recipient = RecipientKeyPair::generate().unwrap();
+        let plaintext = b"raw plaintext";
+        let ciphertext = recipient
+            .private_key
+            .to_public_key()
+            .encrypt(&mut OsRng, Oaep::new::<Sha256>(), plaintext)
+            .unwrap();
+
+        assert_eq!(recipient.decrypt_b64(&BASE64.encode(ciphertext)).unwrap(), plaintext);
+    }
+
+    fn self_signed_cert(pkey: &PKey<Private>) -> X509 {
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "a402-test-recipient")
+            .unwrap();
+        let name = name.build();
+
+        let mut cert = X509::builder().unwrap();
+        cert.set_version(2).unwrap();
+        cert.set_subject_name(&name).unwrap();
+        cert.set_issuer_name(&name).unwrap();
+        cert.set_pubkey(pkey).unwrap();
+        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
+        cert.sign(pkey, MessageDigest::sha256()).unwrap();
+        cert.build()
+    }
 }
