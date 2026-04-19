@@ -18,7 +18,10 @@ use solana_sdk_ids::system_program;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use tokio::time::{self, Duration};
+use tokio::{
+    task,
+    time::{self, Duration},
+};
 use tracing::{info, warn};
 
 use crate::audit;
@@ -675,26 +678,30 @@ async fn submit_atomic_chunk(
         })
         .collect();
 
-    let instructions = {
+    let program_id = state.vault.solana.program_id;
+    let rpc_url = state.vault.solana.rpc_url.clone();
+    let ws_url = state.vault.solana.ws_url.clone();
+    let vault_signer_pubkey = state.vault.vault_signer_pubkey;
+    let vault_config = state.vault.vault_config;
+    let vault_token_account = state.vault.solana.vault_token_account;
+
+    let instructions = task::spawn_blocking(move || {
         let program_payer = Rc::new(Keypair::new_from_array(signer_bytes));
         let client = Client::new_with_options(
-            Cluster::Custom(
-                state.vault.solana.rpc_url.clone(),
-                state.vault.solana.ws_url.clone(),
-            ),
+            Cluster::Custom(rpc_url, ws_url),
             program_payer,
             CommitmentConfig::confirmed(),
         );
         let program = client
-            .program(state.vault.solana.program_id)
+            .program(program_id)
             .map_err(|error| format!("failed to create Anchor program client: {error}"))?;
 
         let settle_ix = program
             .request()
             .accounts(SettleVault {
-                vault_signer: state.vault.vault_signer_pubkey,
-                vault_config: state.vault.vault_config,
-                vault_token_account: state.vault.solana.vault_token_account,
+                vault_signer: vault_signer_pubkey,
+                vault_config,
+                vault_token_account,
                 instructions_sysvar: sysvar::instructions::ID,
                 token_program: spl_token::ID,
             })
@@ -713,8 +720,8 @@ async fn submit_atomic_chunk(
         let record_audit_ix = program
             .request()
             .accounts(RecordAudit {
-                vault_signer: state.vault.vault_signer_pubkey,
-                vault_config: state.vault.vault_config,
+                vault_signer: vault_signer_pubkey,
+                vault_config,
                 instructions_sysvar: sysvar::instructions::ID,
                 system_program: system_program::ID,
             })
@@ -736,8 +743,10 @@ async fn submit_atomic_chunk(
             .instruction(record_audit_ix)
             .instructions()
             .map_err(|error| format!("failed to build atomic chunk instructions: {error}"))?;
-        instructions
-    };
+        Ok::<_, String>(instructions)
+    })
+    .await
+    .map_err(|error| format!("failed to join atomic chunk instruction builder: {error}"))??;
 
     let rpc = state.outbound.solana_rpc_client(
         state.vault.solana.rpc_url.clone(),
