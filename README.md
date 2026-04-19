@@ -319,7 +319,7 @@ AWS Console での推奨手順:
 
 - Nitro Enclaves 対応 instance type
 - Linux
-- 最低でも `m7i.xlarge` か同等以上
+- 最低でも `c6a.xlarge` か同等以上
 - ルートボリュームは 30GB 以上
 
 理由:

@@ -32,7 +32,7 @@ variable "ami_id" {
 variable "instance_type" {
   type        = string
   description = "Nitro Enclave capable EC2 instance type."
-  default     = "m7i.xlarge"
+  default     = "c6a.xlarge"
 }
 
 variable "key_name" {
