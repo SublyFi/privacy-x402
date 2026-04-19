@@ -9,8 +9,10 @@ const anchor = require("@coral-xyz/anchor");
 const {
   createAccount,
   getAccount,
+  getMint,
   mintTo,
   TOKEN_PROGRAM_ID,
+  transfer,
 } = require("@solana/spl-token");
 const { Keypair, PublicKey } = require("@solana/web3.js");
 
@@ -77,6 +79,13 @@ function requireEnv(name) {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function loadKeypairFromFile(filePath) {
+  const secretKey = Uint8Array.from(
+    JSON.parse(fs.readFileSync(filePath, "utf8"))
+  );
+  return Keypair.fromSecretKey(secretKey);
 }
 
 function signClientTextRequest(client, message) {
@@ -240,6 +249,20 @@ function buildPayment({
   };
 }
 
+function loadMintAuthority(provider, mintAuthority) {
+  if (mintAuthority === null) {
+    return null;
+  }
+  const walletPath = process.env.A402_USDC_MINT_AUTHORITY_WALLET;
+  if (walletPath) {
+    return loadKeypairFromFile(walletPath);
+  }
+  if (mintAuthority.equals(provider.wallet.publicKey)) {
+    return provider.wallet.payer;
+  }
+  return null;
+}
+
 async function main() {
   loadNitroEnv();
 
@@ -273,6 +296,8 @@ async function main() {
   const provider = loadProvider();
   anchor.setProvider(provider);
   const program = loadProgram(provider);
+  const mint = await getMint(provider.connection, new PublicKey(usdcMint));
+  const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
 
   const plan = {
     cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
@@ -285,6 +310,9 @@ async function main() {
     depositAmount,
     paymentAmountPerProvider: paymentAmount,
     providers: providers.map(({ id, tokenAccount }) => ({ id, tokenAccount })),
+    mintAuthority: mint.mintAuthority?.toBase58() ?? "disabled",
+    mintAuthorityWallet: process.env.A402_USDC_MINT_AUTHORITY_WALLET || null,
+    sourceTokenAccount: process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT || null,
   };
 
   if (process.env.A402_NITRO_E2E_CONFIRM !== "1") {
@@ -334,14 +362,36 @@ async function main() {
   );
 
   await fundAccount(provider, client.publicKey, providerSolLamports);
-  await mintTo(
-    provider.connection,
-    provider.wallet.payer,
-    new PublicKey(usdcMint),
-    clientTokenAccount,
-    provider.wallet.publicKey,
-    depositAmount
-  );
+  if (mintAuthority) {
+    await mintTo(
+      provider.connection,
+      provider.wallet.payer,
+      new PublicKey(usdcMint),
+      clientTokenAccount,
+      mintAuthority,
+      depositAmount
+    );
+  } else if (process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
+    const sourceOwner = process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+      ? loadKeypairFromFile(
+          process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+        )
+      : provider.wallet.payer;
+    await transfer(
+      provider.connection,
+      provider.wallet.payer,
+      new PublicKey(process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT),
+      clientTokenAccount,
+      sourceOwner,
+      depositAmount
+    );
+  } else {
+    throw new Error(
+      `USDC mint authority is ${
+        mint.mintAuthority?.toBase58() ?? "disabled"
+      }, not fee payer ${provider.wallet.publicKey.toBase58()}. Set A402_USDC_MINT_AUTHORITY_WALLET to the mint authority keypair, or set A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT to a funded token account.`
+    );
+  }
 
   const depositSig = await program.methods
     .deposit(new anchor.BN(depositAmount))
