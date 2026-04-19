@@ -13,15 +13,18 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::Utc;
 use ed25519_dalek::{Signature, VerifyingKey};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use spl_associated_token_account::get_associated_token_address;
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::adaptor_sig::AdaptorPreSignature;
 use crate::asc_manager;
@@ -1755,9 +1758,27 @@ pub async fn post_fire_batch(
     State(state): State<Arc<AppState>>,
     Json(_req): Json<FireBatchRequest>,
 ) -> Result<Json<FireBatchResponse>, EnclaveError> {
-    let result = batch::fire_batch_now(&state)
+    info!("Admin fire-batch requested");
+
+    let result = AssertUnwindSafe(batch::fire_batch_now(&state))
+        .catch_unwind()
         .await
+        .map_err(|panic| {
+            let message = panic_payload_message(panic.as_ref());
+            error!(%message, "Admin fire-batch panicked");
+            EnclaveError::Internal(format!("fire_batch panicked: {message}"))
+        })?
         .map_err(|error| EnclaveError::Internal(format!("fire_batch failed: {error}")))?;
+
+    info!(
+        submitted = result.submitted,
+        batch_id = ?result.batch_id,
+        provider_count = result.provider_count,
+        settlement_count = result.settlement_count,
+        total_amount = result.total_amount,
+        tx_signature_count = result.tx_signatures.len(),
+        "Admin fire-batch completed"
+    );
 
     Ok(Json(FireBatchResponse {
         ok: true,
@@ -1771,6 +1792,16 @@ pub async fn post_fire_batch(
 }
 
 // ── Helper functions ──
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic payload".to_string()
+}
 
 fn compute_request_hash(ctx: &RequestContext, payment_details_hash: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
