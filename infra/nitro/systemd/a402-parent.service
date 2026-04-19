@@ -7,16 +7,17 @@ Wants=network-online.target
 Type=simple
 User=a402
 Group=a402
-EnvironmentFile=/etc/a402/parent.env
 WorkingDirectory=/var/lib/a402
-ExecStart=/opt/a402/bin/a402-parent
+ExecStart=/opt/a402/bin/start-parent.sh /etc/a402/parent.env
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/a402 /var/log/a402 /etc/a402
+ReadWritePaths=/var/lib/a402 /var/log/a402 /etc/a402 /opt/a402
 
 [Install]
 WantedBy=multi-user.target
