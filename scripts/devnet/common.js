@@ -289,6 +289,7 @@ module.exports = {
   getJson,
   keypairFromSeedBase64,
   loadDefaultEnvFiles,
+  loadEnvFile,
   loadProgram,
   loadProvider,
   loadState,

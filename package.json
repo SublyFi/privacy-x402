@@ -14,6 +14,7 @@
     "nitro:run": "bash scripts/nitro/run-enclave.sh",
     "nitro:describe": "bash scripts/nitro/describe-enclave.sh",
     "nitro:terminate": "bash scripts/nitro/terminate-enclave.sh",
+    "nitro:register-providers": "node scripts/nitro/register-providers.js",
     "nitro:e2e": "node scripts/nitro/e2e.js",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
