@@ -19,6 +19,7 @@
     "demo:x402-direct": "node scripts/demo/direct-x402-demo.js",
     "demo:subly-private": "node scripts/demo/subly-agent-demo.js",
     "demo:compare": "node scripts/demo/compare.js",
+    "demo:url-swap-diff": "node scripts/demo/url-swap-diff.js",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },

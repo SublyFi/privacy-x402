@@ -36,5 +36,6 @@ console.log(
 console.log("");
 
 console.log("Commands for recording:");
+console.log("  yarn demo:url-swap-diff");
 console.log("  A402_DEMO_CONFIRM=1 yarn demo:x402-direct");
 console.log("  A402_DEMO_CONFIRM=1 yarn demo:subly-private");
