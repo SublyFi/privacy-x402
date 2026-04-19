@@ -32,8 +32,13 @@ use crate::wal::WalEntry;
 const BATCH_WINDOW_SEC: u64 = 120;
 const MAX_SETTLEMENT_DELAY_SEC: i64 = 900;
 const MAX_SETTLEMENTS_PER_TX: usize = 20;
-/// Max audit records per tx (settlement + audit in same tx)
-const MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT: usize = 4;
+/// Max audit records per atomic settle/audit transaction.
+///
+/// Solana transactions are capped at 1232 raw bytes. The paired
+/// settle_vault + record_audit transaction carries encrypted audit payloads,
+/// settlement accounts, audit PDAs, and the instructions sysvar, so larger
+/// chunks exceed the runtime limit before compute becomes the bottleneck.
+const MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT: usize = 2;
 const MIN_BATCH_PROVIDERS: usize = 2;
 const MAX_BATCH_JITTER_SEC: i64 = 30;
 /// Max age (seconds) for orphaned settlement_history entries before cleanup
@@ -1230,23 +1235,28 @@ mod tests {
         let entries: Vec<PreparedSettlement> = (0..6).map(sample_entry).collect();
         let chunks = build_batch_chunks(&entries);
 
-        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].start_index, 0);
-        assert_eq!(chunks[0].entries.len(), 3);
-        assert_eq!(chunks[1].start_index, 3);
-        assert_eq!(chunks[1].entries.len(), 3);
-        assert_eq!(chunks[1].entries[0].settlement_id, "set-3");
+        assert_eq!(chunks[0].entries.len(), 2);
+        assert_eq!(chunks[1].start_index, 2);
+        assert_eq!(chunks[1].entries.len(), 2);
+        assert_eq!(chunks[2].start_index, 4);
+        assert_eq!(chunks[2].entries.len(), 2);
+        assert_eq!(chunks[2].entries[0].settlement_id, "set-4");
     }
 
     #[test]
-    fn build_batch_chunks_avoids_tiny_tail_chunk() {
+    fn build_batch_chunks_caps_atomic_transaction_size() {
         let entries: Vec<PreparedSettlement> = (0..5).map(sample_entry).collect();
         let chunks = build_batch_chunks(&entries);
 
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].entries.len(), 3);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].entries.len(), 2);
         assert_eq!(chunks[1].entries.len(), 2);
-        assert_eq!(chunks[1].start_index, 3);
+        assert_eq!(chunks[2].entries.len(), 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.entries.len() <= MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT));
     }
 
     #[test]
