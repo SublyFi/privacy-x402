@@ -16,6 +16,9 @@
     "nitro:terminate": "bash scripts/nitro/terminate-enclave.sh",
     "nitro:register-providers": "node scripts/nitro/register-providers.js",
     "nitro:e2e": "node scripts/nitro/e2e.js",
+    "demo:x402-direct": "node scripts/demo/direct-x402-demo.js",
+    "demo:subly-private": "node scripts/demo/subly-agent-demo.js",
+    "demo:compare": "node scripts/demo/compare.js",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },
