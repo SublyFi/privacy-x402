@@ -81,6 +81,18 @@ function requireEnv(name) {
   return value;
 }
 
+function readPositiveIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
 function loadKeypairFromFile(filePath) {
   const secretKey = Uint8Array.from(
     JSON.parse(fs.readFileSync(filePath, "utf8"))
@@ -287,6 +299,14 @@ async function main() {
   const providerSolLamports = Number(
     process.env.A402_NITRO_E2E_CLIENT_SOL_LAMPORTS || "50000000"
   );
+  const batchWaitAttempts = readPositiveIntEnv(
+    "A402_NITRO_E2E_BATCH_WAIT_ATTEMPTS",
+    48
+  );
+  const batchWaitDelayMs = readPositiveIntEnv(
+    "A402_NITRO_E2E_BATCH_WAIT_DELAY_MS",
+    5000
+  );
   const providers = loadDemoProviders();
 
   if (depositAmount < paymentAmount * providers.length) {
@@ -313,6 +333,8 @@ async function main() {
     mintAuthority: mint.mintAuthority?.toBase58() ?? "disabled",
     mintAuthorityWallet: process.env.A402_USDC_MINT_AUTHORITY_WALLET || null,
     sourceTokenAccount: process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT || null,
+    batchWaitAttempts,
+    batchWaitDelayMs,
   };
 
   if (process.env.A402_NITRO_E2E_CONFIRM !== "1") {
@@ -472,25 +494,76 @@ async function main() {
     settlements.push({ providerId: demoProvider.id, verifyBody, settleBody });
   }
 
-  const providerTokenAfter = await waitForEndpoint(
-    "automatic batch settlement",
-    async () => {
-      const balances = [];
-      for (let index = 0; index < providers.length; index += 1) {
-        const account = await getAccount(
-          provider.connection,
-          new PublicKey(providers[index].tokenAccount)
-        );
-        balances.push(BigInt(account.amount.toString()));
-      }
-      const allSettled = balances.every((balance, index) => {
-        return balance >= providerTokenBefore[index] + BigInt(paymentAmount);
+  let providerTokenAfter;
+  try {
+    providerTokenAfter = await waitForEndpoint(
+      "automatic batch settlement",
+      async () => {
+        const balances = [];
+        for (let index = 0; index < providers.length; index += 1) {
+          const account = await getAccount(
+            provider.connection,
+            new PublicKey(providers[index].tokenAccount)
+          );
+          balances.push(BigInt(account.amount.toString()));
+        }
+        const allSettled = balances.every((balance, index) => {
+          return balance >= providerTokenBefore[index] + BigInt(paymentAmount);
+        });
+        return allSettled ? balances : null;
+      },
+      batchWaitAttempts,
+      batchWaitDelayMs
+    );
+  } catch (error) {
+    const providerTokenCurrent = [];
+    for (let index = 0; index < providers.length; index += 1) {
+      const account = await getAccount(
+        provider.connection,
+        new PublicKey(providers[index].tokenAccount)
+      );
+      providerTokenCurrent.push(account.amount.toString());
+    }
+
+    const settlementStatuses = [];
+    for (const settlement of settlements) {
+      const demoProvider = providers.find(
+        (item) => item.id === settlement.providerId
+      );
+      const response = await postJson(
+        enclaveUrl,
+        "/v1/settlement/status",
+        {
+          settlementId: settlement.settleBody.settlementId,
+        },
+        {
+          Authorization: `Bearer ${demoProvider.apiKey}`,
+          "x-a402-provider-id": demoProvider.id,
+        }
+      );
+      settlementStatuses.push({
+        providerId: settlement.providerId,
+        settlementId: settlement.settleBody.settlementId,
+        httpStatus: response.status,
+        body: await response.text(),
       });
-      return allSettled ? balances : null;
-    },
-    18,
-    5000
-  );
+    }
+
+    throw new Error(
+      `Timed out waiting for automatic batch settlement: ${JSON.stringify(
+        {
+          message: error.message,
+          providerTokenBefore: providerTokenBefore.map((value) =>
+            value.toString()
+          ),
+          providerTokenCurrent,
+          settlementStatuses,
+        },
+        null,
+        2
+      )}`
+    );
+  }
 
   const finalBalanceAuth = buildClientRequestAuth(
     client,
