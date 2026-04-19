@@ -441,13 +441,9 @@ mod tests {
         certs.push(cert).unwrap();
 
         let plaintext = b"vault signer seed";
-        let cms = CmsContentInfo::encrypt(
-            &certs,
-            plaintext,
-            Cipher::aes_256_cbc(),
-            CMSOptions::BINARY,
-        )
-        .unwrap();
+        let cms =
+            CmsContentInfo::encrypt(&certs, plaintext, Cipher::aes_256_cbc(), CMSOptions::BINARY)
+                .unwrap();
         let ciphertext_b64 = BASE64.encode(cms.to_der().unwrap());
 
         assert_eq!(recipient.decrypt_b64(&ciphertext_b64).unwrap(), plaintext);
@@ -463,7 +459,10 @@ mod tests {
             .encrypt(&mut OsRng, Oaep::new::<Sha256>(), plaintext)
             .unwrap();
 
-        assert_eq!(recipient.decrypt_b64(&BASE64.encode(ciphertext)).unwrap(), plaintext);
+        assert_eq!(
+            recipient.decrypt_b64(&BASE64.encode(ciphertext)).unwrap(),
+            plaintext
+        );
     }
 
     fn self_signed_cert(pkey: &PKey<Private>) -> X509 {

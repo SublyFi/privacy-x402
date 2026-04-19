@@ -3699,12 +3699,8 @@ mod tests {
         let channel_id = open_res.0.channel_id.clone();
 
         let request_hash_hex = "cc".repeat(32);
-        let request_message = build_channel_request_message(
-            &channel_id,
-            "req-expired",
-            1_250_000,
-            &request_hash_hex,
-        );
+        let request_message =
+            build_channel_request_message(&channel_id, "req-expired", 1_250_000, &request_hash_hex);
         let _ = post_channel_request(
             State(state.clone()),
             Json(ChannelRequestReq {

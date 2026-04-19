@@ -111,6 +111,7 @@ where
     let tmp_path = file_path.with_extension("tmp");
     fs::write(&tmp_path, &data).await?;
     fs::rename(&tmp_path, &file_path).await?;
+    write_key_sidecar(&file_path, &key).await?;
 
     info!("Snapshot PUT: {} ({} bytes)", key, data.len());
     send_ok(stream, &[]).await
@@ -141,6 +142,8 @@ where
 
     let mut entries = Vec::new();
     collect_entries(base_dir, base_dir, &prefix, &mut entries).await?;
+    entries.sort();
+    entries.dedup();
 
     let result = serde_json::to_vec(&entries).unwrap_or_default();
     info!(
@@ -160,6 +163,7 @@ where
 
     match fs::remove_file(&file_path).await {
         Ok(()) => {
+            let _ = fs::remove_file(key_sidecar_path(&file_path)).await;
             info!("Snapshot DELETE: {}", key);
             send_ok(stream, &[]).await
         }
@@ -184,14 +188,19 @@ async fn collect_entries(
         let path = entry.path();
         if path.is_dir() {
             Box::pin(collect_entries(base_dir, &path, prefix, entries)).await?;
-        } else {
-            let rel = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            if rel.starts_with(prefix) && !rel.ends_with(".tmp") {
-                entries.push(rel);
+        } else if is_blob_path(&path) {
+            let logical_key = match fs::read_to_string(key_sidecar_path(&path)).await {
+                Ok(key) => Some(key),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    legacy_logical_key_from_path(&path)
+                }
+                Err(e) => return Err(e),
+            };
+
+            if let Some(logical_key) = logical_key {
+                if logical_key.starts_with(prefix) {
+                    entries.push(logical_key);
+                }
             }
         }
     }
@@ -207,6 +216,53 @@ fn key_to_path(base_dir: &Path, key: &str) -> PathBuf {
     // Use first 4 hex chars as subdirectory for distribution
     let subdir = &hash[..4];
     base_dir.join(subdir).join(key.replace('/', "_"))
+}
+
+fn key_sidecar_path(blob_path: &Path) -> PathBuf {
+    let Some(file_name) = blob_path.file_name() else {
+        return blob_path.with_extension("key");
+    };
+    let sidecar_name = format!("{}.key", file_name.to_string_lossy());
+    blob_path.with_file_name(sidecar_name)
+}
+
+async fn write_key_sidecar(blob_path: &Path, key: &str) -> io::Result<()> {
+    let sidecar_path = key_sidecar_path(blob_path);
+    let tmp_path = sidecar_path.with_extension("tmp");
+    fs::write(&tmp_path, key.as_bytes()).await?;
+    fs::rename(&tmp_path, sidecar_path).await
+}
+
+fn is_blob_path(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    !file_name.ends_with(".tmp") && !file_name.ends_with(".key")
+}
+
+fn legacy_logical_key_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    parse_legacy_key(file_name)
+}
+
+fn parse_legacy_key(file_name: &str) -> Option<String> {
+    if let Some(rest) = file_name.strip_prefix("wal_") {
+        let (vault, object) = rest.split_once("_wal-")?;
+        return Some(format!("wal/{vault}/wal-{object}"));
+    }
+
+    if let Some(rest) = file_name.strip_prefix("snapshot_") {
+        let (vault, object) = rest.split_once("_snapshot-")?;
+        return Some(format!("snapshot/{vault}/snapshot-{object}"));
+    }
+
+    if let Some(rest) = file_name.strip_prefix("meta_") {
+        let (vault, object) = rest.split_once("_snapshot-data-key.")?;
+        return Some(format!("meta/{vault}/snapshot-data-key.{object}"));
+    }
+
+    None
 }
 
 async fn read_key<S>(stream: &mut S) -> io::Result<String>
@@ -265,4 +321,88 @@ where
     stream.write_u32_le(bytes.len() as u32).await?;
     stream.write_all(bytes).await?;
     stream.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_snapshot_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "a402-parent-snapshot-store-{}-{nonce}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn parses_legacy_hashed_storage_names_to_logical_keys() {
+        assert_eq!(
+            parse_legacy_key("wal_4616xGE_wal-00000000000000000001.json").as_deref(),
+            Some("wal/4616xGE/wal-00000000000000000001.json")
+        );
+        assert_eq!(
+            parse_legacy_key("snapshot_4616xGE_snapshot-00000000000000000002.json").as_deref(),
+            Some("snapshot/4616xGE/snapshot-00000000000000000002.json")
+        );
+        assert_eq!(
+            parse_legacy_key("meta_4616xGE_snapshot-data-key.ciphertext").as_deref(),
+            Some("meta/4616xGE/snapshot-data-key.ciphertext")
+        );
+        assert!(parse_legacy_key("unrelated_file.json").is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_entries_lists_logical_keys_from_sidecars() {
+        let base_dir = temp_snapshot_dir();
+        let key = "wal/4616xGE/wal-00000000000000000001.json";
+        let blob_path = key_to_path(&base_dir, key);
+        fs::create_dir_all(blob_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&blob_path, b"encrypted-wal").await.unwrap();
+        write_key_sidecar(&blob_path, key).await.unwrap();
+
+        let mut entries = Vec::new();
+        collect_entries(&base_dir, &base_dir, "wal/4616xGE", &mut entries)
+            .await
+            .unwrap();
+
+        assert_eq!(entries, vec![key.to_string()]);
+        let _ = fs::remove_dir_all(base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn collect_entries_lists_legacy_wal_files_without_sidecars() {
+        let base_dir = temp_snapshot_dir();
+        let legacy_dir = base_dir.join("abcd");
+        fs::create_dir_all(&legacy_dir).await.unwrap();
+        fs::write(
+            legacy_dir.join("wal_4616xGE_wal-00000000000000000001.json"),
+            b"encrypted-wal",
+        )
+        .await
+        .unwrap();
+
+        let mut entries = Vec::new();
+        collect_entries(&base_dir, &base_dir, "wal/4616xGE", &mut entries)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            entries,
+            vec!["wal/4616xGE/wal-00000000000000000001.json".to_string()]
+        );
+        let _ = fs::remove_dir_all(base_dir).await;
+    }
 }
