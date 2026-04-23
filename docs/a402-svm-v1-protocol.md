@@ -522,7 +522,7 @@ batch は以下のいずれかで発火する:
 
 1. batch window 経過
 2. pending provider count が `MAX_SETTLEMENTS_PER_TX` に達した
-3. oldest provider credit が `MAX_SETTLEMENT_DELAY_SEC` に達した
+3. oldest batch-eligible settlement が `MAX_SETTLEMENT_DELAY_SEC` に達した
 
 ### 10.2 Privacy Rules
 
@@ -532,7 +532,8 @@ batch は以下のいずれかで発火する:
 - facilitator SHOULD defer automatic batch inclusion for provider credits smaller than a configured payout floor (Phase 1 推奨: `AUTO_BATCH_MIN_PROVIDER_PAYOUT = 1_000_000` atomic units = 1 USDC) and wait for aggregation, unless `MAX_SETTLEMENT_DELAY_SEC` has been reached
 - batch submit 時刻には jitter を入れる
 - provider には `/settle` 成功時点で off-chain receipt を返し、on-chain 着金より前に credit を確定させる
-- `MIN_BATCH_PROVIDERS = 2`（Phase 1 推奨値）: batch 内の provider 数がこの値未満の場合、`MAX_SETTLEMENT_DELAY_SEC` まで待機して他の provider の credit と合流させる。`MAX_SETTLEMENT_DELAY_SEC` に達しても `MIN_BATCH_PROVIDERS` 未満なら provider 1 件でも settlement する（資金遅延回避を優先）。この場合でも settle_vault tx は Vault→Provider の送金のみで client 情報は含まれないため、linkability は「この期間にこの provider を使った誰かがいる」レベルに留まる
+- `MIN_ANONYMITY_WINDOW_SEC = 60`（Phase 1 推奨値、env `A402_MIN_ANONYMITY_WINDOW_SEC`）: 各 settlement は age がこの値に達するまで automatic batch の対象外になる。old sibling が先に支払い対象になっても、fresh sibling は window を満たすまで vault 内で aging を続ける。batch cadence から独立して個別 settlement に最低待機時間を与えるための time-based anonymity gate。
+- `MIN_BATCH_PROVIDERS = 1`（Phase 1 デフォルト、env `A402_MIN_BATCH_PROVIDERS`）: batch 内の provider 数がこの値未満の場合、`MAX_SETTLEMENT_DELAY_SEC` まで待機して他の provider の credit と合流させる。`1` は time-based anonymity gate だけに依存する最小設定。高ボリューム時は `2` 以上に上げて k-anonymity を併用する。いずれにせよ settle_vault tx は Vault→Provider の送金のみで client 情報は含まれないため、linkability は「この期間にこの provider を使った誰かがいる」レベルに留まる
 
 ### 10.3 Batch Receipts
 

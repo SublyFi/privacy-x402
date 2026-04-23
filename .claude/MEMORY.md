@@ -49,7 +49,7 @@ Anchor program implemented and all tests passing.
 - Atomic nonces for receipts and withdrawals
 
 ### Background Tasks
-- Batch settlement loop (120s window, MIN_BATCH_PROVIDERS=2, MAX_SETTLEMENT_DELAY=900s)
+- Batch settlement loop (120s window, MIN_BATCH_PROVIDERS=1 by default, MAX_SETTLEMENT_DELAY=900s)
 - Reservation expiry loop (60s timeout)
 - Deposit detection loop (polling mode for local dev, production uses logsSubscribe)
 
@@ -479,3 +479,85 @@ Anchor program implemented and all tests passing.
 
 ### Remaining gaps after this pass
 - Provider auth still does not implement true mTLS mode; only `bearer` and `api-key` are supported
+
+## Public launch prep — P0/P1 implementation (2026-04-23) ✅
+
+### Motivation
+Ship "privacy-first x402 on Solana" as a Devnet MVP. Phase 3 ASC demo integration and Phase 5 Arcium yield were postponed. Focus: minimum correctness + packaging to credibly open the Devnet endpoint to external developers.
+
+### P0-1: SDK PCR pinning fail-closed
+- `sdk/src/attestation.ts` now calls `assertPcrPinningConfigured()` at the top of `verifyNitroAttestationDocument`.
+- Throws unless `nitroAttestation.policy.pcrs` or `nitroAttestation.expectedPcrs` is provided.
+- `allowMissingPcrPinning: true` is the explicit escape hatch.
+- Added `tests/attestation_sdk.ts → "requires PCR pinning when verifying a Nitro attestation"`.
+
+### P0-2 / P0-3: verified already correct
+- VaultStatus cache: production path (`handlers.rs:154-180`) always hits RPC; only `cfg(test)` uses cached lifecycle.
+- DISPUTE_WINDOW_SEC = 86400 (24h) consistent across program, CLAUDE.md, design doc, tests. Earlier memo about a 24h/7d conflict was stale.
+
+### P0-4: Time-based anonymity window (primary change)
+- `enclave/src/batch.rs`:
+  - New constants `DEFAULT_MIN_ANONYMITY_WINDOW_SEC = 60`, `DEFAULT_MIN_BATCH_PROVIDERS = 1`.
+  - `BatchPrivacyConfig` gained `min_anonymity_window_sec` and `min_batch_providers` (env: `A402_MIN_ANONYMITY_WINDOW_SEC`, `A402_MIN_BATCH_PROVIDERS`).
+  - Automatic batching now filters settlement_ids per provider by each settlement's own age, then applies the payout floor to the eligible-only subtotal.
+  - `decide_batch_action()` takes `min_batch_providers` as a parameter (was hard-coded `MIN_BATCH_PROVIDERS = 2`).
+- Effect: every settlement spends at least `min_anonymity_window_sec` in the vault before it can be batched on-chain, regardless of N. Default posture works with N=1 so the vault is usable from day one.
+- Added unit tests for the window, N=1 fire, N=2 skip, eligible-only payout-floor semantics, and flush-mode bypass.
+
+### P1-7: SDK + middleware npm publish prep
+- `sdk/package.json` (`subly402-sdk`, v0.1.0) + `sdk/tsconfig.json` + `sdk/README.md`.
+- `middleware/package.json` (`subly402-express`, v0.1.0) + `middleware/tsconfig.json` + `middleware/README.md`.
+- Both packages build under `strict: true`, `declaration: true` and pack cleanly.
+- Strict-mode fixes: `sdk/src/subly402.ts` signature lookup cast, `middleware/src/middleware.ts` `capturedStatus` declared as `number | undefined`.
+- `dist/` excluded from git.
+
+### P1-8: Developer quickstart doc
+- `docs/quickstart.md`: client SDK 5-line example, provider middleware example, privacy defaults table (incl. new MIN_ANONYMITY_WINDOW_SEC), pointer to Nitro README and protocol specs.
+
+### Verified commands
+- `NO_DNA=1 cargo test --workspace` — 79 tests passing (59 enclave + 8 asc_claim/ed25519 + 6 vault + 6 watchtower)
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit` — clean
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/attestation_sdk.ts tests/audit_tool.ts tests/middleware_raw_body.ts` — 13 passing
+- `(cd sdk && ../node_modules/.bin/tsc -p tsconfig.json && npm pack --dry-run)` — 37.5 kB tarball
+- `(cd middleware && ../node_modules/.bin/tsc -p tsconfig.json && npm pack --dry-run)` — 23.2 kB tarball
+
+### Outstanding for actual public launch (operator actions, not code)
+- Deploy the Nitro stack to a public Devnet URL (README §1-5)
+- Publish `attestationPolicyHash` + PCR pinning values so external SDK users can configure `nitroAttestation.policy`
+- Verify npm name availability of `subly402-sdk` / `subly402-express` before first publish
+
+## Codex review pass — 4 findings fixed (2026-04-23) ✅
+
+### Motivation
+External Codex review caught 4 real issues I missed in my own review pass. All 4 were legitimate bugs or strength gaps for a public launch. Fixed with regression tests.
+
+### #1 (高) Per-settlement age filter (was: provider-level)
+- `enclave/src/batch.rs`: extracted `select_provider_batch_entries()` as a pure function that filters an incoming `(settlement_id, timestamp, amount)` list against both `settlement_is_age_eligible()` and `provider_payout_floor_satisfied()`.
+- `prepare_batch` now calls this per-provider after building the timestamped candidate list, so a fresh credit attached to an already-old `ProviderCredit.oldest_credit_at` is correctly deferred until its own age clears the window.
+- Made `MEMORY.md` / `quickstart.md` claim ("every settlement spends at least min_anonymity_window_sec") match reality.
+- Expanded batch unit coverage to 17 tests total, including mixed fresh/old, fresh-only skip, eligible-only payout-floor semantics, liveness ceiling semantics, flush-mode bypass, and config parsing.
+- `cargo test -p a402-enclave` currently passes with 64 tests.
+
+### #2 (中) SDK attestation cache re-validation
+- `sdk/src/subly402.ts` `Subly402Client.verifyAttestation()` now calls `cacheEntryStaleReason()` on every cache hit. Evicts + re-fetches when:
+  - cached vaultConfig/vaultSigner/attestationPolicyHash no longer matches the new PaymentDetails
+  - cached `expiresAt` is within 60s of now (`EXPIRY_SAFETY_MARGIN_MS`) or invalid
+- Regression: `tests/subly402_interface.ts → "re-fetches a cached attestation whose details no longer match"`.
+
+### #3 (中) middleware attestationPromise finally-reset
+- `middleware/src/subly402.ts` `Subly402FacilitatorClient.getAttestation()` used `??=` so a rejected attestation Promise stayed cached and bricked the seller until restart.
+- Fix: attach `.finally` that clears `this.attestationPromise` when it settles (if still the same reference). Successful fetches fill `this.attestation` which short-circuits future calls; failed fetches allow the next caller to retry cleanly.
+- Regression: `tests/subly402_interface.ts → "retries attestation fetch after a transient facilitator failure"`.
+
+### #4 (低) Body hash for non-string BodyInit
+- `sdk/src/crypto.ts`: new `bodyToBytes()` helper handles string / Buffer / Uint8Array / ArrayBuffer / ArrayBufferView and throws a clear error for Blob / FormData / URLSearchParams / ReadableStream.
+- Both `Subly402Client` and `A402Client` now hash via `sha256hex(bodyToBytes(options?.body))` instead of `options?.body?.toString()`.
+- Prevents silent server-side verify mismatch for binary AI-agent payloads (embeddings, audio, images).
+- Regression: `tests/attestation_sdk.ts → "hashes request bodies by actual bytes, not toString()"`.
+
+### Verified commands
+- `NO_DNA=1 cargo test --workspace` — 86 tests passing (66 enclave + 8 asc_claim/ed25519 + 6 vault + 6 watchtower)
+- `./node_modules/.bin/tsc -p ./tsconfig.json --noEmit` — clean
+- `yarn ts-mocha -p ./tsconfig.json -t 30000 tests/attestation_sdk.ts tests/audit_tool.ts tests/middleware_raw_body.ts tests/subly402_interface.ts` — 18 passing
+- `(cd sdk && ../node_modules/.bin/tsc -p tsconfig.json && npm pack --dry-run)` — packs clean
+- `(cd middleware && ../node_modules/.bin/tsc -p tsconfig.json && npm pack --dry-run)` — packs clean

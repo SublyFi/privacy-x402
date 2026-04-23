@@ -39,11 +39,19 @@ const MAX_SETTLEMENTS_PER_TX: usize = 20;
 /// settlement accounts, audit PDAs, and the instructions sysvar, so larger
 /// chunks exceed the runtime limit before compute becomes the bottleneck.
 const MAX_ATOMIC_SETTLEMENTS_WITH_AUDIT: usize = 2;
-const MIN_BATCH_PROVIDERS: usize = 2;
 const MAX_BATCH_JITTER_SEC: i64 = 30;
 /// Max age (seconds) for orphaned settlement_history entries before cleanup
 const SETTLEMENT_HISTORY_MAX_AGE_SEC: i64 = 1800;
 const DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC: u64 = 1_000_000;
+/// Minimum age (seconds) for an individual settlement before it is eligible
+/// for an automatic batch. Guarantees every settlement was held in the vault
+/// for at least this long, so on-chain observers cannot trivially correlate a
+/// fresh deposit/reservation with an immediate payout to a provider.
+const DEFAULT_MIN_ANONYMITY_WINDOW_SEC: i64 = 60;
+/// Default minimum number of distinct providers in a batch. `1` means the
+/// time-based anonymity window is the sole anonymity knob; operators who want
+/// to additionally require N-way mixing can raise this via env.
+const DEFAULT_MIN_BATCH_PROVIDERS: usize = 1;
 
 /// Settlement entry ready for on-chain batch
 #[derive(Debug, Clone)]
@@ -105,12 +113,24 @@ pub struct BatchPrivacyConfig {
     /// Automatic batches defer provider payouts smaller than this floor unless
     /// `MAX_SETTLEMENT_DELAY_SEC` is hit. Set to 0 to disable.
     pub auto_batch_min_provider_payout_atomic: u64,
+    /// Minimum age (seconds) for an individual settlement before it is
+    /// eligible for an automatic batch. Guarantees a minimum anonymity window
+    /// for every settlement, independent of batch cadence. Set to 0 to
+    /// disable (not recommended for public deployments).
+    pub min_anonymity_window_sec: i64,
+    /// Minimum distinct providers required in an automatic batch. `1`
+    /// effectively disables the N-way mixing gate and relies solely on the
+    /// time-based anonymity window. Raise this when volume supports it to
+    /// enforce k-anonymity in addition to the time window.
+    pub min_batch_providers: usize,
 }
 
 impl Default for BatchPrivacyConfig {
     fn default() -> Self {
         Self {
             auto_batch_min_provider_payout_atomic: DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC,
+            min_anonymity_window_sec: DEFAULT_MIN_ANONYMITY_WINDOW_SEC,
+            min_batch_providers: DEFAULT_MIN_BATCH_PROVIDERS,
         }
     }
 }
@@ -123,8 +143,28 @@ impl BatchPrivacyConfig {
                 panic!("A402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC must be a valid u64")
             });
         }
+        if let Ok(value) = std::env::var("A402_MIN_ANONYMITY_WINDOW_SEC") {
+            config.min_anonymity_window_sec =
+                parse_nonnegative_i64_env("A402_MIN_ANONYMITY_WINDOW_SEC", &value);
+        }
+        if let Ok(value) = std::env::var("A402_MIN_BATCH_PROVIDERS") {
+            let parsed: usize = value
+                .parse()
+                .unwrap_or_else(|_| panic!("A402_MIN_BATCH_PROVIDERS must be a valid usize"));
+            config.min_batch_providers = parsed.max(1);
+        }
         config
     }
+}
+
+fn parse_nonnegative_i64_env(name: &str, value: &str) -> i64 {
+    let parsed = value
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("{name} must be a valid non-negative i64"));
+    if parsed < 0 {
+        panic!("{name} must be a valid non-negative i64");
+    }
+    parsed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,21 +198,14 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
         let now = chrono::Utc::now().timestamp();
         let last_batch = *state.vault.last_batch_at.read().await;
         let elapsed = now - last_batch;
-
-        let mut oldest_credit_age: i64 = 0;
-        let mut provider_count = 0;
-
-        for entry in state.vault.provider_credits.iter() {
-            if entry.credited_amount > 0 {
-                let age = now - entry.oldest_credit_at;
-                if age > oldest_credit_age {
-                    oldest_credit_age = age;
-                }
-                if provider_is_auto_batchable(entry.credited_amount, age, batch_privacy) {
-                    provider_count += 1;
-                }
-            }
-        }
+        let cursors =
+            build_provider_batch_cursors(&state, now, BatchBuildMode::Auto, batch_privacy);
+        let provider_count = cursors.len();
+        let oldest_credit_age = cursors
+            .iter()
+            .map(|cursor| now - cursor.oldest_credit_at)
+            .max()
+            .unwrap_or(0);
 
         let sampled_jitter_sec = rand::thread_rng().gen_range(0..=MAX_BATCH_JITTER_SEC);
         let (decision, next_deadline) = decide_batch_action(
@@ -182,6 +215,7 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
             oldest_credit_age,
             jitter_deadline,
             sampled_jitter_sec,
+            batch_privacy.min_batch_providers,
         );
 
         if matches!(decision, BatchLoopDecision::Wait) && jitter_deadline != next_deadline {
@@ -330,53 +364,21 @@ async fn prepare_batch(
         .auditor_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
     let batch_privacy = state.batch_privacy;
-    let cursors: Vec<ProviderBatchCursor> = state
-        .vault
-        .provider_credits
-        .iter()
-        .filter(|entry| {
-            if entry.credited_amount == 0 {
-                return false;
-            }
-            match mode {
-                BatchBuildMode::Flush => true,
-                BatchBuildMode::Auto => provider_is_auto_batchable(
-                    entry.credited_amount,
-                    batch_timestamp - entry.oldest_credit_at,
-                    batch_privacy,
-                ),
-            }
-        })
-        .map(|entry| ProviderBatchCursor {
-            provider_id: entry.provider_id.clone(),
-            oldest_credit_at: entry.oldest_credit_at,
-            settlement_ids: entry.settlement_ids.clone(),
-            next_index: 0,
-        })
-        .collect();
+    let cursors = build_provider_batch_cursors(state, batch_timestamp, mode, batch_privacy);
 
     let mut prepared: Vec<PreparedSettlement> = Vec::new();
     for (provider_id, sid) in select_batch_settlement_ids(cursors, MAX_SETTLEMENTS_PER_TX) {
-        let record = if let Some(record) = state.vault.settlement_history.get(&sid) {
-            record.clone()
-        } else if let Some(record) = reconstruct_settlement_record(state, &provider_id, &sid) {
+        let Some(record) = state
+            .vault
+            .settlement_history
+            .get(&sid)
+            .map(|rec| rec.clone())
+        else {
             warn!(
                 settlement_id = %sid,
                 provider_id = %provider_id,
-                "Reconstructed missing settlement_history entry from reservation state"
+                "Settlement history entry disappeared between filter and selection"
             );
-            state
-                .vault
-                .settlement_history
-                .insert(sid.clone(), record.clone());
-            record
-        } else {
-            warn!(
-                settlement_id = %sid,
-                provider_id = %provider_id,
-                "Pruning provider credit with missing settlement_history and reservation state"
-            );
-            prune_missing_settlement_reference(state, &provider_id, &sid);
             continue;
         };
 
@@ -406,6 +408,79 @@ async fn prepare_batch(
     }
 
     Ok(prepared)
+}
+
+/// Build per-provider cursors with the exact set of settlements that are
+/// eligible for the current batch. This is shared by the batch loop and the
+/// batch builder so the "should we fire?" decision sees the same filtered
+/// subset that `prepare_batch()` will actually submit.
+fn build_provider_batch_cursors(
+    state: &Arc<AppState>,
+    batch_timestamp: i64,
+    mode: BatchBuildMode,
+    batch_privacy: BatchPrivacyConfig,
+) -> Vec<ProviderBatchCursor> {
+    let provider_snapshots: Vec<(String, Vec<String>)> = state
+        .vault
+        .provider_credits
+        .iter()
+        .map(|entry| (entry.provider_id.clone(), entry.settlement_ids.clone()))
+        .collect();
+
+    let mut cursors: Vec<ProviderBatchCursor> = Vec::new();
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for (provider_id, settlement_ids) in provider_snapshots {
+        let mut timestamped: Vec<(String, i64, u64)> = Vec::with_capacity(settlement_ids.len());
+        for sid in settlement_ids {
+            let record_opt = state
+                .vault
+                .settlement_history
+                .get(&sid)
+                .map(|rec| rec.clone())
+                .or_else(|| {
+                    let rec = reconstruct_settlement_record(state, &provider_id, &sid)?;
+                    warn!(
+                        settlement_id = %sid,
+                        provider_id = %provider_id,
+                        "Reconstructed missing settlement_history entry from reservation state"
+                    );
+                    state
+                        .vault
+                        .settlement_history
+                        .insert(sid.clone(), rec.clone());
+                    Some(rec)
+                });
+
+            match record_opt {
+                Some(record) => timestamped.push((sid, record.timestamp, record.amount)),
+                None => missing.push((provider_id.clone(), sid)),
+            }
+        }
+
+        let Some(selection) =
+            select_provider_batch_entries(&timestamped, batch_timestamp, mode, batch_privacy)
+        else {
+            continue;
+        };
+
+        cursors.push(ProviderBatchCursor {
+            provider_id,
+            oldest_credit_at: selection.oldest_timestamp,
+            settlement_ids: selection.settlement_ids,
+            next_index: 0,
+        });
+    }
+
+    for (provider_id, sid) in missing {
+        warn!(
+            settlement_id = %sid,
+            provider_id = %provider_id,
+            "Pruning provider credit with missing settlement_history and reservation state"
+        );
+        prune_missing_settlement_reference(state, &provider_id, &sid);
+    }
+
+    cursors
 }
 
 fn reconstruct_settlement_record(
@@ -485,6 +560,7 @@ fn decide_batch_action(
     oldest_credit_age: i64,
     jitter_deadline: Option<i64>,
     sampled_jitter_sec: i64,
+    min_batch_providers: usize,
 ) -> (BatchLoopDecision, Option<i64>) {
     if provider_count == 0 {
         return (BatchLoopDecision::Skip, None);
@@ -498,7 +574,7 @@ fn decide_batch_action(
     }
 
     let deadline_reached = oldest_credit_age >= MAX_SETTLEMENT_DELAY_SEC;
-    if provider_count < MIN_BATCH_PROVIDERS && !deadline_reached {
+    if provider_count < min_batch_providers && !deadline_reached {
         return (BatchLoopDecision::Skip, None);
     }
 
@@ -514,20 +590,92 @@ fn decide_batch_action(
     (BatchLoopDecision::Fire, None)
 }
 
-fn provider_is_auto_batchable(
-    credited_amount: u64,
-    oldest_credit_age: i64,
+/// Result of filtering a provider's settlement_ids down to the age-eligible
+/// subset. `None` means this provider contributes nothing to the current batch.
+struct ProviderBatchSelection {
+    settlement_ids: Vec<String>,
+    oldest_timestamp: i64,
+}
+
+/// Per-provider filter. Takes the full list of candidate
+/// `(settlement_id, timestamp, amount)` for a provider and returns the subset
+/// that satisfies the anonymity window and payout-floor rules. Pure so it can
+/// be unit-tested without spinning up AppState.
+fn select_provider_batch_entries(
+    candidates: &[(String, i64, u64)],
+    batch_timestamp: i64,
+    mode: BatchBuildMode,
     config: BatchPrivacyConfig,
-) -> bool {
-    if credited_amount == 0 {
-        return false;
-    }
-    if oldest_credit_age >= MAX_SETTLEMENT_DELAY_SEC {
-        return true;
+) -> Option<ProviderBatchSelection> {
+    let mut eligible_ids: Vec<String> = Vec::new();
+    let mut eligible_amount: u64 = 0;
+    let mut eligible_oldest_timestamp: Option<i64> = None;
+
+    for (sid, timestamp, amount) in candidates {
+        let age = batch_timestamp - timestamp;
+        let is_eligible = match mode {
+            BatchBuildMode::Flush => true,
+            BatchBuildMode::Auto => settlement_is_age_eligible(age, config),
+        };
+        if !is_eligible {
+            continue;
+        }
+
+        eligible_amount = eligible_amount.saturating_add(*amount);
+        eligible_oldest_timestamp = Some(
+            eligible_oldest_timestamp
+                .map(|current: i64| current.min(*timestamp))
+                .unwrap_or(*timestamp),
+        );
+        eligible_ids.push(sid.clone());
     }
 
+    if eligible_ids.is_empty() {
+        return None;
+    }
+
+    let oldest_timestamp = eligible_oldest_timestamp.unwrap_or(batch_timestamp);
+    let eligible_oldest_age = batch_timestamp - oldest_timestamp;
+
+    if matches!(mode, BatchBuildMode::Auto)
+        && !provider_payout_floor_satisfied(eligible_amount, eligible_oldest_age, config)
+    {
+        return None;
+    }
+
+    Some(ProviderBatchSelection {
+        settlement_ids: eligible_ids,
+        oldest_timestamp,
+    })
+}
+
+/// Per-settlement eligibility. A settlement must have aged at least
+/// `min_anonymity_window_sec` before it can be included in an automatic batch,
+/// unless `MAX_SETTLEMENT_DELAY_SEC` liveness ceiling has been reached.
+fn settlement_is_age_eligible(age: i64, config: BatchPrivacyConfig) -> bool {
+    if age >= MAX_SETTLEMENT_DELAY_SEC {
+        return true;
+    }
+    age >= config.min_anonymity_window_sec
+}
+
+/// Provider-level payout floor. Applied to the *eligible* subset (settlements
+/// that have already cleared the anonymity window), so that a provider whose
+/// eligible aggregate is below the configured minimum payout defers the batch.
+/// The `MAX_SETTLEMENT_DELAY_SEC` liveness ceiling still forces a fire.
+fn provider_payout_floor_satisfied(
+    eligible_amount: u64,
+    eligible_oldest_age: i64,
+    config: BatchPrivacyConfig,
+) -> bool {
+    if eligible_amount == 0 {
+        return false;
+    }
+    if eligible_oldest_age >= MAX_SETTLEMENT_DELAY_SEC {
+        return true;
+    }
     config.auto_batch_min_provider_payout_atomic == 0
-        || credited_amount >= config.auto_batch_min_provider_payout_atomic
+        || eligible_amount >= config.auto_batch_min_provider_payout_atomic
 }
 
 /// A chunk of settlements + audits to be submitted in a single atomic transaction.
@@ -1146,7 +1294,7 @@ async fn reservation_expiry_loop(state: Arc<AppState>) {
         }
 
         // Clean up orphaned settlement_history entries that are older than the max age.
-        // These can accumulate when batches don't fire (e.g., provider count < MIN_BATCH_PROVIDERS).
+        // These can accumulate when batches don't fire (e.g., credits younger than min_anonymity_window_sec).
         let referenced_settlement_ids: HashSet<String> = state
             .vault
             .provider_credits
@@ -1318,25 +1466,13 @@ mod tests {
 
     #[test]
     fn decide_batch_action_waits_for_jitter_until_deadline() {
-        let (decision, jitter_deadline) = decide_batch_action(
-            1_000,
-            BATCH_WINDOW_SEC as i64,
-            MIN_BATCH_PROVIDERS,
-            10,
-            None,
-            17,
-        );
+        let (decision, jitter_deadline) =
+            decide_batch_action(1_000, BATCH_WINDOW_SEC as i64, 2, 10, None, 17, 2);
         assert_eq!(decision, BatchLoopDecision::Wait);
         assert_eq!(jitter_deadline, Some(1_017));
 
-        let (decision, jitter_deadline) = decide_batch_action(
-            1_018,
-            BATCH_WINDOW_SEC as i64,
-            MIN_BATCH_PROVIDERS,
-            10,
-            Some(1_017),
-            3,
-        );
+        let (decision, jitter_deadline) =
+            decide_batch_action(1_018, BATCH_WINDOW_SEC as i64, 2, 10, Some(1_017), 3, 2);
         assert_eq!(decision, BatchLoopDecision::Fire);
         assert_eq!(jitter_deadline, None);
     }
@@ -1344,24 +1480,215 @@ mod tests {
     #[test]
     fn decide_batch_action_bypasses_jitter_at_max_delay() {
         let (decision, jitter_deadline) =
-            decide_batch_action(2_000, 1, 1, MAX_SETTLEMENT_DELAY_SEC, Some(9_999), 30);
+            decide_batch_action(2_000, 1, 1, MAX_SETTLEMENT_DELAY_SEC, Some(9_999), 30, 2);
         assert_eq!(decision, BatchLoopDecision::Fire);
         assert_eq!(jitter_deadline, None);
     }
 
     #[test]
-    fn provider_is_auto_batchable_respects_min_payout_floor() {
+    fn decide_batch_action_single_provider_fires_when_min_is_one() {
+        // With default min_batch_providers = 1, one provider should be enough
+        // to fire the batch as long as the time window has elapsed.
+        let (decision, _) = decide_batch_action(
+            1_000,
+            BATCH_WINDOW_SEC as i64,
+            1,
+            BATCH_WINDOW_SEC as i64,
+            None,
+            0,
+            1,
+        );
+        assert!(matches!(
+            decision,
+            BatchLoopDecision::Fire | BatchLoopDecision::Wait
+        ));
+    }
+
+    #[test]
+    fn decide_batch_action_single_provider_skipped_with_n_gate() {
+        // With min_batch_providers = 2, a single provider is deferred until
+        // MAX_SETTLEMENT_DELAY_SEC regardless of BATCH_WINDOW_SEC elapsing.
+        let (decision, _) = decide_batch_action(
+            1_000,
+            BATCH_WINDOW_SEC as i64,
+            1,
+            BATCH_WINDOW_SEC as i64,
+            None,
+            0,
+            2,
+        );
+        assert_eq!(decision, BatchLoopDecision::Skip);
+    }
+
+    #[test]
+    fn settlement_is_age_eligible_respects_window_and_liveness_ceiling() {
         let config = BatchPrivacyConfig {
-            auto_batch_min_provider_payout_atomic: 1_000_000,
+            auto_batch_min_provider_payout_atomic: 0,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
         };
 
-        assert!(!provider_is_auto_batchable(600_000, 30, config));
-        assert!(provider_is_auto_batchable(1_000_000, 30, config));
-        assert!(provider_is_auto_batchable(
+        // Too fresh — the settlement must keep aging.
+        assert!(!settlement_is_age_eligible(0, config));
+        assert!(!settlement_is_age_eligible(59, config));
+        // Exactly at the window — eligible.
+        assert!(settlement_is_age_eligible(60, config));
+        // Well past the window.
+        assert!(settlement_is_age_eligible(120, config));
+        // Liveness ceiling — must fire even if anonymity window requires more.
+        let tight = BatchPrivacyConfig {
+            min_anonymity_window_sec: 10_000,
+            ..config
+        };
+        assert!(!settlement_is_age_eligible(
+            MAX_SETTLEMENT_DELAY_SEC - 1,
+            tight
+        ));
+        assert!(settlement_is_age_eligible(MAX_SETTLEMENT_DELAY_SEC, tight));
+    }
+
+    #[test]
+    fn provider_payout_floor_respects_eligible_amount_only() {
+        let config = BatchPrivacyConfig {
+            auto_batch_min_provider_payout_atomic: 1_000_000,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
+        };
+
+        // Eligible amount below floor and no liveness pressure — wait.
+        assert!(!provider_payout_floor_satisfied(600_000, 120, config));
+        // Eligible amount at floor — fire.
+        assert!(provider_payout_floor_satisfied(1_000_000, 120, config));
+        // Below floor but liveness ceiling reached — fire.
+        assert!(provider_payout_floor_satisfied(
             600_000,
             MAX_SETTLEMENT_DELAY_SEC,
             config
         ));
+        // Zero eligible amount is never batchable (prevents empty cursors).
+        assert!(!provider_payout_floor_satisfied(
+            0,
+            MAX_SETTLEMENT_DELAY_SEC,
+            config
+        ));
+    }
+
+    #[test]
+    fn select_provider_batch_entries_filters_fresh_credits() {
+        // Provider with one aged credit (t=0, age 120s) and one fresh credit
+        // (t=115, age 5s) at batch_timestamp=120. With a 60s anonymity window,
+        // only the aged credit should go on-chain; the fresh one keeps aging.
+        let config = BatchPrivacyConfig {
+            auto_batch_min_provider_payout_atomic: 0,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
+        };
+        let candidates = vec![
+            ("old".to_string(), 0i64, 1_000_000u64),
+            ("fresh".to_string(), 115i64, 2_000_000u64),
+        ];
+
+        let selection =
+            select_provider_batch_entries(&candidates, 120, BatchBuildMode::Auto, config)
+                .expect("old credit should make the provider eligible");
+        assert_eq!(selection.settlement_ids, vec!["old".to_string()]);
+        assert_eq!(selection.oldest_timestamp, 0);
+    }
+
+    #[test]
+    fn select_provider_batch_entries_skips_when_only_fresh() {
+        // A provider whose every credit is younger than the anonymity window
+        // must defer the whole payout rather than leaking the fresh settlement.
+        let config = BatchPrivacyConfig {
+            auto_batch_min_provider_payout_atomic: 0,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
+        };
+        let candidates = vec![
+            ("fresh-a".to_string(), 115i64, 500_000u64),
+            ("fresh-b".to_string(), 118i64, 500_000u64),
+        ];
+
+        assert!(
+            select_provider_batch_entries(&candidates, 120, BatchBuildMode::Auto, config).is_none()
+        );
+    }
+
+    #[test]
+    fn select_provider_batch_entries_payout_floor_uses_eligible_amount() {
+        // Aged credit is only $0.30 — below the $1.00 payout floor. Fresh
+        // credit would push the raw total above the floor but must not count.
+        let config = BatchPrivacyConfig {
+            auto_batch_min_provider_payout_atomic: 1_000_000,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
+        };
+        let candidates = vec![
+            ("old".to_string(), 0i64, 300_000u64),
+            ("fresh".to_string(), 110i64, 800_000u64),
+        ];
+
+        assert!(
+            select_provider_batch_entries(&candidates, 120, BatchBuildMode::Auto, config).is_none()
+        );
+    }
+
+    #[test]
+    fn select_provider_batch_entries_liveness_ceiling_includes_fresh_siblings() {
+        // Once the oldest eligible credit passes MAX_SETTLEMENT_DELAY_SEC, the
+        // payout-floor gate is bypassed so the provider always gets paid.
+        // Fresh sibling credits are still excluded by the anonymity window.
+        let config = BatchPrivacyConfig {
+            auto_batch_min_provider_payout_atomic: 1_000_000,
+            min_anonymity_window_sec: 60,
+            min_batch_providers: 1,
+        };
+        let batch_ts = MAX_SETTLEMENT_DELAY_SEC;
+        let candidates = vec![
+            ("very-old".to_string(), 0i64, 100_000u64),
+            ("fresh".to_string(), batch_ts - 10, 900_000u64),
+        ];
+
+        let selection =
+            select_provider_batch_entries(&candidates, batch_ts, BatchBuildMode::Auto, config)
+                .expect("liveness ceiling should force the old credit out");
+        assert_eq!(selection.settlement_ids, vec!["very-old".to_string()]);
+    }
+
+    #[test]
+    fn select_provider_batch_entries_flush_mode_ignores_window() {
+        // `BatchBuildMode::Flush` is used by the admin /fire-batch path and
+        // must bypass anonymity gating so the operator can force a settlement.
+        let config = BatchPrivacyConfig::default();
+        let candidates = vec![("fresh".to_string(), 119i64, 500_000u64)];
+
+        let selection =
+            select_provider_batch_entries(&candidates, 120, BatchBuildMode::Flush, config)
+                .expect("flush mode must pick up fresh credits");
+        assert_eq!(selection.settlement_ids, vec!["fresh".to_string()]);
+    }
+
+    #[test]
+    fn batch_privacy_config_defaults_match_public_launch_posture() {
+        let config = BatchPrivacyConfig::default();
+        assert_eq!(config.min_anonymity_window_sec, 60);
+        assert_eq!(config.min_batch_providers, 1);
+        assert_eq!(
+            config.auto_batch_min_provider_payout_atomic,
+            DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC
+        );
+    }
+
+    #[test]
+    fn parse_nonnegative_i64_env_accepts_zero_and_positive_values() {
+        assert_eq!(parse_nonnegative_i64_env("TEST_ENV", "0"), 0);
+        assert_eq!(parse_nonnegative_i64_env("TEST_ENV", "60"), 60);
+    }
+
+    #[test]
+    fn parse_nonnegative_i64_env_rejects_negative_values() {
+        let result = std::panic::catch_unwind(|| parse_nonnegative_i64_env("TEST_ENV", "-1"));
+        assert!(result.is_err());
     }
 
     #[test]
