@@ -1,24 +1,9 @@
 #!/usr/bin/env node
 
-const anchor = require("@coral-xyz/anchor");
-const {
-  createAccount,
-  getAccount,
-  getMint,
-  mintTo,
-  TOKEN_PROGRAM_ID,
-  transfer,
-} = require("@solana/spl-token");
-const { Keypair, PublicKey } = require("@solana/web3.js");
+const crypto = require("crypto");
+const { AccountRole, address } = require("@solana/kit");
+const { TOKEN_PROGRAM_ADDRESS } = require("@solana-program/token");
 
-const {
-  fundAccount,
-  loadProgram,
-  loadProvider,
-  postJson,
-  sha256hex,
-  waitForEndpoint,
-} = require("../devnet/common");
 const {
   assertFinalRoutes,
   buildClientRequestAuth,
@@ -26,27 +11,83 @@ const {
   fetchJson,
   formatUsdcAtomic,
   loadDemoProviders,
-  loadKeypairFromFile,
-  loadMintAuthority,
   loadNitroEnv,
   logKV,
   logStep,
+  postJson,
   postOrThrow,
   printHeader,
   readPositiveIntEnv,
   requireDemoConfirmation,
   requireEnv,
+  selectDemoProviders,
+  sha256hex,
   shortKey,
+  waitForEndpoint,
 } = require("./common");
+const {
+  DEMO_HTTP_METHOD,
+  DEMO_ROUTE_PATH,
+  buildDemoRequest,
+  buildDemoResponse,
+  requestSummary,
+} = require("./scenario");
+const {
+  createAssociatedTokenAccount,
+  createDemoRpc,
+  createDemoSigner,
+  fetchTokenAmount,
+  fundAddressWithSol,
+  loadFeePayerSigner,
+  loadMintAuthoritySigner,
+  loadSignerFromFile,
+  mintTokens,
+  rpcUrlFromEnv,
+  sendKitInstructions,
+  transferTokens,
+} = require("./solana-kit");
 
-async function getProviderBalances(connection, providers) {
+const DEPOSIT_DISCRIMINATOR = crypto
+  .createHash("sha256")
+  .update("global:deposit")
+  .digest()
+  .subarray(0, 8);
+
+function u64Le(value) {
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigUInt64LE(BigInt(value));
+  return buffer;
+}
+
+function buildDepositInstruction({
+  programId,
+  client,
+  vaultConfig,
+  clientTokenAccount,
+  vaultTokenAccount,
+  amount,
+}) {
+  return {
+    programAddress: address(programId),
+    accounts: [
+      {
+        address: client.address,
+        role: AccountRole.WRITABLE_SIGNER,
+        signer: client,
+      },
+      { address: address(vaultConfig), role: AccountRole.WRITABLE },
+      { address: address(clientTokenAccount), role: AccountRole.WRITABLE },
+      { address: address(vaultTokenAccount), role: AccountRole.WRITABLE },
+      { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+    ],
+    data: Buffer.concat([DEPOSIT_DISCRIMINATOR, u64Le(amount)]),
+  };
+}
+
+async function getProviderBalances(rpc, providers) {
   const balances = [];
   for (const provider of providers) {
-    const account = await getAccount(
-      connection,
-      new PublicKey(provider.tokenAccount)
-    );
-    balances.push(BigInt(account.amount.toString()));
+    balances.push(await fetchTokenAmount(rpc, provider.tokenAccount));
   }
   return balances;
 }
@@ -84,6 +125,7 @@ async function main() {
   }
 
   const enclaveUrl = requireEnv("A402_PUBLIC_ENCLAVE_URL").replace(/\/$/, "");
+  const programId = requireEnv("A402_PROGRAM_ID");
   const vaultConfig = requireEnv("A402_VAULT_CONFIG");
   const vaultTokenAccount = requireEnv("A402_VAULT_TOKEN_ACCOUNT");
   const usdcMint = requireEnv("A402_USDC_MINT");
@@ -117,7 +159,8 @@ async function main() {
     "A402_DEMO_BATCH_WAIT_DELAY_MS",
     readPositiveIntEnv("A402_NITRO_E2E_BATCH_WAIT_DELAY_MS", 5000)
   );
-  const providers = loadDemoProviders();
+  const providers = selectDemoProviders(loadDemoProviders());
+  const requestBody = buildDemoRequest();
 
   if (depositAmount < paymentAmount * providers.length) {
     throw new Error("deposit amount must cover all provider payment amounts");
@@ -125,30 +168,32 @@ async function main() {
 
   const plan = {
     mode: "subly-private-x402",
-    cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
-    anchorWallet: process.env.ANCHOR_WALLET || null,
+    cluster: rpcUrlFromEnv(),
+    feePayerWallet: process.env.ANCHOR_WALLET || null,
     enclaveUrl,
+    programId,
     vaultConfig,
     vaultTokenAccount,
     usdcMint,
     expectedPolicyHash,
+    route: `${DEMO_HTTP_METHOD} ${DEMO_ROUTE_PATH}`,
+    requestBody,
     depositAmount,
     paymentAmountPerProvider: paymentAmount,
     providers: providers.map(({ id, tokenAccount }) => ({ id, tokenAccount })),
+    batching: providers.length > 1 ? "multi-provider" : "single-provider",
     batchWaitAttempts,
     batchWaitDelayMs,
   };
   requireDemoConfirmation(plan);
 
-  const provider = loadProvider();
-  anchor.setProvider(provider);
-  const program = loadProgram(provider);
-  const mint = await getMint(provider.connection, new PublicKey(usdcMint));
-  const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
+  const rpc = createDemoRpc();
+  const { signer: feePayer } = await loadFeePayerSigner();
+  const mintAuthority = await loadMintAuthoritySigner(rpc, usdcMint, feePayer);
 
   printHeader("Subly privacy-first x402: private vault + batched settlement");
-  logStep(1, 'AI agent requests: "summarize private market data"');
-  logKV("Payment path", "agent -> Subly vault -> providers");
+  logStep(1, requestSummary());
+  logKV("Payment path", "agent -> Subly vault -> provider payout");
   logKV("Public URL", enclaveUrl);
 
   const attestation = await fetchJson(enclaveUrl, "/v1/attestation");
@@ -167,39 +212,38 @@ async function main() {
   logKV("Snapshot seqno", attestation.snapshotSeqno);
   logKV("Admin API", "closed");
 
-  const providerTokenBefore = await getProviderBalances(
-    provider.connection,
-    providers
-  );
+  const providerTokenBefore = await getProviderBalances(rpc, providers);
 
-  const client = Keypair.generate();
-  const clientTokenAccount = await createAccount(
-    provider.connection,
-    provider.wallet.payer,
-    new PublicKey(usdcMint),
-    client.publicKey
+  const { signer: client } = await createDemoSigner();
+  const clientTokenAccount = await createAssociatedTokenAccount(
+    rpc,
+    feePayer,
+    client.address,
+    usdcMint
   );
-  await fundAccount(provider, client.publicKey, clientSolLamports);
+  await fundAddressWithSol(rpc, feePayer, client.address, clientSolLamports);
 
   if (mintAuthority) {
-    await mintTo(
-      provider.connection,
-      provider.wallet.payer,
-      new PublicKey(usdcMint),
+    await mintTokens(
+      rpc,
+      feePayer,
+      usdcMint,
       clientTokenAccount,
       mintAuthority,
       depositAmount
     );
   } else if (process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
     const sourceOwner = process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
-      ? loadKeypairFromFile(
-          process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
-        )
-      : provider.wallet.payer;
-    await transfer(
-      provider.connection,
-      provider.wallet.payer,
-      new PublicKey(process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT),
+      ? (
+          await loadSignerFromFile(
+            process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+          )
+        ).signer
+      : feePayer;
+    await transferTokens(
+      rpc,
+      feePayer,
+      process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT,
       clientTokenAccount,
       sourceOwner,
       depositAmount
@@ -211,31 +255,30 @@ async function main() {
   }
 
   logStep(3, "Agent pre-funds the private vault");
-  const depositSig = await program.methods
-    .deposit(new anchor.BN(depositAmount))
-    .accountsPartial({
-      client: client.publicKey,
-      vaultConfig: new PublicKey(vaultConfig),
+  const depositSig = await sendKitInstructions(rpc, feePayer, [
+    buildDepositInstruction({
+      programId,
+      client,
+      vaultConfig,
       clientTokenAccount,
-      vaultTokenAccount: new PublicKey(vaultTokenAccount),
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .signers([client])
-    .rpc();
-  logKV("Agent", shortKey(client.publicKey.toBase58()));
+      vaultTokenAccount,
+      amount: depositAmount,
+    }),
+  ]);
+  logKV("Agent", shortKey(client.address));
   logKV("Deposit", formatUsdcAtomic(depositAmount));
   logKV("Deposit tx", depositSig);
 
   const depositedBalance = await waitForEndpoint(
     "client balance sync",
     async () => {
-      const auth = buildClientRequestAuth(
+      const auth = await buildClientRequestAuth(
         client,
         (issuedAt, expiresAt) =>
-          `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+          `A402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
       );
       const response = await postJson(enclaveUrl, "/v1/balance", {
-        client: client.publicKey.toBase58(),
+        client: client.address,
         issuedAt: auth.issuedAt,
         expiresAt: auth.expiresAt,
         clientSig: auth.clientSig,
@@ -255,9 +298,9 @@ async function main() {
   const settlements = [];
   for (let index = 0; index < providers.length; index += 1) {
     const demoProvider = providers[index];
-    const built = buildPayment({
+    const built = await buildPayment({
       attestation,
-      client,
+      clientSigner: client,
       enclaveUrl,
       provider: demoProvider,
       requestOrigin,
@@ -266,6 +309,9 @@ async function main() {
       vaultConfig,
       paymentAmount,
       nonce: index + 1,
+      requestMethod: DEMO_HTTP_METHOD,
+      routePath: DEMO_ROUTE_PATH,
+      requestBody,
     });
     const providerHeaders = {
       Authorization: `Bearer ${demoProvider.apiKey}`,
@@ -282,17 +328,26 @@ async function main() {
       },
       providerHeaders
     );
+    const providerResponse = buildDemoResponse({
+      providerId: demoProvider.id,
+      settlementMode: "subly-private-x402",
+    });
     const settleBody = await postOrThrow(
       enclaveUrl,
       "/v1/settle",
       {
         verificationId: verifyBody.verificationId,
-        resultHash: sha256hex(`demo-subly-${demoProvider.id}`),
+        resultHash: sha256hex(JSON.stringify(providerResponse)),
         statusCode: 200,
       },
       providerHeaders
     );
-    settlements.push({ providerId: demoProvider.id, verifyBody, settleBody });
+    settlements.push({
+      providerId: demoProvider.id,
+      verifyBody,
+      settleBody,
+      providerResponse,
+    });
 
     logKV(
       demoProvider.id,
@@ -306,10 +361,7 @@ async function main() {
   const providerTokenAfter = await waitForEndpoint(
     "automatic batch settlement",
     async () => {
-      const balances = await getProviderBalances(
-        provider.connection,
-        providers
-      );
+      const balances = await getProviderBalances(rpc, providers);
       const allSettled = balances.every((balance, index) => {
         return balance >= providerTokenBefore[index] + BigInt(paymentAmount);
       });
@@ -343,13 +395,13 @@ async function main() {
     );
   }
 
-  const finalBalanceAuth = buildClientRequestAuth(
+  const finalBalanceAuth = await buildClientRequestAuth(
     client,
     (issuedAt, expiresAt) =>
-      `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+      `A402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
   );
   const finalBalanceRes = await postJson(enclaveUrl, "/v1/balance", {
-    client: client.publicKey.toBase58(),
+    client: client.address,
     issuedAt: finalBalanceAuth.issuedAt,
     expiresAt: finalBalanceAuth.expiresAt,
     clientSig: finalBalanceAuth.clientSig,
@@ -380,8 +432,8 @@ async function main() {
       {
         ok: true,
         mode: "subly-private-x402",
-        client: client.publicKey.toBase58(),
-        clientTokenAccount: clientTokenAccount.toBase58(),
+        client: client.address,
+        clientTokenAccount,
         depositSig,
         attestation: {
           vaultConfig: attestation.vaultConfig,
@@ -393,6 +445,7 @@ async function main() {
           providerId: settlement.providerId,
           verificationId: settlement.verifyBody.verificationId,
           settlementId: settlement.settleBody.settlementId,
+          response: settlement.providerResponse,
         })),
         settlementStatuses,
         providerTokenBefore: providerTokenBefore.map((value) =>

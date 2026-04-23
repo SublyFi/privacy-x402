@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 
-const anchor = require("@coral-xyz/anchor");
+const express = require("express");
+const { paymentMiddleware, x402ResourceServer } = require("@x402/express");
+const { x402Client, x402HTTPClient } = require("@x402/core/client");
+const { HTTPFacilitatorClient } = require("@x402/core/server");
+const { wrapFetchWithPayment } = require("@x402/fetch");
 const {
-  createAccount,
-  getAccount,
-  getMint,
-  mintTo,
-  transfer,
-} = require("@solana/spl-token");
-const { Keypair, PublicKey } = require("@solana/web3.js");
+  ExactSvmScheme: BuyerExactSvmScheme,
+} = require("@x402/svm/exact/client");
+const {
+  ExactSvmScheme: SellerExactSvmScheme,
+} = require("@x402/svm/exact/server");
 
-const { fundAccount, loadProvider } = require("../devnet/common");
 const {
   formatUsdcAtomic,
   loadDemoProviders,
-  loadMintAuthority,
   loadNitroEnv,
   logKV,
   logStep,
@@ -22,23 +22,132 @@ const {
   readPositiveIntEnv,
   requireDemoConfirmation,
   requireEnv,
+  selectDemoProviders,
   shortKey,
+  waitForEndpoint,
 } = require("./common");
+const {
+  DEMO_DESCRIPTION,
+  DEMO_MIME_TYPE,
+  DEMO_ROUTE_PATH,
+  buildDemoResponse,
+  requestSummary,
+} = require("./scenario");
+const {
+  createAssociatedTokenAccount,
+  createDemoRpc,
+  createDemoSigner,
+  fetchTokenAmount,
+  fetchTokenOwner,
+  fundAddressWithSol,
+  loadFeePayerSigner,
+  loadMintAuthoritySigner,
+  mintTokens,
+  rpcUrlFromEnv,
+} = require("./solana-kit");
+
+const DEFAULT_X402_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+const DEFAULT_X402_FACILITATOR_URL = "https://x402.org/facilitator";
+
+function buildX402Price(usdcMint, paymentAmount) {
+  if (process.env.A402_X402_PRICE) {
+    return process.env.A402_X402_PRICE;
+  }
+  return {
+    asset: process.env.A402_X402_ASSET_MINT || usdcMint,
+    amount: paymentAmount.toString(),
+  };
+}
+
+function listen(app, port) {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, "127.0.0.1");
+    server.once("listening", () => resolve(server));
+    server.once("error", reject);
+  });
+}
+
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function startOfficialX402Seller({
+  facilitatorUrl,
+  network,
+  path,
+  payTo,
+  port,
+  price,
+  providerId,
+}) {
+  const app = express();
+  app.use(express.json());
+
+  const facilitatorClient = new HTTPFacilitatorClient({
+    url: facilitatorUrl,
+  });
+  const resourceServer = new x402ResourceServer(facilitatorClient).register(
+    network,
+    new SellerExactSvmScheme()
+  );
+
+  app.use(
+    paymentMiddleware(
+      {
+        [`GET ${path}`]: {
+          accepts: [
+            {
+              scheme: "exact",
+              price,
+              network,
+              payTo,
+              maxTimeoutSeconds: 120,
+            },
+          ],
+          description: DEMO_DESCRIPTION,
+          mimeType: DEMO_MIME_TYPE,
+        },
+      },
+      resourceServer,
+      {
+        appName: "Subly direct x402 comparison demo",
+        testnet: true,
+      }
+    )
+  );
+
+  app.get(path, (_req, res) => {
+    res.json({
+      ok: true,
+      ...buildDemoResponse({
+        providerId,
+        settlementMode: "official-x402-direct",
+      }),
+    });
+  });
+
+  const server = await listen(app, port);
+  const addressInfo = server.address();
+  return {
+    server,
+    url: `http://127.0.0.1:${addressInfo.port}${path}`,
+  };
+}
 
 async function main() {
   loadNitroEnv();
 
   const usdcMint = requireEnv("A402_USDC_MINT");
-  const providers = loadDemoProviders();
-  const providerIndex = readPositiveIntEnv("A402_DEMO_PROVIDER_INDEX", 1);
-  const demoProvider = providers.find(
-    (provider) => provider.index === providerIndex
-  );
-  if (!demoProvider) {
+  const selectedProviders = selectDemoProviders(loadDemoProviders());
+  if (selectedProviders.length !== 1) {
     throw new Error(
-      `A402_DEMO_PROVIDER_INDEX=${providerIndex} is not configured`
+      "Official x402 direct demo supports one provider. Unset A402_DEMO_ALL_PROVIDERS or set A402_DEMO_PROVIDER_INDEX."
     );
   }
+  const [demoProvider] = selectedProviders;
+  const providerIndex = demoProvider.index;
 
   const paymentAmount = Number(
     readPositiveIntEnv(
@@ -52,106 +161,173 @@ async function main() {
       readPositiveIntEnv("A402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
     )
   );
+  const x402Network = process.env.A402_X402_NETWORK || DEFAULT_X402_NETWORK;
+  const facilitatorUrl =
+    process.env.A402_X402_FACILITATOR_URL || DEFAULT_X402_FACILITATOR_URL;
+  const sellerPort = Number(process.env.A402_X402_DEMO_PORT || 0);
+  const price = buildX402Price(usdcMint, paymentAmount);
 
   const plan = {
-    mode: "direct-x402-style-baseline",
-    cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
-    anchorWallet: process.env.ANCHOR_WALLET || null,
+    mode: "official-x402-direct",
+    docs: {
+      buyer: "https://docs.x402.org/getting-started/quickstart-for-buyers",
+      seller: "https://docs.x402.org/getting-started/quickstart-for-sellers",
+    },
+    cluster: rpcUrlFromEnv(),
+    feePayerWallet: process.env.ANCHOR_WALLET || null,
+    facilitatorUrl,
+    x402Network,
     usdcMint,
+    route: `GET ${DEMO_ROUTE_PATH}`,
+    price,
     providerId: demoProvider.id,
-    providerTokenAccount: demoProvider.tokenAccount,
-    paymentAmount,
-    note: "This is a direct on-chain settlement baseline for comparison with Subly.",
+    providerConfiguredTokenAccount: demoProvider.tokenAccount,
+    note: "Uses official @x402/express seller middleware and @x402/fetch buyer wrapper. Seller payTo is the provider wallet owner, not a token account.",
   };
   requireDemoConfirmation(plan);
 
-  const provider = loadProvider();
-  anchor.setProvider(provider);
-  const mint = await getMint(provider.connection, new PublicKey(usdcMint));
-  const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
+  const rpc = createDemoRpc();
+  const { signer: feePayer } = await loadFeePayerSigner();
+  const mintAuthority = await loadMintAuthoritySigner(rpc, usdcMint, feePayer);
   if (!mintAuthority) {
     throw new Error(
-      "Mint authority is required for this devnet direct baseline. Set A402_USDC_MINT_AUTHORITY_WALLET."
+      "Mint authority is required for this devnet demo. Set A402_USDC_MINT_AUTHORITY_WALLET."
     );
   }
 
-  printHeader("Direct x402-style baseline: public on-chain payment edge");
-  logStep(1, 'AI agent requests: "summarize private market data"');
-  logKV("Provider response", "402 Payment Required");
-  logKV("Settlement path", "agent token account -> provider token account");
+  printHeader("Official x402 direct: buyer fetch + seller middleware");
+  logStep(1, requestSummary());
+  logKV("Buyer SDK", "@x402/fetch wrapFetchWithPayment");
+  logKV("Seller SDK", "@x402/express paymentMiddleware");
+  logKV("Facilitator", facilitatorUrl);
 
-  const client = Keypair.generate();
-  const clientTokenAccount = await createAccount(
-    provider.connection,
-    provider.wallet.payer,
-    new PublicKey(usdcMint),
-    client.publicKey
+  const providerWallet =
+    process.env[`A402_DEMO_PROVIDER_${providerIndex}_WALLET`] ||
+    (await fetchTokenOwner(rpc, demoProvider.tokenAccount));
+  const officialProviderTokenAccount = await createAssociatedTokenAccount(
+    rpc,
+    feePayer,
+    providerWallet,
+    usdcMint
   );
-  await fundAccount(provider, client.publicKey, clientSolLamports);
-  await mintTo(
-    provider.connection,
-    provider.wallet.payer,
-    new PublicKey(usdcMint),
+  const providerBefore = await fetchTokenAmount(
+    rpc,
+    officialProviderTokenAccount
+  );
+
+  const { signer: client } = await createDemoSigner();
+  const clientTokenAccount = await createAssociatedTokenAccount(
+    rpc,
+    feePayer,
+    client.address,
+    usdcMint
+  );
+  await fundAddressWithSol(rpc, feePayer, client.address, clientSolLamports);
+  await mintTokens(
+    rpc,
+    feePayer,
+    usdcMint,
     clientTokenAccount,
     mintAuthority,
     paymentAmount
   );
 
-  const providerBefore = await getAccount(
-    provider.connection,
-    new PublicKey(demoProvider.tokenAccount)
-  );
+  const seller = await startOfficialX402Seller({
+    facilitatorUrl,
+    network: x402Network,
+    path: DEMO_ROUTE_PATH,
+    payTo: providerWallet,
+    port: sellerPort,
+    price,
+    providerId: demoProvider.id,
+  });
 
-  logStep(2, "Agent pays provider directly on devnet");
-  const transferSig = await transfer(
-    provider.connection,
-    provider.wallet.payer,
-    clientTokenAccount,
-    new PublicKey(demoProvider.tokenAccount),
-    client,
-    paymentAmount
-  );
+  try {
+    logStep(2, "Agent calls paid API through official x402 fetch wrapper");
+    const buyerClient = new x402Client().register(
+      x402Network,
+      new BuyerExactSvmScheme(client, { rpcUrl: rpcUrlFromEnv() })
+    );
+    const fetchWithPayment = wrapFetchWithPayment(fetch, buyerClient);
+    const response = await fetchWithPayment(seller.url, { method: "GET" });
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `official x402 request failed: ${response.status} ${responseText}`
+      );
+    }
+    const body = responseText ? JSON.parse(responseText) : null;
+    const httpClient = new x402HTTPClient(buyerClient);
+    const paymentResponse = httpClient.getPaymentSettleResponse((name) =>
+      response.headers.get(name)
+    );
 
-  const providerAfter = await getAccount(
-    provider.connection,
-    new PublicKey(demoProvider.tokenAccount)
-  );
+    logStep(3, "Provider returns paid API response after settlement");
+    logKV("Result", JSON.stringify(body.report));
+    logKV("Settlement tx", paymentResponse.transaction);
 
-  logStep(3, "Provider returns paid API response");
-  logKV("Result", "private market data summary");
-
-  printHeader("Public chain observer view");
-  logKV("Buyer wallet", shortKey(client.publicKey.toBase58()));
-  logKV("Buyer token account", shortKey(clientTokenAccount.toBase58()));
-  logKV("Provider token account", shortKey(demoProvider.tokenAccount));
-  logKV("Amount", formatUsdcAtomic(paymentAmount));
-  logKV("Transfer signature", transferSig);
-  logKV(
-    "Provider balance",
-    `${formatUsdcAtomic(providerBefore.amount)} -> ${formatUsdcAtomic(
-      providerAfter.amount
-    )}`
-  );
-  logKV("Privacy note", "The direct payment edge is visible on-chain.");
-
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        mode: "direct-x402-style-baseline",
-        client: client.publicKey.toBase58(),
-        clientTokenAccount: clientTokenAccount.toBase58(),
-        providerId: demoProvider.id,
-        providerTokenAccount: demoProvider.tokenAccount,
-        amount: paymentAmount,
-        transferSig,
-        providerTokenBefore: providerBefore.amount.toString(),
-        providerTokenAfter: providerAfter.amount.toString(),
+    const providerAfter = await waitForEndpoint(
+      "official x402 provider token balance",
+      async () => {
+        const balance = await fetchTokenAmount(
+          rpc,
+          officialProviderTokenAccount
+        );
+        return balance >= providerBefore + BigInt(paymentAmount)
+          ? balance
+          : null;
       },
-      null,
-      2
-    )
-  );
+      60,
+      1000
+    );
+
+    printHeader("Public chain observer view");
+    logKV("Buyer wallet", shortKey(client.address));
+    logKV("Buyer token account", shortKey(clientTokenAccount));
+    logKV("Provider wallet", shortKey(providerWallet));
+    logKV("Provider token account", shortKey(officialProviderTokenAccount));
+    if (officialProviderTokenAccount !== demoProvider.tokenAccount) {
+      logKV(
+        "Configured Subly token account",
+        shortKey(demoProvider.tokenAccount)
+      );
+    }
+    logKV("Amount", formatUsdcAtomic(paymentAmount));
+    logKV(
+      "Provider balance",
+      `${formatUsdcAtomic(providerBefore)} -> ${formatUsdcAtomic(
+        providerAfter
+      )}`
+    );
+    logKV(
+      "Privacy note",
+      "Official x402 settles directly from buyer ATA to provider ATA."
+    );
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          mode: "official-x402-direct",
+          client: client.address,
+          clientTokenAccount,
+          providerId: demoProvider.id,
+          providerWallet,
+          providerTokenAccount: officialProviderTokenAccount,
+          configuredSublyProviderTokenAccount: demoProvider.tokenAccount,
+          amount: paymentAmount,
+          response: body,
+          paymentResponse,
+          providerTokenBefore: providerBefore.toString(),
+          providerTokenAfter: providerAfter.toString(),
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await closeServer(seller.server);
+  }
 }
 
 main().catch((error) => {

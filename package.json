@@ -19,7 +19,6 @@
     "demo:x402-direct": "node scripts/demo/direct-x402-demo.js",
     "demo:subly-private": "node scripts/demo/subly-agent-demo.js",
     "demo:compare": "node scripts/demo/compare.js",
-    "demo:url-swap-diff": "node scripts/demo/url-swap-diff.js",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },
@@ -27,7 +26,14 @@
     "@coral-xyz/anchor": "^0.32.1",
     "@noble/curves": "^1.4.0",
     "@noble/hashes": "^1.4.0",
+    "@solana-program/system": "^0.12.0",
+    "@solana-program/token": "^0.13.0",
+    "@solana/kit": "^6.8.0",
     "@solana/spl-token": "^0.4.14",
+    "@x402/core": "^2.10.0",
+    "@x402/express": "^2.10.0",
+    "@x402/fetch": "^2.10.0",
+    "@x402/svm": "^2.10.0",
     "cbor": "^10.0.12",
     "express": "^5.2.1",
     "tweetnacl": "^1.0.3"

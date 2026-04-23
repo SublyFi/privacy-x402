@@ -1,20 +1,17 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const nacl = require("tweetnacl");
-
-const { Keypair } = require("@solana/web3.js");
-
-const {
-  computePaymentDetailsHash,
-  computeRequestHash,
-  postJson,
-  requireEnv,
-  sha256hex,
-  signPaymentPayload,
-} = require("../devnet/common");
+const { signBytes } = require("@solana/kit");
 
 const ROOT = path.resolve(__dirname, "..", "..");
+
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
 
 function expandEnv(value) {
   return value.replace(
@@ -82,7 +79,17 @@ function loadNitroEnv() {
 
   const providerEnv =
     process.env.A402_DEMO_PROVIDERS_ENV || "/root/a402-demo-providers.env";
-  loadEnvFile(providerEnv, { required: true, protectedKeys: shellEnvKeys });
+  const hasProviderShellEnv = [1, 2].every((index) => {
+    return (
+      process.env[`A402_DEMO_PROVIDER_${index}_ID`] &&
+      process.env[`A402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`] &&
+      process.env[`A402_DEMO_PROVIDER_${index}_API_KEY`]
+    );
+  });
+  loadEnvFile(providerEnv, {
+    required: !hasProviderShellEnv,
+    protectedKeys: shellEnvKeys,
+  });
 }
 
 function loadDemoProviders() {
@@ -103,6 +110,21 @@ function loadDemoProviders() {
   return providers;
 }
 
+function selectDemoProviders(providers) {
+  if (process.env.A402_DEMO_ALL_PROVIDERS === "1") {
+    return providers;
+  }
+
+  const providerIndex = readPositiveIntEnv("A402_DEMO_PROVIDER_INDEX", 1);
+  const provider = providers.find((item) => item.index === providerIndex);
+  if (!provider) {
+    throw new Error(
+      `A402_DEMO_PROVIDER_INDEX=${providerIndex} is not configured`
+    );
+  }
+  return [provider];
+}
+
 function readPositiveIntEnv(name, fallback) {
   const raw = process.env[name];
   if (!raw) {
@@ -115,47 +137,103 @@ function readPositiveIntEnv(name, fallback) {
   return value;
 }
 
-function loadKeypairFromFile(filePath) {
-  const secretKey = Uint8Array.from(
-    JSON.parse(fs.readFileSync(filePath, "utf8"))
-  );
-  return Keypair.fromSecretKey(secretKey);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function loadMintAuthority(provider, mintAuthority) {
-  if (mintAuthority === null) {
-    return null;
-  }
-  const walletPath = process.env.A402_USDC_MINT_AUTHORITY_WALLET;
-  if (walletPath) {
-    const keypair = loadKeypairFromFile(walletPath);
-    if (!keypair.publicKey.equals(mintAuthority)) {
-      throw new Error(
-        `A402_USDC_MINT_AUTHORITY_WALLET public key ${keypair.publicKey.toBase58()} does not match mint authority ${mintAuthority.toBase58()}`
-      );
+async function waitForEndpoint(label, fn, attempts, delayMs) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const value = await fn();
+      if (value) {
+        return value;
+      }
+    } catch (error) {
+      lastError = error;
     }
-    return keypair;
+    await sleep(delayMs);
   }
-  if (mintAuthority.equals(provider.wallet.publicKey)) {
-    return provider.wallet.payer;
-  }
-  return null;
+  const suffix = lastError ? `: ${lastError.message}` : "";
+  throw new Error(`Timed out waiting for ${label}${suffix}`);
 }
 
-function signClientTextRequest(client, message) {
-  return Buffer.from(
-    nacl.sign.detached(Buffer.from(message), client.secretKey)
-  ).toString("base64");
+async function signTextRequest(signer, message) {
+  const signature = await signBytes(
+    signer.keyPair.privateKey,
+    Buffer.from(message)
+  );
+  return Buffer.from(signature).toString("base64");
 }
 
-function buildClientRequestAuth(client, buildMessage) {
+async function buildClientRequestAuth(clientSigner, buildMessage) {
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + 300;
   return {
     issuedAt,
     expiresAt,
-    clientSig: signClientTextRequest(client, buildMessage(issuedAt, expiresAt)),
+    clientSig: await signTextRequest(
+      clientSigner,
+      buildMessage(issuedAt, expiresAt)
+    ),
   };
+}
+
+function sha256hex(data) {
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0
+    );
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function computePaymentDetailsHash(details) {
+  return sha256hex(canonicalJson(details));
+}
+
+function computeRequestHash(
+  { method, origin, pathAndQuery, bodySha256 },
+  paymentDetailsHash
+) {
+  const preimage =
+    `A402-SVM-V1-REQ\n` +
+    `${method}\n` +
+    `${origin}\n` +
+    `${pathAndQuery}\n` +
+    `${bodySha256}\n` +
+    `${paymentDetailsHash}\n`;
+  return sha256hex(preimage);
+}
+
+async function signPaymentPayload(signer, fields) {
+  const message =
+    `A402-SVM-V1-AUTH\n` +
+    `${fields.version}\n` +
+    `${fields.scheme}\n` +
+    `${fields.paymentId}\n` +
+    `${fields.client}\n` +
+    `${fields.vault}\n` +
+    `${fields.providerId}\n` +
+    `${fields.payTo}\n` +
+    `${fields.network}\n` +
+    `${fields.assetMint}\n` +
+    `${fields.amount}\n` +
+    `${fields.requestHash}\n` +
+    `${fields.paymentDetailsHash}\n` +
+    `${fields.expiresAt}\n` +
+    `${fields.nonce}\n`;
+  return signTextRequest(signer, message);
 }
 
 async function fetchJson(baseUrl, route) {
@@ -166,6 +244,17 @@ async function fetchJson(baseUrl, route) {
     );
   }
   return response.json();
+}
+
+async function postJson(baseUrl, route, body, headers) {
+  return fetch(`${baseUrl}${route}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(headers || {}),
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 async function postOrThrow(enclaveUrl, route, body, headers) {
@@ -192,9 +281,9 @@ async function assertFinalRoutes(enclaveUrl) {
   await assertRouteAbsent(enclaveUrl, "/v1/admin/fire-batch");
 }
 
-function buildPayment({
+async function buildPayment({
   attestation,
-  client,
+  clientSigner,
   enclaveUrl,
   provider,
   requestOrigin,
@@ -203,16 +292,16 @@ function buildPayment({
   vaultConfig,
   paymentAmount,
   nonce,
+  requestMethod = "GET",
+  routePath = "/weather",
+  requestBody = null,
 }) {
   const requestContext = {
-    method: "POST",
+    method: requestMethod,
     origin: requestOrigin,
-    pathAndQuery: `/demo/agent/provider-${provider.index}`,
+    pathAndQuery: routePath,
     bodySha256: sha256hex(
-      JSON.stringify({
-        agentTask: "summarize private market data",
-        provider: provider.index,
-      })
+      requestBody == null ? "" : JSON.stringify(requestBody)
     ),
   };
   const paymentDetails = {
@@ -244,7 +333,7 @@ function buildPayment({
     version: 1,
     scheme: "a402-svm-v1",
     paymentId: `pay_demo_${crypto.randomUUID()}`,
-    client: client.publicKey.toBase58(),
+    client: clientSigner.address,
     vault: vaultConfig,
     providerId: provider.id,
     payTo: provider.tokenAccount,
@@ -262,7 +351,7 @@ function buildPayment({
     paymentDetails,
     paymentPayload: {
       ...unsignedPayload,
-      clientSig: signPaymentPayload(client, unsignedPayload),
+      clientSig: await signPaymentPayload(clientSigner, unsignedPayload),
     },
   };
 }
@@ -315,15 +404,17 @@ module.exports = {
   fetchJson,
   formatUsdcAtomic,
   loadDemoProviders,
-  loadKeypairFromFile,
-  loadMintAuthority,
   loadNitroEnv,
   logKV,
   logStep,
+  postJson,
   postOrThrow,
   printHeader,
   readPositiveIntEnv,
   requireDemoConfirmation,
   requireEnv,
+  selectDemoProviders,
+  sha256hex,
   shortKey,
+  waitForEndpoint,
 };

@@ -7,7 +7,9 @@ import { A402Client } from "../sdk/src/client";
 import {
   computeNitroAttestationPolicyHash,
   parseA402UserDataEnvelope,
+  verifyNitroAttestationDocument,
 } from "../sdk/src/attestation";
+import { bodyToBytes, sha256hex } from "../sdk/src/crypto";
 import { AttestationResponse, NitroAttestationPolicy } from "../sdk/src/types";
 
 const TLS_PRIVATE_KEY_PEM = `-----BEGIN PRIVATE KEY-----
@@ -276,6 +278,67 @@ describe("attestation_sdk", () => {
     }
   });
 
+  it("hashes request bodies by actual bytes, not toString()", () => {
+    // Regression for Codex #4: the old implementation called
+    // options?.body?.toString() which produced "1,2,3" for Uint8Array and
+    // "[object Blob]" for Blob, silently breaking server-side verify.
+    const expectedAsciiBytes = Buffer.from([1, 2, 3]);
+    const uint8 = new Uint8Array([1, 2, 3]);
+    const arrBuf = uint8.buffer.slice(0);
+
+    expect(sha256hex(bodyToBytes(uint8))).to.equal(
+      sha256hex(expectedAsciiBytes)
+    );
+    expect(sha256hex(bodyToBytes(arrBuf))).to.equal(
+      sha256hex(expectedAsciiBytes)
+    );
+    // A string body must match the server's utf-8 interpretation.
+    expect(sha256hex(bodyToBytes("hello"))).to.equal(
+      sha256hex(Buffer.from("hello", "utf8"))
+    );
+    // undefined body must hash to the empty preimage (same as x402 GET).
+    expect(sha256hex(bodyToBytes(undefined))).to.equal(
+      sha256hex(Buffer.alloc(0))
+    );
+
+    // Unsupported body types fail loudly instead of silently producing
+    // "[object Blob]" etc.
+    expect(() => bodyToBytes({ not: "a body" })).to.throw(
+      /cannot hash request body/
+    );
+  });
+
+  it("requires PCR pinning when verifying a Nitro attestation", async () => {
+    const attestation: AttestationResponse = {
+      vaultConfig: Keypair.generate().publicKey.toBase58(),
+      vaultSigner: Keypair.generate().publicKey.toBase58(),
+      attestationPolicyHash: "ab".repeat(32),
+      attestationDocument: Buffer.from("unused", "utf8").toString("base64"),
+      issuedAt: "2026-04-13T00:00:00.000Z",
+      expiresAt: "2099-04-13T00:00:00.000Z",
+    };
+
+    try {
+      await verifyNitroAttestationDocument(attestation, {});
+      throw new Error("expected PCR pinning guard to reject");
+    } catch (error) {
+      expect((error as Error).message).to.match(
+        /requires PCR pinning/
+      );
+    }
+
+    try {
+      await verifyNitroAttestationDocument(attestation, {
+        expectedPolicyHash: attestation.attestationPolicyHash,
+      });
+      throw new Error("expected PCR pinning guard to reject hash-only config");
+    } catch (error) {
+      expect((error as Error).message).to.match(
+        /requires PCR pinning/
+      );
+    }
+  });
+
   it("delegates non-local attestation verification to the custom verifier", async () => {
     const wallet = Keypair.generate();
     const vaultAddress = Keypair.generate().publicKey;
@@ -344,10 +407,7 @@ describe("attestation_sdk", () => {
 
     let requestCount = 0;
     let observedPaymentSignature = "";
-    globalThis.fetch = (async (
-      input: RequestInfo | URL,
-      init?: RequestInit
-    ) => {
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
 
       if (url.endsWith("/v1/attestation")) {

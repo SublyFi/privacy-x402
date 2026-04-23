@@ -1,0 +1,46 @@
+{
+  "name": "subly402-sdk",
+  "version": "0.1.0",
+  "description": "Privacy-first x402 client SDK for Solana. Pay paid APIs through a TEE-based vault so on-chain observers never see the buyer-to-provider edge.",
+  "license": "ISC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.4.0",
+    "@solana/kit": "^6.8.0",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.95.0",
+    "bn.js": "^5.2.1",
+    "cbor": "^10.0.12",
+    "tweetnacl": "^1.0.3"
+  },
+  "peerDependencies": {
+    "@solana/web3.js": "^1.95.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "x402",
+    "a402",
+    "solana",
+    "payment",
+    "privacy",
+    "ai-agent",
+    "tee",
+    "nitro-enclave",
+    "usdc",
+    "micropayment"
+  ]
+}

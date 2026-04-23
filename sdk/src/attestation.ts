@@ -46,6 +46,7 @@ export async function verifyNitroAttestationDocument(
   attestation: AttestationResponse,
   config: NitroAttestationConfig
 ): Promise<NitroAttestationDocument> {
+  assertPcrPinningConfigured(config);
   const attestationBytes = Buffer.from(
     attestation.attestationDocument,
     "base64"
@@ -86,6 +87,21 @@ export function computeNitroAttestationPolicyHash(
 ): string {
   const canonical = canonicalJson(normalizePolicy(policy));
   return sha256hex(Buffer.from(canonical, "utf8"));
+}
+
+function assertPcrPinningConfigured(config: NitroAttestationConfig): void {
+  if (config.allowMissingPcrPinning === true) {
+    return;
+  }
+  const pcrs = config.policy?.pcrs ?? config.expectedPcrs;
+  const hasPcrPinning =
+    pcrs !== undefined && Object.keys(pcrs).length > 0;
+  if (hasPcrPinning) {
+    return;
+  }
+  throw new Error(
+    "Nitro attestation verification requires PCR pinning: pass nitroAttestation.policy (full policy object) or nitroAttestation.expectedPcrs, or set allowMissingPcrPinning=true to opt out (not recommended)."
+  );
 }
 
 function parseCoseSign1(input: Buffer): ParsedCoseSign1 {

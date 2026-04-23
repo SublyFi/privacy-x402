@@ -23,3 +23,5 @@ infra/nitro/generated
 *.pem
 *.crt
 *.key
+sdk/dist
+middleware/dist

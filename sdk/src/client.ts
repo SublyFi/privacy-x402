@@ -21,6 +21,7 @@ import BN from "bn.js";
 
 import { verifyNitroAttestationDocument } from "./attestation";
 import {
+  bodyToBytes,
   buildSignatureMessage,
   computePaymentDetailsHash,
   computeRequestHash,
@@ -932,8 +933,7 @@ export class A402Client {
     const method = (options?.method || "GET").toUpperCase();
     const origin = parsedUrl.origin;
     const pathAndQuery = parsedUrl.pathname + parsedUrl.search;
-    const bodyStr = options?.body?.toString() || "";
-    const bodySha256 = sha256hex(bodyStr);
+    const bodySha256 = sha256hex(bodyToBytes(options?.body));
 
     const paymentDetailsHash = computePaymentDetailsHash(details);
     const requestHash = computeRequestHash(

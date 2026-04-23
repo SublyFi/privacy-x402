@@ -1,4 +1,11 @@
 export { A402Client } from "./client";
+export {
+  Subly402Client,
+  Subly402Client as subly402Client,
+  Subly402ExactScheme,
+  wrapFetchWithSubly402Payment,
+  wrapFetchWithSubly402Payment as wrapFetchWithPayment,
+} from "./subly402";
 export { AuditTool } from "./audit";
 export {
   computeNitroAttestationPolicyHash,
@@ -36,6 +43,8 @@ export type {
   NitroAttestationDocument,
   NitroAttestationPolicy,
   SettleResponse,
+  Subly402ClientConfig,
+  Subly402Signer,
   VerifyResponse,
   WithdrawAuthResponse,
 } from "./types";

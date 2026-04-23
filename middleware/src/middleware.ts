@@ -161,7 +161,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
       const originalJson = res.json;
       const originalEnd = res.end.bind(res);
       let capturedBody: any;
-      let capturedStatus: number;
+      let capturedStatus: number | undefined;
       let resolveHandler: (() => void) | undefined;
       let handlerFinished = false;
 

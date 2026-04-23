@@ -103,3 +103,53 @@ export interface SettlementStatusResponse {
   batchId: number | null;
   txSignature: string | null;
 }
+
+export type Subly402Scheme = "exact" | "subly402-exact" | "a402-svm-v1";
+
+export interface Subly402RouteAccept {
+  /** Developer-facing scheme. "exact" is mapped to the current a402-svm-v1 wire scheme. */
+  scheme?: Subly402Scheme;
+  /** Human-readable price such as "$0.001", or atomic token units such as "1000". */
+  price: string | number;
+  /** CAIP-2 network identifier. */
+  network: string;
+  /** Provider identifier registered with the Subly402 facilitator. */
+  providerId: string;
+  /** Provider settlement token account. */
+  payTo: string;
+  /** Optional per-route asset override. Defaults to the facilitator client's asset config. */
+  asset?: {
+    kind?: "spl-token";
+    mint: string;
+    decimals?: number;
+    symbol?: string;
+  };
+  assetMint?: string;
+  assetDecimals?: number;
+  assetSymbol?: string;
+}
+
+export interface Subly402RouteConfig {
+  accepts: Subly402RouteAccept[];
+  description?: string;
+  mimeType?: string;
+}
+
+export type Subly402Routes = Record<string, Subly402RouteConfig>;
+
+export interface Subly402FacilitatorClientOptions {
+  /** Base URL of the Subly402 facilitator / Nitro enclave ingress. */
+  url: string;
+  /** Provider API key used by the seller middleware for /verify and /settle. */
+  providerApiKey?: string;
+  authMode?: A402ProviderConfig["authMode"];
+  mtls?: A402ProviderConfig["mtls"];
+  /** Optional cached attestation fields. If omitted, middleware fetches /v1/attestation. */
+  vaultConfig?: string;
+  vaultSigner?: string;
+  attestationPolicyHash?: string;
+  /** Default settlement asset used by route accepts that omit asset fields. */
+  assetMint?: string;
+  assetDecimals?: number;
+  assetSymbol?: string;
+}

@@ -7,6 +7,45 @@ export function sha256hex(data: string | Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
+/**
+ * Convert the fetch BodyInit into the exact bytes the server will see, so the
+ * client-signed `body_sha256` matches what the middleware hashes from the raw
+ * request body. Supports the BodyInit types we can deterministically serialize
+ * synchronously; anything else (Blob, FormData, URLSearchParams, ReadableStream)
+ * is rejected so the caller gets a clear error instead of a silent hash
+ * mismatch downstream at /v1/verify.
+ */
+export function bodyToBytes(body: unknown): Buffer {
+  if (body === undefined || body === null) {
+    return Buffer.alloc(0);
+  }
+  if (typeof body === "string") {
+    return Buffer.from(body, "utf8");
+  }
+  if (Buffer.isBuffer(body)) {
+    return body;
+  }
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (body instanceof ArrayBuffer) {
+    return Buffer.from(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    const view = body as ArrayBufferView;
+    return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+  }
+  const kind =
+    typeof body === "object"
+      ? (body as { constructor?: { name: string } }).constructor?.name
+      : typeof body;
+  throw new Error(
+    `Subly402 cannot hash request body of type ${kind ?? "unknown"}; ` +
+      `supported types are string, Buffer, Uint8Array, ArrayBuffer, and ArrayBufferView. ` +
+      `Serialize Blob / FormData / URLSearchParams / streams to one of these before calling fetch.`
+  );
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item)).join(",")}]`;

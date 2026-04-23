@@ -1,4 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
+import type { Address, MessagePartialSigner } from "@solana/kit";
 
 /** Payment details from a 402 response */
 export interface PaymentDetails {
@@ -138,6 +139,13 @@ export interface NitroAttestationConfig {
   maxAgeMs?: number;
   rootCertificatesPem?: string[];
   requireA402UserData?: boolean;
+  /**
+   * Escape hatch for callers who explicitly want to skip PCR pinning. Without
+   * this, `verifyNitroAttestationDocument()` throws when neither `policy.pcrs`
+   * nor `expectedPcrs` is provided, because a self-referential policy hash
+   * check gives no cryptographic binding to a specific enclave image.
+   */
+  allowMissingPcrPinning?: boolean;
   documentValidator?: (
     document: NitroAttestationDocument,
     attestation: AttestationResponse
@@ -262,6 +270,33 @@ export interface A402ClientConfig {
   /** Built-in Nitro attestation verification configuration. */
   nitroAttestation?: NitroAttestationConfig;
   /** Optional custom verifier for non-local attestation documents. */
+  attestationVerifier?: (
+    attestation: AttestationResponse
+  ) => Promise<void> | void;
+}
+
+export interface Subly402Signer {
+  address?: Address<string> | string;
+  publicKey?: string | { toBase58(): string };
+  secretKey?: Uint8Array;
+  signMessage?: (message: Uint8Array) => Promise<Uint8Array> | Uint8Array;
+  signMessages?: MessagePartialSigner["signMessages"];
+}
+
+export interface Subly402ClientConfig {
+  /**
+   * Optional convenience signer. For the x402-like interface, prefer
+   * client.register("solana:*", new Subly402ExactScheme(signer)).
+   */
+  signer?: Subly402Signer;
+  network?: string;
+  /** Allowed Subly402 facilitator base URLs discovered from HTTP 402 responses. */
+  trustedFacilitators?: string[];
+  policy?: {
+    /** Budget guard only. Actual price is discovered from HTTP 402. */
+    maxPaymentPerRequest?: string | number;
+  };
+  nitroAttestation?: NitroAttestationConfig;
   attestationVerifier?: (
     attestation: AttestationResponse
   ) => Promise<void> | void;

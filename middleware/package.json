@@ -1,0 +1,39 @@
+{
+  "name": "subly402-express",
+  "version": "0.1.0",
+  "description": "Express middleware that serves paid APIs through the Subly privacy-first x402 facilitator. Drop-in replacement for x402 sellers that want their settlements hidden behind a TEE vault.",
+  "license": "ISC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@noble/curves": "^1.4.0",
+    "@noble/hashes": "^1.4.0",
+    "@solana/web3.js": "^1.95.0"
+  },
+  "peerDependencies": {
+    "express": "^4.0.0 || ^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "x402",
+    "a402",
+    "solana",
+    "express",
+    "middleware",
+    "privacy",
+    "payment",
+    "tee"
+  ]
+}
