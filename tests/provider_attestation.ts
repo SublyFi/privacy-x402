@@ -15,7 +15,7 @@ export function buildTestProviderParticipantAttestation(
     },
     eifSigningCertSha256: "66".repeat(32),
     kmsKeyArnSha256: "77".repeat(32),
-    protocol: "a402-provider-v1",
+    protocol: "subly402-provider-v1",
   };
 
   const normalizedPolicy = {

@@ -87,7 +87,7 @@ describe("subly402 x402-compatible interface", () => {
     server = undefined;
   });
 
-  it("lets sellers declare x402-like exact routes without exposing a402 config", async () => {
+  it("lets sellers declare x402-like exact routes without exposing subly402 config", async () => {
     const facilitator = new Subly402FacilitatorClient({
       url: "http://facilitator.example",
       providerApiKey: "provider-secret",
@@ -138,7 +138,7 @@ describe("subly402 x402-compatible interface", () => {
     );
     const [details] = paymentRequired.accepts;
 
-    expect(details.scheme).to.equal("a402-svm-v1");
+    expect(details.scheme).to.equal("subly402-svm-v1");
     expect(details.amount).to.equal("1000");
     expect(details.providerId).to.equal("weather-provider");
     expect(details.payTo).to.equal("provider-token-account");
@@ -154,7 +154,7 @@ describe("subly402 x402-compatible interface", () => {
       attestationPolicyHash: "cd".repeat(32),
     });
     const details: PaymentDetails = {
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       network: "solana:devnet",
       amount: "1000",
       asset: {
@@ -238,7 +238,7 @@ describe("subly402 x402-compatible interface", () => {
       const payload = decodeJsonHeader<PaymentPayload>(
         observedPaymentSignature
       );
-      expect(payload.scheme).to.equal("a402-svm-v1");
+      expect(payload.scheme).to.equal("subly402-svm-v1");
       expect(payload.providerId).to.equal("weather-provider");
       expect(payload.amount).to.equal("1000");
       expect(payload.client).to.equal(signer.address);
@@ -265,7 +265,7 @@ describe("subly402 x402-compatible interface", () => {
       attestationPolicyHash: "cd".repeat(32),
     });
     const detailsFor = (version: 1 | 2): PaymentDetails => ({
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       network: "solana:devnet",
       amount: "1000",
       asset: {
@@ -311,7 +311,10 @@ describe("subly402 x402-compatible interface", () => {
 
       const providerFetchFor =
         (version: 1 | 2) =>
-        async (_input: string | URL, _init?: RequestInit): Promise<Response> => {
+        async (
+          _input: string | URL,
+          _init?: RequestInit
+        ): Promise<Response> => {
           const details = detailsFor(version);
           return new Response(JSON.stringify({ accepts: [details] }), {
             status: 402,

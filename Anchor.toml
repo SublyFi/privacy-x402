@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-a402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
+subly402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
 
 [programs.devnet]
-a402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
+subly402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
 
 [registry]
 url = "https://api.apr.dev"
@@ -19,4 +19,4 @@ cluster = "devnet"
 wallet = "~/.config/solana/unruggable/unruggable.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/a402_vault.ts\""
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/subly402_vault.ts\""

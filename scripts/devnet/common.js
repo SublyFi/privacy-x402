@@ -81,9 +81,11 @@ function loadKeypairFromFile(filePath) {
 
 function loadProvider() {
   const rpcUrl =
-    process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL;
+    process.env.ANCHOR_PROVIDER_URL || process.env.SUBLY402_SOLANA_RPC_URL;
   if (!rpcUrl) {
-    throw new Error("ANCHOR_PROVIDER_URL or A402_SOLANA_RPC_URL is required");
+    throw new Error(
+      "ANCHOR_PROVIDER_URL or SUBLY402_SOLANA_RPC_URL is required"
+    );
   }
   const walletPath = requireEnv("ANCHOR_WALLET");
   const walletKeypair = loadKeypairFromFile(walletPath);
@@ -101,7 +103,7 @@ function loadProvider() {
 }
 
 function loadProgram(provider) {
-  const idlPath = path.join(ROOT, "target", "idl", "a402_vault.json");
+  const idlPath = path.join(ROOT, "target", "idl", "subly402_vault.json");
   const idl = JSON.parse(fs.readFileSync(idlPath, "utf8"));
   return new anchor.Program(idl, provider);
 }
@@ -227,7 +229,7 @@ function computeRequestHash(
   paymentDetailsHash
 ) {
   const preimage =
-    `A402-SVM-V1-REQ\n` +
+    `SUBLY402-SVM-V1-REQ\n` +
     `${method}\n` +
     `${origin}\n` +
     `${pathAndQuery}\n` +
@@ -238,7 +240,7 @@ function computeRequestHash(
 
 function signPaymentPayload(client, fields) {
   const message =
-    `A402-SVM-V1-AUTH\n` +
+    `SUBLY402-SVM-V1-AUTH\n` +
     `${fields.version}\n` +
     `${fields.scheme}\n` +
     `${fields.paymentId}\n` +

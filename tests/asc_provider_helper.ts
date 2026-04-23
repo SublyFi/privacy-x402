@@ -55,7 +55,7 @@ describe("asc_provider_helper", () => {
     );
 
     expect(Buffer.from(message.subarray(0, 15)).toString("utf8")).to.equal(
-      "a402-asc-pay-v1"
+      "subly402-asc-pay-v1"
     );
     expect(message.length).to.equal(119);
   });
@@ -81,10 +81,10 @@ describe("asc_provider_helper", () => {
       vaultConfig: "55".repeat(32),
     });
     expect(Buffer.from(voucher.subarray(0, 23)).toString("utf8")).to.equal(
-      "A402-ASC-CLAIM-VOUCHER\u0000"
+      "SUBLY402-ASC-CLAIM-VOUCHER\u0000"
     );
     expect(Buffer.from(voucher.subarray(0, 22)).toString("utf8")).to.equal(
-      "A402-ASC-CLAIM-VOUCHER"
+      "SUBLY402-ASC-CLAIM-VOUCHER"
     );
 
     const fullSig = adaptAscSignature(delivery);

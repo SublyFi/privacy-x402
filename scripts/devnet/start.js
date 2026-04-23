@@ -11,8 +11,13 @@ const {
   waitForEndpoint,
 } = require("./common");
 
-const WATCHTOWER_BIN = path.join(ROOT, "target", "debug", "a402-watchtower");
-const ENCLAVE_BIN = path.join(ROOT, "target", "debug", "a402-enclave");
+const WATCHTOWER_BIN = path.join(
+  ROOT,
+  "target",
+  "debug",
+  "subly402-watchtower"
+);
+const ENCLAVE_BIN = path.join(ROOT, "target", "debug", "subly402-enclave");
 const WATCHTOWER_PID = path.join(ROOT, "data", "watchtower-devnet.pid");
 const ENCLAVE_PID = path.join(ROOT, "data", "enclave-devnet.pid");
 const WATCHTOWER_LOG = path.join(ROOT, "data", "logs", "watchtower-devnet.log");
@@ -47,7 +52,7 @@ function ensureBuilt() {
   }
   const result = spawnSync(
     "cargo",
-    ["build", "-p", "a402-watchtower", "-p", "a402-enclave"],
+    ["build", "-p", "subly402-watchtower", "-p", "subly402-enclave"],
     {
       cwd: ROOT,
       env: {
@@ -80,9 +85,9 @@ function spawnDetached(binPath, logPath, pidFile) {
 
 async function fetchStatus() {
   const enclaveUrl =
-    process.env.A402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
+    process.env.SUBLY402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
   const watchtowerUrl =
-    process.env.A402_WATCHTOWER_URL || "http://127.0.0.1:3200";
+    process.env.SUBLY402_WATCHTOWER_URL || "http://127.0.0.1:3200";
 
   const watchtowerRes = await getJson(watchtowerUrl, "/v1/status");
   if (!watchtowerRes.ok) {

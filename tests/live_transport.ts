@@ -81,14 +81,18 @@ export function generateTlsFixture(prefix: string): GeneratedTlsFixture {
       "1",
       "-nodes",
       "-subj",
-      "/CN=A402 Test CA",
+      "/CN=Subly402 Test CA",
     ],
     { stdio: "ignore" }
   );
 
   writeFileSync(
     serverExtPath,
-    ["subjectAltName=DNS:localhost,IP:127.0.0.1", "extendedKeyUsage=serverAuth", ""].join("\n")
+    [
+      "subjectAltName=DNS:localhost,IP:127.0.0.1",
+      "extendedKeyUsage=serverAuth",
+      "",
+    ].join("\n")
   );
   execFileSync(
     "openssl",
@@ -142,7 +146,7 @@ export function generateTlsFixture(prefix: string): GeneratedTlsFixture {
       clientCsrPath,
       "-nodes",
       "-subj",
-      `/CN=a402-provider-${randomUUID()}`,
+      `/CN=subly402-provider-${randomUUID()}`,
     ],
     { stdio: "ignore" }
   );
@@ -193,7 +197,9 @@ export async function requestJson(
   const parsedUrl = new URL(url);
   const transport = parsedUrl.protocol === "https:" ? https : http;
   const body =
-    options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body));
+    options.body === undefined
+      ? undefined
+      : Buffer.from(JSON.stringify(options.body));
   const headers: Record<string, string> = {
     ...(options.headers ?? {}),
   };

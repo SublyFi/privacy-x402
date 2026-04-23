@@ -29,7 +29,7 @@ function scalarToBytes(scalar: bigint): Uint8Array {
 
 function kdfMask(sharedSecretBytes: Uint8Array): Uint8Array {
   const hash = createHash("sha256");
-  hash.update("a402-elgamal-mask-v1");
+  hash.update("subly402-elgamal-mask-v1");
   hash.update(sharedSecretBytes);
   return new Uint8Array(hash.digest());
 }
@@ -42,7 +42,7 @@ function deriveProviderKeyMaterial(
     hkdfSync(
       "sha256",
       masterSecret,
-      Buffer.from("a402-audit-v1"),
+      Buffer.from("subly402-audit-v1"),
       provider.toBuffer(),
       64
     )
@@ -131,19 +131,28 @@ describe("audit_tool", () => {
     const wrongProvider = Keypair.generate().publicKey;
     const tool = new AuditTool(masterSecret);
 
-    const rawRecord = buildRawRecord(masterSecret, provider, sender, BigInt(123456));
+    const rawRecord = buildRawRecord(
+      masterSecret,
+      provider,
+      sender,
+      BigInt(123456)
+    );
     const exportedKey = await tool.exportProviderKey(provider);
     const wrongKey = await tool.exportProviderKey(wrongProvider);
 
     const decrypted = await AuditTool.decryptWithKey(exportedKey, [rawRecord]);
-    const wrongDecrypted = await AuditTool.decryptWithKey(wrongKey, [rawRecord]);
+    const wrongDecrypted = await AuditTool.decryptWithKey(wrongKey, [
+      rawRecord,
+    ]);
 
     expect(decrypted).to.have.length(1);
     expect(decrypted[0].sender.toBase58()).to.equal(sender.toBase58());
     expect(decrypted[0].amount).to.equal(123456);
 
     if (wrongDecrypted.length === 1) {
-      expect(wrongDecrypted[0].sender.toBase58()).to.not.equal(sender.toBase58());
+      expect(wrongDecrypted[0].sender.toBase58()).to.not.equal(
+        sender.toBase58()
+      );
     } else {
       expect(wrongDecrypted).to.have.length(0);
     }

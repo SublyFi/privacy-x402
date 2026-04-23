@@ -1,14 +1,14 @@
 [package]
-name = "a402-enclave"
+name = "subly402-enclave"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "a402-enclave"
+name = "subly402-enclave"
 path = "src/main.rs"
 
 [dependencies]
-a402_vault = { path = "../programs/a402_vault", features = ["cpi"] }
+subly402_vault = { path = "../programs/subly402_vault", features = ["cpi"] }
 async-trait = "0.1"
 axum = { version = "0.7", features = ["json"] }
 bytes = "1"

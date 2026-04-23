@@ -55,14 +55,15 @@ async function main() {
   anchor.setProvider(provider);
   const program = loadProgram(provider);
   const enclaveUrl =
-    process.env.A402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
-  const requestOrigin = process.env.A402_REQUEST_ORIGIN || "http://127.0.0.1";
-  const network = process.env.A402_NETWORK || "solana:devnet";
+    process.env.SUBLY402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
+  const requestOrigin =
+    process.env.SUBLY402_REQUEST_ORIGIN || "http://127.0.0.1";
+  const network = process.env.SUBLY402_NETWORK || "solana:devnet";
   const depositAmount = Number(
-    process.env.A402_SMOKE_DEPOSIT_AMOUNT || "2000000"
+    process.env.SUBLY402_SMOKE_DEPOSIT_AMOUNT || "2000000"
   );
   const paymentAmount = Number(
-    process.env.A402_SMOKE_PAYMENT_AMOUNT || "600000"
+    process.env.SUBLY402_SMOKE_PAYMENT_AMOUNT || "600000"
   );
 
   const attestationRes = await getJson(enclaveUrl, "/v1/attestation");
@@ -114,7 +115,7 @@ async function main() {
       const auth = buildClientRequestAuth(
         client,
         (issuedAt, expiresAt) =>
-          `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+          `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
       );
       const response = await postJson(enclaveUrl, "/v1/balance", {
         client: client.publicKey.toBase58(),
@@ -152,7 +153,7 @@ async function main() {
     throw new Error(
       `provider/register failed: ${
         registerRes.status
-      } ${await registerRes.text()} (start enclave with A402_ENABLE_PROVIDER_REGISTRATION_API=1)`
+      } ${await registerRes.text()} (start enclave with SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1)`
     );
   }
 
@@ -163,7 +164,7 @@ async function main() {
     bodySha256: sha256hex(JSON.stringify({ ok: true })),
   };
   const paymentDetails = {
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     network,
     amount: paymentAmount.toString(),
     asset: {
@@ -189,7 +190,7 @@ async function main() {
   const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
   const unsignedPayload = {
     version: 1,
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     paymentId: `pay_${crypto.randomUUID()}`,
     client: client.publicKey.toBase58(),
     vault: state.vaultConfig,
@@ -209,7 +210,7 @@ async function main() {
   };
   const providerHeaders = {
     Authorization: `Bearer ${providerApiKey}`,
-    "x-a402-provider-id": providerId,
+    "x-subly402-provider-id": providerId,
   };
 
   const verifyRes = await postJson(
@@ -251,7 +252,7 @@ async function main() {
     throw new Error(
       `fire-batch failed: ${
         fireBatchRes.status
-      } ${await fireBatchRes.text()} (start enclave with A402_ENABLE_ADMIN_API=1)`
+      } ${await fireBatchRes.text()} (start enclave with SUBLY402_ENABLE_ADMIN_API=1)`
     );
   }
   const fireBatchBody = await fireBatchRes.json();
@@ -263,7 +264,7 @@ async function main() {
   const finalBalanceAuth = buildClientRequestAuth(
     client,
     (issuedAt, expiresAt) =>
-      `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+      `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
   );
   const finalBalanceRes = await postJson(enclaveUrl, "/v1/balance", {
     client: client.publicKey.toBase58(),

@@ -104,7 +104,7 @@ async function getSettlementStatuses(enclaveUrl, settlements, providers) {
       { settlementId: settlement.settleBody.settlementId },
       {
         Authorization: `Bearer ${demoProvider.apiKey}`,
-        "x-a402-provider-id": demoProvider.id,
+        "x-subly402-provider-id": demoProvider.id,
       }
     );
     statuses.push({
@@ -120,44 +120,47 @@ async function getSettlementStatuses(enclaveUrl, settlements, providers) {
 async function main() {
   loadNitroEnv();
 
-  if (process.env.A402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
+  if (process.env.SUBLY402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
 
-  const enclaveUrl = requireEnv("A402_PUBLIC_ENCLAVE_URL").replace(/\/$/, "");
-  const programId = requireEnv("A402_PROGRAM_ID");
-  const vaultConfig = requireEnv("A402_VAULT_CONFIG");
-  const vaultTokenAccount = requireEnv("A402_VAULT_TOKEN_ACCOUNT");
-  const usdcMint = requireEnv("A402_USDC_MINT");
-  const expectedPolicyHash = requireEnv("A402_ATTESTATION_POLICY_HASH_HEX");
+  const enclaveUrl = requireEnv("SUBLY402_PUBLIC_ENCLAVE_URL").replace(
+    /\/$/,
+    ""
+  );
+  const programId = requireEnv("SUBLY402_PROGRAM_ID");
+  const vaultConfig = requireEnv("SUBLY402_VAULT_CONFIG");
+  const vaultTokenAccount = requireEnv("SUBLY402_VAULT_TOKEN_ACCOUNT");
+  const usdcMint = requireEnv("SUBLY402_USDC_MINT");
+  const expectedPolicyHash = requireEnv("SUBLY402_ATTESTATION_POLICY_HASH_HEX");
   const requestOrigin =
-    process.env.A402_REQUEST_ORIGIN || "https://demo.subly.dev";
-  const network = process.env.A402_NETWORK || "solana:devnet";
+    process.env.SUBLY402_REQUEST_ORIGIN || "https://demo.subly.dev";
+  const network = process.env.SUBLY402_NETWORK || "solana:devnet";
   const depositAmount = Number(
     readPositiveIntEnv(
-      "A402_DEMO_DEPOSIT_AMOUNT",
-      readPositiveIntEnv("A402_NITRO_E2E_DEPOSIT_AMOUNT", 3000000)
+      "SUBLY402_DEMO_DEPOSIT_AMOUNT",
+      readPositiveIntEnv("SUBLY402_NITRO_E2E_DEPOSIT_AMOUNT", 3000000)
     )
   );
   const paymentAmount = Number(
     readPositiveIntEnv(
-      "A402_DEMO_PAYMENT_AMOUNT",
-      readPositiveIntEnv("A402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
+      "SUBLY402_DEMO_PAYMENT_AMOUNT",
+      readPositiveIntEnv("SUBLY402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
     )
   );
   const clientSolLamports = Number(
     readPositiveIntEnv(
-      "A402_DEMO_CLIENT_SOL_LAMPORTS",
-      readPositiveIntEnv("A402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
+      "SUBLY402_DEMO_CLIENT_SOL_LAMPORTS",
+      readPositiveIntEnv("SUBLY402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
     )
   );
   const batchWaitAttempts = readPositiveIntEnv(
-    "A402_DEMO_BATCH_WAIT_ATTEMPTS",
-    readPositiveIntEnv("A402_NITRO_E2E_BATCH_WAIT_ATTEMPTS", 72)
+    "SUBLY402_DEMO_BATCH_WAIT_ATTEMPTS",
+    readPositiveIntEnv("SUBLY402_NITRO_E2E_BATCH_WAIT_ATTEMPTS", 72)
   );
   const batchWaitDelayMs = readPositiveIntEnv(
-    "A402_DEMO_BATCH_WAIT_DELAY_MS",
-    readPositiveIntEnv("A402_NITRO_E2E_BATCH_WAIT_DELAY_MS", 5000)
+    "SUBLY402_DEMO_BATCH_WAIT_DELAY_MS",
+    readPositiveIntEnv("SUBLY402_NITRO_E2E_BATCH_WAIT_DELAY_MS", 5000)
   );
   const providers = selectDemoProviders(loadDemoProviders());
   const requestBody = buildDemoRequest();
@@ -232,25 +235,25 @@ async function main() {
       mintAuthority,
       depositAmount
     );
-  } else if (process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
-    const sourceOwner = process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+  } else if (process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
+    const sourceOwner = process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
       ? (
           await loadSignerFromFile(
-            process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+            process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
           )
         ).signer
       : feePayer;
     await transferTokens(
       rpc,
       feePayer,
-      process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT,
+      process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT,
       clientTokenAccount,
       sourceOwner,
       depositAmount
     );
   } else {
     throw new Error(
-      "Demo needs test USDC funding. Set A402_USDC_MINT_AUTHORITY_WALLET or A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT."
+      "Demo needs test USDC funding. Set SUBLY402_USDC_MINT_AUTHORITY_WALLET or SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT."
     );
   }
 
@@ -275,7 +278,7 @@ async function main() {
       const auth = await buildClientRequestAuth(
         client,
         (issuedAt, expiresAt) =>
-          `A402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
+          `SUBLY402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
       );
       const response = await postJson(enclaveUrl, "/v1/balance", {
         client: client.address,
@@ -315,7 +318,7 @@ async function main() {
     });
     const providerHeaders = {
       Authorization: `Bearer ${demoProvider.apiKey}`,
-      "x-a402-provider-id": demoProvider.id,
+      "x-subly402-provider-id": demoProvider.id,
     };
 
     const verifyBody = await postOrThrow(
@@ -398,7 +401,7 @@ async function main() {
   const finalBalanceAuth = await buildClientRequestAuth(
     client,
     (issuedAt, expiresAt) =>
-      `A402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
+      `SUBLY402-CLIENT-BALANCE\n${client.address}\n${issuedAt}\n${expiresAt}\n`
   );
   const finalBalanceRes = await postJson(enclaveUrl, "/v1/balance", {
     client: client.address,

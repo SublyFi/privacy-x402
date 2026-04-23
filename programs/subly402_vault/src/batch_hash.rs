@@ -13,7 +13,7 @@ pub fn compute_batch_chunk_hash(
     records: &[AuditRecordData],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"a402-batch-chunk-v1");
+    hasher.update(b"subly402-batch-chunk-v1");
     hasher.update(batch_id.to_le_bytes());
 
     for settlement in settlements {

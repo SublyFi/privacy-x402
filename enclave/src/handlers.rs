@@ -1,10 +1,3 @@
-use a402_vault::asc_claim::{
-    build_asc_claim_voucher_message, hash_identifier, AscClaimVoucherFields,
-};
-use a402_vault::constants::{
-    VAULT_STATUS_ACTIVE, VAULT_STATUS_MIGRATING, VAULT_STATUS_PAUSED, VAULT_STATUS_RETIRED,
-};
-use a402_vault::state::VaultConfig as OnChainVaultConfig;
 use anchor_client::anchor_lang::AccountDeserialize;
 use axum::extract::State;
 use axum::http::{header::AUTHORIZATION, HeaderMap};
@@ -23,6 +16,13 @@ use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
+use subly402_vault::asc_claim::{
+    build_asc_claim_voucher_message, hash_identifier, AscClaimVoucherFields,
+};
+use subly402_vault::constants::{
+    VAULT_STATUS_ACTIVE, VAULT_STATUS_MIGRATING, VAULT_STATUS_PAUSED, VAULT_STATUS_RETIRED,
+};
+use subly402_vault::state::VaultConfig as OnChainVaultConfig;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -37,8 +37,8 @@ use crate::state::{PendingWithdrawal, Reservation, ReservationStatus, VaultLifec
 use crate::tls::INTERNAL_MTLS_FINGERPRINT_HEADER;
 use crate::wal::{Wal, WalEntry};
 
-const PROVIDER_ID_HEADER: &str = "x-a402-provider-id";
-const PROVIDER_AUTH_HEADER: &str = "x-a402-provider-auth";
+const PROVIDER_ID_HEADER: &str = "x-subly402-provider-id";
+const PROVIDER_AUTH_HEADER: &str = "x-subly402-provider-auth";
 const CLIENT_AUTH_MAX_WINDOW_SEC: i64 = 300;
 const CLIENT_AUTH_MAX_CLOCK_SKEW_SEC: i64 = 60;
 
@@ -455,13 +455,13 @@ pub async fn post_verify(
     ensure_vault_allows_new_verification(&state).await?;
 
     // 1. Validate scheme
-    if payload.scheme != "a402-svm-v1" {
+    if payload.scheme != "subly402-svm-v1" {
         return Err(EnclaveError::InvalidScheme);
     }
     if payment_details
         .get("scheme")
         .and_then(|value| value.as_str())
-        != Some("a402-svm-v1")
+        != Some("subly402-svm-v1")
     {
         return Err(EnclaveError::InvalidScheme);
     }
@@ -1805,7 +1805,7 @@ fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
 
 fn compute_request_hash(ctx: &RequestContext, payment_details_hash: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(b"A402-SVM-V1-REQ\n");
+    hasher.update(b"SUBLY402-SVM-V1-REQ\n");
     hasher.update(ctx.method.as_bytes());
     hasher.update(b"\n");
     hasher.update(ctx.origin.as_bytes());
@@ -1820,7 +1820,7 @@ fn compute_request_hash(ctx: &RequestContext, payment_details_hash: &str) -> Vec
 }
 
 fn build_balance_auth_message(client: &str, issued_at: i64, expires_at: i64) -> String {
-    format!("A402-CLIENT-BALANCE\n{client}\n{issued_at}\n{expires_at}\n")
+    format!("SUBLY402-CLIENT-BALANCE\n{client}\n{issued_at}\n{expires_at}\n")
 }
 
 fn build_receipt_auth_message(
@@ -1829,7 +1829,7 @@ fn build_receipt_auth_message(
     issued_at: i64,
     expires_at: i64,
 ) -> String {
-    format!("A402-CLIENT-RECEIPT\n{client}\n{recipient_ata}\n{issued_at}\n{expires_at}\n")
+    format!("SUBLY402-CLIENT-RECEIPT\n{client}\n{recipient_ata}\n{issued_at}\n{expires_at}\n")
 }
 
 fn build_withdraw_auth_message(
@@ -1840,7 +1840,7 @@ fn build_withdraw_auth_message(
     expires_at: i64,
 ) -> String {
     format!(
-        "A402-CLIENT-WITHDRAW-AUTH\n{client}\n{recipient_ata}\n{amount}\n{issued_at}\n{expires_at}\n"
+        "SUBLY402-CLIENT-WITHDRAW-AUTH\n{client}\n{recipient_ata}\n{amount}\n{issued_at}\n{expires_at}\n"
     )
 }
 
@@ -2045,7 +2045,7 @@ pub(crate) async fn expire_stale_channel_request(
 fn verify_client_signature(payload: &PaymentPayload) -> Result<(), EnclaveError> {
     // Build signature message per spec
     let mut message = String::new();
-    message.push_str("A402-SVM-V1-AUTH\n");
+    message.push_str("SUBLY402-SVM-V1-AUTH\n");
     message.push_str(&format!("{}\n", payload.version));
     message.push_str(&format!("{}\n", payload.scheme));
     message.push_str(&format!("{}\n", payload.payment_id));
@@ -2165,7 +2165,7 @@ fn registered_channel_provider_participant_pubkey(
 
 fn build_channel_open_message(client: &str, provider_id: &str, initial_deposit: u64) -> String {
     format!(
-        "A402-CHANNEL-OPEN\n{}\n{}\n{}\n",
+        "SUBLY402-CHANNEL-OPEN\n{}\n{}\n{}\n",
         client, provider_id, initial_deposit
     )
 }
@@ -2177,20 +2177,20 @@ fn build_channel_request_message(
     request_hash: &str,
 ) -> String {
     format!(
-        "A402-CHANNEL-REQUEST\n{}\n{}\n{}\n{}\n",
+        "SUBLY402-CHANNEL-REQUEST\n{}\n{}\n{}\n{}\n",
         channel_id, request_id, amount, request_hash
     )
 }
 
 fn build_channel_finalize_message(channel_id: &str, adaptor_secret: &str) -> String {
     format!(
-        "A402-CHANNEL-FINALIZE\n{}\n{}\n",
+        "SUBLY402-CHANNEL-FINALIZE\n{}\n{}\n",
         channel_id, adaptor_secret
     )
 }
 
 fn build_channel_close_message(channel_id: &str) -> String {
-    format!("A402-CHANNEL-CLOSE\n{}\n", channel_id)
+    format!("SUBLY402-CHANNEL-CLOSE\n{}\n", channel_id)
 }
 
 fn issue_asc_claim_voucher(
@@ -2232,7 +2232,7 @@ pub struct OpenChannelRequest {
     pub client: String,
     pub provider_id: String,
     pub initial_deposit: u64,
-    /// Ed25519 signature over "A402-CHANNEL-OPEN\n{client}\n{provider_id}\n{initial_deposit}\n"
+    /// Ed25519 signature over "SUBLY402-CHANNEL-OPEN\n{client}\n{provider_id}\n{initial_deposit}\n"
     pub client_sig: String,
 }
 
@@ -2665,7 +2665,7 @@ mod tests {
         use ed25519_dalek::Signer;
 
         let mut message = String::new();
-        message.push_str("A402-SVM-V1-AUTH\n");
+        message.push_str("SUBLY402-SVM-V1-AUTH\n");
         message.push_str(&format!("{}\n", payload.version));
         message.push_str(&format!("{}\n", payload.scheme));
         message.push_str(&format!("{}\n", payload.payment_id));
@@ -2715,7 +2715,7 @@ mod tests {
             solana.clone(),
         ));
         let wal_path =
-            std::env::temp_dir().join(format!("a402-phase3-{}.jsonl", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("subly402-phase3-{}.jsonl", uuid::Uuid::now_v7()));
         let wal = Arc::new(Wal::new(wal_path.clone()).await);
         let detector = Arc::new(DepositDetector::new(
             solana.vault_token_account,
@@ -2926,7 +2926,7 @@ mod tests {
             body_sha256: "11".repeat(32),
         };
         let payment_details = serde_json::json!({
-            "scheme": "a402-svm-v1",
+            "scheme": "subly402-svm-v1",
             "network": "solana:localnet",
             "amount": "600000",
             "asset": {
@@ -2956,7 +2956,7 @@ mod tests {
 
         let mut payment_payload = PaymentPayload {
             version: 1,
-            scheme: "a402-svm-v1".to_string(),
+            scheme: "subly402-svm-v1".to_string(),
             payment_id: "pay_mtls_test".to_string(),
             client: client.to_string(),
             vault: state.vault.vault_config.to_string(),
@@ -3058,7 +3058,7 @@ mod tests {
             body_sha256: "33".repeat(32),
         };
         let payment_details = serde_json::json!({
-            "scheme": "a402-svm-v1",
+            "scheme": "subly402-svm-v1",
             "network": "solana:localnet",
             "amount": "600000",
             "asset": {
@@ -3088,7 +3088,7 @@ mod tests {
 
         let mut payment_payload = PaymentPayload {
             version: 1,
-            scheme: "a402-svm-v1".to_string(),
+            scheme: "subly402-svm-v1".to_string(),
             payment_id: "pay_verify_window".to_string(),
             client: client.to_string(),
             vault: state.vault.vault_config.to_string(),
@@ -3304,7 +3304,7 @@ mod tests {
             body_sha256: "44".repeat(32),
         };
         let payment_details = serde_json::json!({
-            "scheme": "a402-svm-v1",
+            "scheme": "subly402-svm-v1",
             "network": "solana:localnet",
             "amount": "600000",
             "asset": {
@@ -3334,7 +3334,7 @@ mod tests {
 
         let mut payment_payload = PaymentPayload {
             version: 1,
-            scheme: "a402-svm-v1".to_string(),
+            scheme: "subly402-svm-v1".to_string(),
             payment_id: "pay_expired_settle".to_string(),
             client: client.to_string(),
             vault: state.vault.vault_config.to_string(),
@@ -3581,7 +3581,7 @@ mod tests {
         let provider_pubkey = provider_signing_key.verifying_key().to_bytes();
         let adaptor = AdaptorKeyPair::generate();
         let request_hash: [u8; 32] = hex::decode(&request_hash_hex).unwrap().try_into().unwrap();
-        let payment_message = a402_vault::asc_claim::build_asc_payment_message(
+        let payment_message = subly402_vault::asc_claim::build_asc_payment_message(
             &channel_id,
             "req-123",
             1_250_000,
@@ -3900,7 +3900,7 @@ mod tests {
         let request_hash: [u8; 32] = hex::decode(&request_hash_hex).unwrap().try_into().unwrap();
         let pre_sig = adaptor_sig::pre_sign(
             &mismatched_provider_signing_key.to_bytes(),
-            &a402_vault::asc_claim::build_asc_payment_message(
+            &subly402_vault::asc_claim::build_asc_payment_message(
                 &channel_id,
                 "req-mismatch",
                 1_250_000,
@@ -4028,7 +4028,7 @@ mod tests {
         let request_hash: [u8; 32] = hex::decode(&request_hash_hex).unwrap().try_into().unwrap();
         let pre_sig = adaptor_sig::pre_sign(
             &provider_signing_key.to_bytes(),
-            &a402_vault::asc_claim::build_asc_payment_message(
+            &subly402_vault::asc_claim::build_asc_payment_message(
                 &channel_id,
                 "req-reuse",
                 1_000_000,
@@ -4042,7 +4042,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            HeaderName::from_static("x-a402-provider-auth"),
+            HeaderName::from_static("x-subly402-provider-auth"),
             HeaderValue::from_str(provider_api_key).unwrap(),
         );
 
@@ -4176,7 +4176,7 @@ mod tests {
         let request_hash: [u8; 32] = hex::decode(&request_hash_hex).unwrap().try_into().unwrap();
         let pre_sig = adaptor_sig::pre_sign(
             &provider_signing_key.to_bytes(),
-            &a402_vault::asc_claim::build_asc_payment_message(
+            &subly402_vault::asc_claim::build_asc_payment_message(
                 &channel_id,
                 "req-replay",
                 1_250_000,
@@ -4311,7 +4311,7 @@ mod tests {
             solana.clone(),
         ));
         let wal_path =
-            std::env::temp_dir().join(format!("a402-phase3-dir-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("subly402-phase3-dir-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&wal_path).await.unwrap();
         let state = Arc::new(AppState {
             vault: vault.clone(),

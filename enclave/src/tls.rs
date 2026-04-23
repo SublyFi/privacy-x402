@@ -23,7 +23,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::interconnect::{InterconnectListener, InterconnectStream};
 
-pub const INTERNAL_MTLS_FINGERPRINT_HEADER: &str = "x-a402-internal-mtls-fingerprint";
+pub const INTERNAL_MTLS_FINGERPRINT_HEADER: &str = "x-subly402-internal-mtls-fingerprint";
 
 #[derive(Clone, Debug)]
 pub struct TlsBindingInfo {
@@ -43,19 +43,19 @@ impl TlsRuntime {
     pub fn from_env() -> Result<Option<Self>, String> {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let cert_path = env::var("A402_ENCLAVE_TLS_CERT_PATH").ok();
-        let key_path = env::var("A402_ENCLAVE_TLS_KEY_PATH").ok();
-        let client_ca_path = env::var("A402_ENCLAVE_TLS_CLIENT_CA_PATH").ok();
+        let cert_path = env::var("SUBLY402_ENCLAVE_TLS_CERT_PATH").ok();
+        let key_path = env::var("SUBLY402_ENCLAVE_TLS_KEY_PATH").ok();
+        let client_ca_path = env::var("SUBLY402_ENCLAVE_TLS_CLIENT_CA_PATH").ok();
 
         if cert_path.is_none() && key_path.is_none() && client_ca_path.is_none() {
             return Ok(None);
         }
 
         let cert_path = cert_path.ok_or_else(|| {
-            "A402_ENCLAVE_TLS_CERT_PATH must be set when TLS is enabled".to_string()
+            "SUBLY402_ENCLAVE_TLS_CERT_PATH must be set when TLS is enabled".to_string()
         })?;
         let key_path = key_path.ok_or_else(|| {
-            "A402_ENCLAVE_TLS_KEY_PATH must be set when TLS is enabled".to_string()
+            "SUBLY402_ENCLAVE_TLS_KEY_PATH must be set when TLS is enabled".to_string()
         })?;
 
         let certs = load_certs(&cert_path)?;
@@ -83,7 +83,7 @@ impl TlsRuntime {
 
         Ok(Some(Self {
             acceptor: TlsAcceptor::from(Arc::new(server_config)),
-            mtls_enabled: env::var("A402_ENCLAVE_TLS_CLIENT_CA_PATH").is_ok(),
+            mtls_enabled: env::var("SUBLY402_ENCLAVE_TLS_CLIENT_CA_PATH").is_ok(),
             binding,
         }))
     }

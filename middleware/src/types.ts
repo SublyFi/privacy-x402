@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 
 /** Provider payment configuration */
-export interface A402ProviderConfig {
+export interface Subly402ProviderConfig {
   /** Base URL of the enclave facilitator */
   facilitatorUrl: string;
   /** Provider's registered ID */
@@ -76,17 +76,17 @@ export interface AscDeliverResponse {
 /** Pricing function: given a request, return the price in atomic units (or null if free) */
 export type PricingFn = (req: Request) => string | null;
 
-/** Options for the a402 middleware */
-export interface A402MiddlewareOptions {
-  config: A402ProviderConfig;
+/** Options for the subly402 middleware */
+export interface Subly402MiddlewareOptions {
+  config: Subly402ProviderConfig;
   /** Return the price for this request, or null if no payment required */
   pricing: PricingFn;
 }
 
 /** Extended request with payment context */
-export interface A402Request extends Request {
+export interface Subly402Request extends Request {
   rawBody?: Buffer | string;
-  a402?: {
+  subly402?: {
     verificationId: string;
     paymentId: string;
     amount: string;
@@ -104,10 +104,10 @@ export interface SettlementStatusResponse {
   txSignature: string | null;
 }
 
-export type Subly402Scheme = "exact" | "subly402-exact" | "a402-svm-v1";
+export type Subly402Scheme = "exact" | "subly402-exact" | "subly402-svm-v1";
 
 export interface Subly402RouteAccept {
-  /** Developer-facing scheme. "exact" is mapped to the current a402-svm-v1 wire scheme. */
+  /** Developer-facing scheme. "exact" is mapped to the current subly402-svm-v1 wire scheme. */
   scheme?: Subly402Scheme;
   /** Human-readable price such as "$0.001", or atomic token units such as "1000". */
   price: string | number;
@@ -142,8 +142,8 @@ export interface Subly402FacilitatorClientOptions {
   url: string;
   /** Provider API key used by the seller middleware for /verify and /settle. */
   providerApiKey?: string;
-  authMode?: A402ProviderConfig["authMode"];
-  mtls?: A402ProviderConfig["mtls"];
+  authMode?: Subly402ProviderConfig["authMode"];
+  mtls?: Subly402ProviderConfig["mtls"];
   /** Optional cached attestation fields. If omitted, middleware fetches /v1/attestation. */
   vaultConfig?: string;
   vaultSigner?: string;

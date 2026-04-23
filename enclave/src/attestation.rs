@@ -40,7 +40,7 @@ pub struct LocalDevAttestationDocument {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct A402NitroUserDataEnvelope<'a> {
+struct Subly402NitroUserDataEnvelope<'a> {
     version: u32,
     vault_config: String,
     vault_signer: String,
@@ -118,27 +118,28 @@ pub fn build_static_nitro_attestation(document_b64: String) -> AttestationBundle
 }
 
 pub fn resolve_attestation_policy_hash_from_env() -> Result<[u8; 32], String> {
-    if let Ok(value) = std::env::var("A402_ATTESTATION_POLICY_HASH_HEX") {
-        return decode_fixed_hex_32("A402_ATTESTATION_POLICY_HASH_HEX", &value);
+    if let Ok(value) = std::env::var("SUBLY402_ATTESTATION_POLICY_HASH_HEX") {
+        return decode_fixed_hex_32("SUBLY402_ATTESTATION_POLICY_HASH_HEX", &value);
     }
 
     if !should_use_dynamic_nitro_attestation() {
         return Ok([0u8; 32]);
     }
 
-    let eif_signing_cert_sha256 = std::env::var("A402_EIF_SIGNING_CERT_SHA256").map_err(|_| {
-        "A402_EIF_SIGNING_CERT_SHA256 must be set for Nitro policy derivation".to_string()
-    })?;
-    let kms_key_arn_sha256 = match std::env::var("A402_KMS_KEY_ARN_SHA256") {
+    let eif_signing_cert_sha256 =
+        std::env::var("SUBLY402_EIF_SIGNING_CERT_SHA256").map_err(|_| {
+            "SUBLY402_EIF_SIGNING_CERT_SHA256 must be set for Nitro policy derivation".to_string()
+        })?;
+    let kms_key_arn_sha256 = match std::env::var("SUBLY402_KMS_KEY_ARN_SHA256") {
         Ok(value) => normalize_hex(&value)?,
         Err(_) => {
-            let key_arn = std::env::var("A402_KMS_KEY_ARN")
-                .map_err(|_| "A402_KMS_KEY_ARN or A402_KMS_KEY_ARN_SHA256 must be set for Nitro policy derivation".to_string())?;
+            let key_arn = std::env::var("SUBLY402_KMS_KEY_ARN")
+                .map_err(|_| "SUBLY402_KMS_KEY_ARN or SUBLY402_KMS_KEY_ARN_SHA256 must be set for Nitro policy derivation".to_string())?;
             hex::encode(sha2::Sha256::digest(key_arn.as_bytes()))
         }
     };
-    let protocol =
-        std::env::var("A402_ATTESTATION_PROTOCOL").unwrap_or_else(|_| "a402-svm-v1".to_string());
+    let protocol = std::env::var("SUBLY402_ATTESTATION_PROTOCOL")
+        .unwrap_or_else(|_| "subly402-svm-v1".to_string());
     let document_b64 = request_nitro_attestation_document(None, None)?;
     let pcrs = parse_pcrs_from_attestation_document(&document_b64)?;
     let canonical = canonical_json(&JsonValue::Object(serde_json::Map::from_iter([
@@ -300,7 +301,7 @@ fn build_runtime_local_dev_attestation(
         .map_err(|error| format!("failed to serialize local attestation document: {error}"))
 }
 
-fn build_a402_user_data(
+fn build_subly402_user_data(
     vault_config: Pubkey,
     vault_signer: Pubkey,
     attestation_policy_hash: [u8; 32],
@@ -308,7 +309,7 @@ fn build_a402_user_data(
     tls_binding: Option<&TlsBindingInfo>,
     manifest_hash: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&A402NitroUserDataEnvelope {
+    serde_json::to_vec(&Subly402NitroUserDataEnvelope {
         version: 1,
         vault_config: vault_config.to_string(),
         vault_signer: vault_signer.to_string(),
@@ -329,7 +330,7 @@ fn build_dynamic_nitro_attestation(
     tls_binding: Option<&TlsBindingInfo>,
     manifest_hash: Option<&str>,
 ) -> Result<String, String> {
-    let user_data = build_a402_user_data(
+    let user_data = build_subly402_user_data(
         vault_config,
         vault_signer,
         attestation_policy_hash,
@@ -357,7 +358,7 @@ fn build_dynamic_nitro_attestation(
 
 #[cfg(target_os = "linux")]
 fn should_use_dynamic_nitro_attestation() -> bool {
-    if std::env::var("A402_DISABLE_DYNAMIC_NITRO_ATTESTATION")
+    if std::env::var("SUBLY402_DISABLE_DYNAMIC_NITRO_ATTESTATION")
         .ok()
         .as_deref()
         == Some("1")

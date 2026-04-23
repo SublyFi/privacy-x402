@@ -1,6 +1,6 @@
 export {
-  a402Middleware,
-  captureA402RawBody,
+  subly402Middleware,
+  captureSubly402RawBody,
   lookupSettlementStatus,
 } from "./middleware";
 export {
@@ -23,9 +23,9 @@ export {
   submitAscDelivery,
 } from "./asc";
 export type {
-  A402MiddlewareOptions,
-  A402ProviderConfig,
-  A402Request,
+  Subly402MiddlewareOptions,
+  Subly402ProviderConfig,
+  Subly402Request,
   AscDeliverResponse,
   AscDeliveryArtifact,
   AscDeliveryInput,

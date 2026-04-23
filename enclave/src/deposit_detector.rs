@@ -48,7 +48,7 @@ const SIGNATURE_PAGE_LIMIT: usize = 1_000;
 pub struct DepositDetector {
     /// Vault token account to monitor for incoming transfers
     pub vault_token_account: Pubkey,
-    /// Program ID for the a402_vault program
+    /// Program ID for the subly402_vault program
     pub program_id: Pubkey,
     /// Solana RPC URL (via egress relay in production)
     pub rpc_url: String,

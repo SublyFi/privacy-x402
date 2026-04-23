@@ -120,27 +120,28 @@ function loadNitroEnv() {
   loadEnvFile(path.join(ROOT, ".env.devnet.local"));
 
   const clientEnv =
-    process.env.A402_NITRO_CLIENT_ENV ||
+    process.env.SUBLY402_NITRO_CLIENT_ENV ||
     path.join(ROOT, "infra", "nitro", "generated", "client.env");
   loadEnvFile(clientEnv, { required: true });
 
   const providerEnv =
-    process.env.A402_DEMO_PROVIDERS_ENV || "/root/a402-demo-providers.env";
+    process.env.SUBLY402_DEMO_PROVIDERS_ENV ||
+    "/root/subly402-demo-providers.env";
   loadEnvFile(providerEnv, { required: true });
 }
 
 function loadDemoProviders() {
   const providers = [1, 2].map((index) => ({
     index,
-    id: process.env[`A402_DEMO_PROVIDER_${index}_ID`],
-    tokenAccount: process.env[`A402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`],
-    apiKey: process.env[`A402_DEMO_PROVIDER_${index}_API_KEY`],
+    id: process.env[`SUBLY402_DEMO_PROVIDER_${index}_ID`],
+    tokenAccount: process.env[`SUBLY402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`],
+    apiKey: process.env[`SUBLY402_DEMO_PROVIDER_${index}_API_KEY`],
   }));
 
   for (const provider of providers) {
     if (!provider.id || !provider.tokenAccount || !provider.apiKey) {
       throw new Error(
-        `A402_DEMO_PROVIDER_${provider.index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
+        `SUBLY402_DEMO_PROVIDER_${provider.index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
       );
     }
   }
@@ -210,7 +211,7 @@ function buildPayment({
     bodySha256: sha256hex(JSON.stringify({ provider: provider.index })),
   };
   const paymentDetails = {
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     network,
     amount: paymentAmount.toString(),
     asset: {
@@ -236,7 +237,7 @@ function buildPayment({
   const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
   const unsignedPayload = {
     version: 1,
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     paymentId: `pay_${crypto.randomUUID()}`,
     client: client.publicKey.toBase58(),
     vault: vaultConfig,
@@ -265,7 +266,7 @@ function loadMintAuthority(provider, mintAuthority) {
   if (mintAuthority === null) {
     return null;
   }
-  const walletPath = process.env.A402_USDC_MINT_AUTHORITY_WALLET;
+  const walletPath = process.env.SUBLY402_USDC_MINT_AUTHORITY_WALLET;
   if (walletPath) {
     return loadKeypairFromFile(walletPath);
   }
@@ -278,33 +279,36 @@ function loadMintAuthority(provider, mintAuthority) {
 async function main() {
   loadNitroEnv();
 
-  if (process.env.A402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
+  if (process.env.SUBLY402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
 
-  const enclaveUrl = requireEnv("A402_PUBLIC_ENCLAVE_URL").replace(/\/$/, "");
-  const vaultConfig = requireEnv("A402_VAULT_CONFIG");
-  const vaultTokenAccount = requireEnv("A402_VAULT_TOKEN_ACCOUNT");
-  const usdcMint = requireEnv("A402_USDC_MINT");
-  const expectedPolicyHash = requireEnv("A402_ATTESTATION_POLICY_HASH_HEX");
+  const enclaveUrl = requireEnv("SUBLY402_PUBLIC_ENCLAVE_URL").replace(
+    /\/$/,
+    ""
+  );
+  const vaultConfig = requireEnv("SUBLY402_VAULT_CONFIG");
+  const vaultTokenAccount = requireEnv("SUBLY402_VAULT_TOKEN_ACCOUNT");
+  const usdcMint = requireEnv("SUBLY402_USDC_MINT");
+  const expectedPolicyHash = requireEnv("SUBLY402_ATTESTATION_POLICY_HASH_HEX");
   const requestOrigin =
-    process.env.A402_REQUEST_ORIGIN || "http://localhost:3000";
-  const network = process.env.A402_NETWORK || "solana:devnet";
+    process.env.SUBLY402_REQUEST_ORIGIN || "http://localhost:3000";
+  const network = process.env.SUBLY402_NETWORK || "solana:devnet";
   const depositAmount = Number(
-    process.env.A402_NITRO_E2E_DEPOSIT_AMOUNT || "3000000"
+    process.env.SUBLY402_NITRO_E2E_DEPOSIT_AMOUNT || "3000000"
   );
   const paymentAmount = Number(
-    process.env.A402_NITRO_E2E_PAYMENT_AMOUNT || "1100000"
+    process.env.SUBLY402_NITRO_E2E_PAYMENT_AMOUNT || "1100000"
   );
   const providerSolLamports = Number(
-    process.env.A402_NITRO_E2E_CLIENT_SOL_LAMPORTS || "50000000"
+    process.env.SUBLY402_NITRO_E2E_CLIENT_SOL_LAMPORTS || "50000000"
   );
   const batchWaitAttempts = readPositiveIntEnv(
-    "A402_NITRO_E2E_BATCH_WAIT_ATTEMPTS",
+    "SUBLY402_NITRO_E2E_BATCH_WAIT_ATTEMPTS",
     48
   );
   const batchWaitDelayMs = readPositiveIntEnv(
-    "A402_NITRO_E2E_BATCH_WAIT_DELAY_MS",
+    "SUBLY402_NITRO_E2E_BATCH_WAIT_DELAY_MS",
     5000
   );
   const providers = loadDemoProviders();
@@ -320,7 +324,8 @@ async function main() {
   const mintAuthority = loadMintAuthority(provider, mint.mintAuthority);
 
   const plan = {
-    cluster: process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL,
+    cluster:
+      process.env.ANCHOR_PROVIDER_URL || process.env.SUBLY402_SOLANA_RPC_URL,
     feePayer: provider.wallet.publicKey.toBase58(),
     enclaveUrl,
     vaultConfig,
@@ -331,19 +336,22 @@ async function main() {
     paymentAmountPerProvider: paymentAmount,
     providers: providers.map(({ id, tokenAccount }) => ({ id, tokenAccount })),
     mintAuthority: mint.mintAuthority?.toBase58() ?? "disabled",
-    mintAuthorityWallet: process.env.A402_USDC_MINT_AUTHORITY_WALLET || null,
-    sourceTokenAccount: process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT || null,
+    mintAuthorityWallet:
+      process.env.SUBLY402_USDC_MINT_AUTHORITY_WALLET || null,
+    sourceTokenAccount:
+      process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT || null,
     batchWaitAttempts,
     batchWaitDelayMs,
   };
 
-  if (process.env.A402_NITRO_E2E_CONFIRM !== "1") {
+  if (process.env.SUBLY402_NITRO_E2E_CONFIRM !== "1") {
     console.log(
       JSON.stringify(
         {
           ok: false,
           dryRun: true,
-          message: "Set A402_NITRO_E2E_CONFIRM=1 to send devnet transactions.",
+          message:
+            "Set SUBLY402_NITRO_E2E_CONFIRM=1 to send devnet transactions.",
           plan,
         },
         null,
@@ -393,16 +401,16 @@ async function main() {
       mintAuthority,
       depositAmount
     );
-  } else if (process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
-    const sourceOwner = process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+  } else if (process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT) {
+    const sourceOwner = process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
       ? loadKeypairFromFile(
-          process.env.A402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
+          process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_OWNER_WALLET
         )
       : provider.wallet.payer;
     await transfer(
       provider.connection,
       provider.wallet.payer,
-      new PublicKey(process.env.A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT),
+      new PublicKey(process.env.SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT),
       clientTokenAccount,
       sourceOwner,
       depositAmount
@@ -411,7 +419,7 @@ async function main() {
     throw new Error(
       `USDC mint authority is ${
         mint.mintAuthority?.toBase58() ?? "disabled"
-      }, not fee payer ${provider.wallet.publicKey.toBase58()}. Set A402_USDC_MINT_AUTHORITY_WALLET to the mint authority keypair, or set A402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT to a funded token account.`
+      }, not fee payer ${provider.wallet.publicKey.toBase58()}. Set SUBLY402_USDC_MINT_AUTHORITY_WALLET to the mint authority keypair, or set SUBLY402_NITRO_E2E_SOURCE_TOKEN_ACCOUNT to a funded token account.`
     );
   }
 
@@ -433,7 +441,7 @@ async function main() {
       const auth = buildClientRequestAuth(
         client,
         (issuedAt, expiresAt) =>
-          `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+          `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
       );
       const response = await postJson(enclaveUrl, "/v1/balance", {
         client: client.publicKey.toBase58(),
@@ -468,7 +476,7 @@ async function main() {
     });
     const providerHeaders = {
       Authorization: `Bearer ${demoProvider.apiKey}`,
-      "x-a402-provider-id": demoProvider.id,
+      "x-subly402-provider-id": demoProvider.id,
     };
 
     const verifyBody = await postOrThrow(
@@ -538,7 +546,7 @@ async function main() {
         },
         {
           Authorization: `Bearer ${demoProvider.apiKey}`,
-          "x-a402-provider-id": demoProvider.id,
+          "x-subly402-provider-id": demoProvider.id,
         }
       );
       settlementStatuses.push({
@@ -568,7 +576,7 @@ async function main() {
   const finalBalanceAuth = buildClientRequestAuth(
     client,
     (issuedAt, expiresAt) =>
-      `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+      `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
   );
   const finalBalanceRes = await postJson(enclaveUrl, "/v1/balance", {
     client: client.publicKey.toBase58(),

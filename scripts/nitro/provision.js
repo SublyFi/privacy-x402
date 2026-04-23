@@ -29,10 +29,11 @@ function bytes32ToHex(value) {
 async function main() {
   loadDefaultEnvFiles();
   const args = parseArgs(process.argv.slice(2));
-  const planPath = args.plan || process.env.A402_NITRO_PLAN_PATH || PLAN_PATH;
+  const planPath =
+    args.plan || process.env.SUBLY402_NITRO_PLAN_PATH || PLAN_PATH;
   const measurementsPath =
     args.measurements ||
-    process.env.A402_EIF_MEASUREMENTS_FILE ||
+    process.env.SUBLY402_EIF_MEASUREMENTS_FILE ||
     path.join(GENERATED_DIR, "eif-measurements.json");
   const plan = readJson(planPath);
   const measurements = loadMeasurements(measurementsPath);
@@ -73,10 +74,10 @@ async function main() {
         new anchor.BN(plan.vaultId),
         vaultSignerPubkey,
         decodeHex32(
-          "A402_AUDITOR_MASTER_PUBKEY_HEX",
+          "SUBLY402_AUDITOR_MASTER_PUBKEY_HEX",
           plan.auditorMasterPubkeyHex
         ),
-        decodeHex32("A402_ATTESTATION_POLICY_HASH_HEX", hashHex)
+        decodeHex32("SUBLY402_ATTESTATION_POLICY_HASH_HEX", hashHex)
       )
       .accountsPartial({
         governance: provider.wallet.publicKey,
@@ -141,9 +142,9 @@ async function main() {
     kms_eif_signing_cert_sha256: plan.eifSigningCertSha256,
     kms_attestation_image_sha384: policy.pcrs["0"],
     kms_provisioner_principal_arns: process.env
-      .A402_KMS_PROVISIONER_PRINCIPAL_ARN
-      ? process.env.A402_KMS_PROVISIONER_PRINCIPAL_ARN.split(",").map((item) =>
-          item.trim()
+      .SUBLY402_KMS_PROVISIONER_PRINCIPAL_ARN
+      ? process.env.SUBLY402_KMS_PROVISIONER_PRINCIPAL_ARN.split(",").map(
+          (item) => item.trim()
         )
       : [],
   });
@@ -159,13 +160,14 @@ async function main() {
     provisionedAt: new Date().toISOString(),
   });
   writeEnvFile(clientEnvPath, {
-    A402_PROGRAM_ID: plan.programId,
-    A402_VAULT_CONFIG: plan.vaultConfig,
-    A402_VAULT_TOKEN_ACCOUNT: plan.vaultTokenAccount,
-    A402_USDC_MINT: plan.usdcMint,
-    A402_ATTESTATION_POLICY_HASH_HEX: hashHex,
-    A402_PUBLIC_ENCLAVE_URL:
-      process.env.A402_PUBLIC_ENCLAVE_URL || "https://replace-with-your-nlb",
+    SUBLY402_PROGRAM_ID: plan.programId,
+    SUBLY402_VAULT_CONFIG: plan.vaultConfig,
+    SUBLY402_VAULT_TOKEN_ACCOUNT: plan.vaultTokenAccount,
+    SUBLY402_USDC_MINT: plan.usdcMint,
+    SUBLY402_ATTESTATION_POLICY_HASH_HEX: hashHex,
+    SUBLY402_PUBLIC_ENCLAVE_URL:
+      process.env.SUBLY402_PUBLIC_ENCLAVE_URL ||
+      "https://replace-with-your-nlb",
   });
 
   console.log(

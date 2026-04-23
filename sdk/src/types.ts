@@ -3,7 +3,7 @@ import type { Address, MessagePartialSigner } from "@solana/kit";
 
 /** Payment details from a 402 response */
 export interface PaymentDetails {
-  scheme: "a402-svm-v1";
+  scheme: "subly402-svm-v1";
   network: string;
   amount: string;
   asset: {
@@ -107,7 +107,7 @@ export interface NitroAttestationPolicy {
   protocol: string;
 }
 
-export interface A402NitroUserDataEnvelope {
+export interface Subly402NitroUserDataEnvelope {
   version: number;
   vaultConfig: string;
   vaultSigner: string;
@@ -127,7 +127,7 @@ export interface NitroAttestationDocument {
   publicKeyDerB64?: string;
   userDataB64?: string;
   nonceB64?: string;
-  parsedA402UserData?: A402NitroUserDataEnvelope | null;
+  parsedSubly402UserData?: Subly402NitroUserDataEnvelope | null;
 }
 
 export interface NitroAttestationConfig {
@@ -138,7 +138,7 @@ export interface NitroAttestationConfig {
   expectedVaultSigner?: string;
   maxAgeMs?: number;
   rootCertificatesPem?: string[];
-  requireA402UserData?: boolean;
+  requireSubly402UserData?: boolean;
   /**
    * Escape hatch for callers who explicitly want to skip PCR pinning. Without
    * this, `verifyNitroAttestationDocument()` throws when neither `policy.pcrs`
@@ -254,8 +254,8 @@ export interface CloseChannelResponse {
   providerEarned: number;
 }
 
-/** A402Client configuration */
-export interface A402ClientConfig {
+/** Direct vault/enclave client configuration */
+export interface Subly402VaultClientConfig {
   /** Client wallet keypair */
   walletKeypair: {
     publicKey: PublicKey;
@@ -283,6 +283,7 @@ export interface Subly402Signer {
   signMessages?: MessagePartialSigner["signMessages"];
 }
 
+/** x402-compatible wrapper client configuration */
 export interface Subly402ClientConfig {
   /**
    * Optional convenience signer. For the x402-like interface, prefer

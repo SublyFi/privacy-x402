@@ -1,7 +1,10 @@
 use sha2::{Digest, Sha256};
 
-pub const ASC_CLAIM_VOUCHER_PREFIX: &str = "A402-ASC-CLAIM-VOUCHER";
-pub const ASC_CLAIM_VOUCHER_MESSAGE_LEN: usize = 23 + 32 + 32 + 8 + 32 + 32 + 8 + 32;
+pub const ASC_CLAIM_VOUCHER_PREFIX: &str = "SUBLY402-ASC-CLAIM-VOUCHER";
+pub const ASC_PAYMENT_MESSAGE_PREFIX: &str = "subly402-asc-pay-v1";
+pub const ASC_CLAIM_VOUCHER_PREFIX_WITH_NUL_LEN: usize = ASC_CLAIM_VOUCHER_PREFIX.len() + 1;
+pub const ASC_CLAIM_VOUCHER_MESSAGE_LEN: usize =
+    ASC_CLAIM_VOUCHER_PREFIX_WITH_NUL_LEN + 32 + 32 + 8 + 32 + 32 + 8 + 32;
 
 #[derive(Debug, Clone)]
 pub struct AscClaimVoucherFields {
@@ -34,8 +37,8 @@ pub fn build_asc_payment_message_from_hashes(
     amount: u64,
     request_hash: &[u8; 32],
 ) -> Vec<u8> {
-    let mut message = Vec::with_capacity(16 + 32 + 32 + 8 + 32);
-    message.extend_from_slice(b"a402-asc-pay-v1");
+    let mut message = Vec::with_capacity(ASC_PAYMENT_MESSAGE_PREFIX.len() + 32 + 32 + 8 + 32);
+    message.extend_from_slice(ASC_PAYMENT_MESSAGE_PREFIX.as_bytes());
     message.extend_from_slice(channel_id_hash);
     message.extend_from_slice(request_id_hash);
     message.extend_from_slice(&amount.to_le_bytes());
@@ -61,8 +64,9 @@ pub fn parse_asc_claim_voucher_message(message: &[u8]) -> Option<AscClaimVoucher
     if message.len() != ASC_CLAIM_VOUCHER_MESSAGE_LEN {
         return None;
     }
-    let (prefix, rest) = message.split_at(23);
-    if prefix != b"A402-ASC-CLAIM-VOUCHER\0" {
+    let expected_prefix = [ASC_CLAIM_VOUCHER_PREFIX.as_bytes(), b"\0"].concat();
+    let (prefix, rest) = message.split_at(ASC_CLAIM_VOUCHER_PREFIX_WITH_NUL_LEN);
+    if prefix != expected_prefix.as_slice() {
         return None;
     }
 
@@ -109,11 +113,24 @@ mod tests {
     #[test]
     fn payment_message_binds_request_hash() {
         let message = build_asc_payment_message("ch_demo", "req_demo", 42, &[0xcd; 32]);
-        assert_eq!(&message[..15], b"a402-asc-pay-v1");
-        assert_eq!(&message[15..47], &hash_identifier("ch_demo"));
-        assert_eq!(&message[47..79], &hash_identifier("req_demo"));
-        assert_eq!(&message[79..87], &42u64.to_le_bytes());
-        assert_eq!(&message[87..119], &[0xcd; 32]);
+        let prefix_len = ASC_PAYMENT_MESSAGE_PREFIX.len();
+        assert_eq!(
+            &message[..prefix_len],
+            ASC_PAYMENT_MESSAGE_PREFIX.as_bytes()
+        );
+        assert_eq!(
+            &message[prefix_len..prefix_len + 32],
+            &hash_identifier("ch_demo")
+        );
+        assert_eq!(
+            &message[prefix_len + 32..prefix_len + 64],
+            &hash_identifier("req_demo")
+        );
+        assert_eq!(
+            &message[prefix_len + 64..prefix_len + 72],
+            &42u64.to_le_bytes()
+        );
+        assert_eq!(&message[prefix_len + 72..prefix_len + 104], &[0xcd; 32]);
     }
 
     #[test]

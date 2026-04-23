@@ -50,11 +50,11 @@ const DEFAULT_X402_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const DEFAULT_X402_FACILITATOR_URL = "https://x402.org/facilitator";
 
 function buildX402Price(usdcMint, paymentAmount) {
-  if (process.env.A402_X402_PRICE) {
-    return process.env.A402_X402_PRICE;
+  if (process.env.SUBLY402_X402_PRICE) {
+    return process.env.SUBLY402_X402_PRICE;
   }
   return {
-    asset: process.env.A402_X402_ASSET_MINT || usdcMint,
+    asset: process.env.SUBLY402_X402_ASSET_MINT || usdcMint,
     amount: paymentAmount.toString(),
   };
 }
@@ -139,11 +139,11 @@ async function startOfficialX402Seller({
 async function main() {
   loadNitroEnv();
 
-  const usdcMint = requireEnv("A402_USDC_MINT");
+  const usdcMint = requireEnv("SUBLY402_USDC_MINT");
   const selectedProviders = selectDemoProviders(loadDemoProviders());
   if (selectedProviders.length !== 1) {
     throw new Error(
-      "Official x402 direct demo supports one provider. Unset A402_DEMO_ALL_PROVIDERS or set A402_DEMO_PROVIDER_INDEX."
+      "Official x402 direct demo supports one provider. Unset SUBLY402_DEMO_ALL_PROVIDERS or set SUBLY402_DEMO_PROVIDER_INDEX."
     );
   }
   const [demoProvider] = selectedProviders;
@@ -151,20 +151,20 @@ async function main() {
 
   const paymentAmount = Number(
     readPositiveIntEnv(
-      "A402_DEMO_PAYMENT_AMOUNT",
-      readPositiveIntEnv("A402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
+      "SUBLY402_DEMO_PAYMENT_AMOUNT",
+      readPositiveIntEnv("SUBLY402_NITRO_E2E_PAYMENT_AMOUNT", 1100000)
     )
   );
   const clientSolLamports = Number(
     readPositiveIntEnv(
-      "A402_DEMO_CLIENT_SOL_LAMPORTS",
-      readPositiveIntEnv("A402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
+      "SUBLY402_DEMO_CLIENT_SOL_LAMPORTS",
+      readPositiveIntEnv("SUBLY402_NITRO_E2E_CLIENT_SOL_LAMPORTS", 50000000)
     )
   );
-  const x402Network = process.env.A402_X402_NETWORK || DEFAULT_X402_NETWORK;
+  const x402Network = process.env.SUBLY402_X402_NETWORK || DEFAULT_X402_NETWORK;
   const facilitatorUrl =
-    process.env.A402_X402_FACILITATOR_URL || DEFAULT_X402_FACILITATOR_URL;
-  const sellerPort = Number(process.env.A402_X402_DEMO_PORT || 0);
+    process.env.SUBLY402_X402_FACILITATOR_URL || DEFAULT_X402_FACILITATOR_URL;
+  const sellerPort = Number(process.env.SUBLY402_X402_DEMO_PORT || 0);
   const price = buildX402Price(usdcMint, paymentAmount);
 
   const plan = {
@@ -191,7 +191,7 @@ async function main() {
   const mintAuthority = await loadMintAuthoritySigner(rpc, usdcMint, feePayer);
   if (!mintAuthority) {
     throw new Error(
-      "Mint authority is required for this devnet demo. Set A402_USDC_MINT_AUTHORITY_WALLET."
+      "Mint authority is required for this devnet demo. Set SUBLY402_USDC_MINT_AUTHORITY_WALLET."
     );
   }
 
@@ -202,7 +202,7 @@ async function main() {
   logKV("Facilitator", facilitatorUrl);
 
   const providerWallet =
-    process.env[`A402_DEMO_PROVIDER_${providerIndex}_WALLET`] ||
+    process.env[`SUBLY402_DEMO_PROVIDER_${providerIndex}_WALLET`] ||
     (await fetchTokenOwner(rpc, demoProvider.tokenAccount));
   const officialProviderTokenAccount = await createAssociatedTokenAccount(
     rpc,

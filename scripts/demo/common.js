@@ -73,17 +73,18 @@ function loadNitroEnv() {
   });
 
   const clientEnv =
-    process.env.A402_NITRO_CLIENT_ENV ||
+    process.env.SUBLY402_NITRO_CLIENT_ENV ||
     path.join(ROOT, "infra", "nitro", "generated", "client.env");
   loadEnvFile(clientEnv, { required: true, protectedKeys: shellEnvKeys });
 
   const providerEnv =
-    process.env.A402_DEMO_PROVIDERS_ENV || "/root/a402-demo-providers.env";
+    process.env.SUBLY402_DEMO_PROVIDERS_ENV ||
+    "/root/subly402-demo-providers.env";
   const hasProviderShellEnv = [1, 2].every((index) => {
     return (
-      process.env[`A402_DEMO_PROVIDER_${index}_ID`] &&
-      process.env[`A402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`] &&
-      process.env[`A402_DEMO_PROVIDER_${index}_API_KEY`]
+      process.env[`SUBLY402_DEMO_PROVIDER_${index}_ID`] &&
+      process.env[`SUBLY402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`] &&
+      process.env[`SUBLY402_DEMO_PROVIDER_${index}_API_KEY`]
     );
   });
   loadEnvFile(providerEnv, {
@@ -95,15 +96,15 @@ function loadNitroEnv() {
 function loadDemoProviders() {
   const providers = [1, 2].map((index) => ({
     index,
-    id: process.env[`A402_DEMO_PROVIDER_${index}_ID`],
-    tokenAccount: process.env[`A402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`],
-    apiKey: process.env[`A402_DEMO_PROVIDER_${index}_API_KEY`],
+    id: process.env[`SUBLY402_DEMO_PROVIDER_${index}_ID`],
+    tokenAccount: process.env[`SUBLY402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`],
+    apiKey: process.env[`SUBLY402_DEMO_PROVIDER_${index}_API_KEY`],
   }));
 
   for (const provider of providers) {
     if (!provider.id || !provider.tokenAccount || !provider.apiKey) {
       throw new Error(
-        `A402_DEMO_PROVIDER_${provider.index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
+        `SUBLY402_DEMO_PROVIDER_${provider.index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
       );
     }
   }
@@ -111,15 +112,15 @@ function loadDemoProviders() {
 }
 
 function selectDemoProviders(providers) {
-  if (process.env.A402_DEMO_ALL_PROVIDERS === "1") {
+  if (process.env.SUBLY402_DEMO_ALL_PROVIDERS === "1") {
     return providers;
   }
 
-  const providerIndex = readPositiveIntEnv("A402_DEMO_PROVIDER_INDEX", 1);
+  const providerIndex = readPositiveIntEnv("SUBLY402_DEMO_PROVIDER_INDEX", 1);
   const provider = providers.find((item) => item.index === providerIndex);
   if (!provider) {
     throw new Error(
-      `A402_DEMO_PROVIDER_INDEX=${providerIndex} is not configured`
+      `SUBLY402_DEMO_PROVIDER_INDEX=${providerIndex} is not configured`
     );
   }
   return [provider];
@@ -207,7 +208,7 @@ function computeRequestHash(
   paymentDetailsHash
 ) {
   const preimage =
-    `A402-SVM-V1-REQ\n` +
+    `SUBLY402-SVM-V1-REQ\n` +
     `${method}\n` +
     `${origin}\n` +
     `${pathAndQuery}\n` +
@@ -218,7 +219,7 @@ function computeRequestHash(
 
 async function signPaymentPayload(signer, fields) {
   const message =
-    `A402-SVM-V1-AUTH\n` +
+    `SUBLY402-SVM-V1-AUTH\n` +
     `${fields.version}\n` +
     `${fields.scheme}\n` +
     `${fields.paymentId}\n` +
@@ -305,7 +306,7 @@ async function buildPayment({
     ),
   };
   const paymentDetails = {
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     network,
     amount: paymentAmount.toString(),
     asset: {
@@ -331,7 +332,7 @@ async function buildPayment({
   const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
   const unsignedPayload = {
     version: 1,
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     paymentId: `pay_demo_${crypto.randomUUID()}`,
     client: clientSigner.address,
     vault: vaultConfig,
@@ -387,12 +388,12 @@ function logKV(label, value) {
 }
 
 function requireDemoConfirmation(plan) {
-  if (process.env.A402_DEMO_CONFIRM === "1") {
+  if (process.env.SUBLY402_DEMO_CONFIRM === "1") {
     return;
   }
   console.log(JSON.stringify({ ok: false, dryRun: true, plan }, null, 2));
   console.log("");
-  console.log("Set A402_DEMO_CONFIRM=1 to send devnet transactions.");
+  console.log("Set SUBLY402_DEMO_CONFIRM=1 to send devnet transactions.");
   process.exit(0);
 }
 

@@ -6,7 +6,7 @@ variable "aws_region" {
 variable "project_name" {
   type        = string
   description = "Resource name prefix."
-  default     = "a402-devnet"
+  default     = "subly402-devnet"
 }
 
 variable "vpc_id" {

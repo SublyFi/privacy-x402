@@ -94,18 +94,18 @@ impl SnapshotManager {
         key: [u8; 32],
         vault_config: Pubkey,
     ) -> Option<Self> {
-        if std::env::var("A402_ENABLE_SNAPSHOTS").ok().as_deref() == Some("0") {
+        if std::env::var("SUBLY402_ENABLE_SNAPSHOTS").ok().as_deref() == Some("0") {
             return None;
         }
 
-        let prefix = std::env::var("A402_SNAPSHOT_PREFIX")
+        let prefix = std::env::var("SUBLY402_SNAPSHOT_PREFIX")
             .unwrap_or_else(|_| format!("snapshot/{vault_config}"));
         let every_sec =
-            read_env_u64("A402_SNAPSHOT_EVERY_SEC").unwrap_or(DEFAULT_SNAPSHOT_EVERY_SEC);
-        let every_n_events =
-            read_env_u64("A402_SNAPSHOT_EVERY_N_EVENTS").unwrap_or(DEFAULT_SNAPSHOT_EVERY_N_EVENTS);
-        let retain_count =
-            read_env_usize("A402_SNAPSHOT_RETAIN_COUNT").unwrap_or(DEFAULT_SNAPSHOT_RETAIN_COUNT);
+            read_env_u64("SUBLY402_SNAPSHOT_EVERY_SEC").unwrap_or(DEFAULT_SNAPSHOT_EVERY_SEC);
+        let every_n_events = read_env_u64("SUBLY402_SNAPSHOT_EVERY_N_EVENTS")
+            .unwrap_or(DEFAULT_SNAPSHOT_EVERY_N_EVENTS);
+        let retain_count = read_env_usize("SUBLY402_SNAPSHOT_RETAIN_COUNT")
+            .unwrap_or(DEFAULT_SNAPSHOT_RETAIN_COUNT);
 
         Some(Self {
             client,
@@ -642,10 +642,10 @@ mod tests {
         ));
         let wal = Arc::new(
             Wal::new_with_key(
-                PathBuf::from(
-                    std::env::temp_dir()
-                        .join(format!("a402-snapshot-test-{}.jsonl", uuid::Uuid::now_v7())),
-                ),
+                PathBuf::from(std::env::temp_dir().join(format!(
+                    "subly402-snapshot-test-{}.jsonl",
+                    uuid::Uuid::now_v7()
+                ))),
                 [7u8; 32],
             )
             .await,

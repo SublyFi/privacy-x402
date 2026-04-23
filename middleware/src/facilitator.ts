@@ -1,36 +1,40 @@
 import * as http from "http";
 import * as https from "https";
 import { readFile } from "fs/promises";
-import type { A402ProviderConfig } from "./types";
+import type { Subly402ProviderConfig } from "./types";
 
 const pemFileCache = new Map<string, Promise<Buffer>>();
 
-function getAuthMode(config: A402ProviderConfig): "bearer" | "api-key" | "mtls" {
+function getAuthMode(
+  config: Subly402ProviderConfig
+): "bearer" | "api-key" | "mtls" {
   return config.authMode ?? "bearer";
 }
 
-function requireApiKey(config: A402ProviderConfig): string {
+function requireApiKey(config: Subly402ProviderConfig): string {
   if (!config.apiKey) {
-    throw new Error("config.apiKey is required for bearer/api-key facilitator auth");
+    throw new Error(
+      "config.apiKey is required for bearer/api-key facilitator auth"
+    );
   }
   return config.apiKey;
 }
 
 function buildAuthHeaders(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   authMode: "bearer" | "api-key" | "mtls"
 ): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "x-a402-provider-id": config.providerId,
+    "x-subly402-provider-id": config.providerId,
   };
 
   if (authMode === "bearer") {
     const apiKey = requireApiKey(config);
     headers.Authorization = `Bearer ${apiKey}`;
-    headers["x-a402-provider-auth"] = apiKey;
+    headers["x-subly402-provider-auth"] = apiKey;
   } else if (authMode === "api-key") {
-    headers["x-a402-provider-auth"] = requireApiKey(config);
+    headers["x-subly402-provider-auth"] = requireApiKey(config);
   }
 
   return headers;
@@ -50,7 +54,7 @@ async function readCachedPem(path: string): Promise<Buffer> {
 async function buildRequestOptions(
   url: URL,
   payload: string,
-  config: A402ProviderConfig
+  config: Subly402ProviderConfig
 ): Promise<http.RequestOptions | https.RequestOptions> {
   const authMode = getAuthMode(config);
   const headers = buildAuthHeaders(config, authMode);
@@ -72,14 +76,18 @@ async function buildRequestOptions(
     throw new Error("mtls facilitator auth requires an https facilitatorUrl");
   }
   if (!config.mtls?.certPath || !config.mtls?.keyPath) {
-    throw new Error("config.mtls.certPath and config.mtls.keyPath are required for mtls auth");
+    throw new Error(
+      "config.mtls.certPath and config.mtls.keyPath are required for mtls auth"
+    );
   }
 
   return {
     ...baseOptions,
     cert: await readCachedPem(config.mtls.certPath),
     key: await readCachedPem(config.mtls.keyPath),
-    ca: config.mtls.caPath ? await readCachedPem(config.mtls.caPath) : undefined,
+    ca: config.mtls.caPath
+      ? await readCachedPem(config.mtls.caPath)
+      : undefined,
     servername: config.mtls.serverName,
   };
 }
@@ -87,7 +95,7 @@ async function buildRequestOptions(
 export async function postFacilitatorJson<T>(
   url: string,
   body: unknown,
-  config: A402ProviderConfig
+  config: Subly402ProviderConfig
 ): Promise<T> {
   const parsedUrl = new URL(url);
   const payload = JSON.stringify(body);
@@ -111,9 +119,9 @@ export async function postFacilitatorJson<T>(
         } catch (error: any) {
           reject(
             new Error(
-              `Invalid facilitator JSON response (${response.statusCode ?? "unknown"}): ${
-                error.message
-              }`
+              `Invalid facilitator JSON response (${
+                response.statusCode ?? "unknown"
+              }): ${error.message}`
             )
           );
         }

@@ -44,15 +44,15 @@ impl ParentInterconnect {
     pub fn from_env() -> Self {
         Self {
             mode: InterconnectMode::from_env_var(
-                "A402_ENCLAVE_INTERCONNECT_MODE",
+                "SUBLY402_ENCLAVE_INTERCONNECT_MODE",
                 InterconnectMode::Tcp,
             ),
-            parent_cid: std::env::var("A402_PARENT_CID")
+            parent_cid: std::env::var("SUBLY402_PARENT_CID")
                 .ok()
                 .map(|value| {
                     value
                         .parse()
-                        .unwrap_or_else(|_| panic!("A402_PARENT_CID must be a valid u32"))
+                        .unwrap_or_else(|_| panic!("SUBLY402_PARENT_CID must be a valid u32"))
                 })
                 .unwrap_or_else(default_parent_cid),
         }

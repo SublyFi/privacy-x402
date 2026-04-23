@@ -1,4 +1,4 @@
-export { A402Client } from "./client";
+export { Subly402VaultClient } from "./client";
 export {
   Subly402Client,
   Subly402Client as subly402Client,
@@ -9,7 +9,7 @@ export {
 export { AuditTool } from "./audit";
 export {
   computeNitroAttestationPolicyHash,
-  parseA402UserDataEnvelope,
+  parseSubly402UserDataEnvelope,
   verifyNitroAttestationDocument,
 } from "./attestation";
 export {
@@ -23,8 +23,7 @@ export {
   sha256hex,
 } from "./crypto";
 export type {
-  A402NitroUserDataEnvelope,
-  A402ClientConfig,
+  Subly402NitroUserDataEnvelope,
   AttestationResponse,
   BalanceResponse,
   ChannelDeliverResponse,
@@ -39,6 +38,7 @@ export type {
   PaymentRequiredResponse,
   PaymentResponse,
   VerificationReceiptEnvelope,
+  Subly402VaultClientConfig,
   NitroAttestationConfig,
   NitroAttestationDocument,
   NitroAttestationPolicy,

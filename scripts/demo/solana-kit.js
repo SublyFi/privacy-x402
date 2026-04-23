@@ -38,9 +38,11 @@ function sleep(ms) {
 
 function rpcUrlFromEnv() {
   const rpcUrl =
-    process.env.ANCHOR_PROVIDER_URL || process.env.A402_SOLANA_RPC_URL;
+    process.env.ANCHOR_PROVIDER_URL || process.env.SUBLY402_SOLANA_RPC_URL;
   if (!rpcUrl) {
-    throw new Error("ANCHOR_PROVIDER_URL or A402_SOLANA_RPC_URL is required");
+    throw new Error(
+      "ANCHOR_PROVIDER_URL or SUBLY402_SOLANA_RPC_URL is required"
+    );
   }
   return rpcUrl;
 }
@@ -73,7 +75,7 @@ async function createDemoSigner() {
   const signer = await generateKeyPairSigner(true);
   const tmpPath = path.join(
     os.tmpdir(),
-    `a402-demo-${process.pid}-${crypto.randomUUID()}.json`
+    `subly402-demo-${process.pid}-${crypto.randomUUID()}.json`
   );
   await writeKeyPairSigner(signer, tmpPath);
   const secretKeyBytes = readKeypairBytes(tmpPath);
@@ -98,12 +100,12 @@ async function loadMintAuthoritySigner(rpc, mintAddress, fallbackSigner) {
     return null;
   }
 
-  const walletPath = process.env.A402_USDC_MINT_AUTHORITY_WALLET;
+  const walletPath = process.env.SUBLY402_USDC_MINT_AUTHORITY_WALLET;
   if (walletPath) {
     const loaded = await loadSignerFromFile(walletPath);
     if (loaded.signer.address !== mintAuthority) {
       throw new Error(
-        `A402_USDC_MINT_AUTHORITY_WALLET public key ${loaded.signer.address} does not match mint authority ${mintAuthority}`
+        `SUBLY402_USDC_MINT_AUTHORITY_WALLET public key ${loaded.signer.address} does not match mint authority ${mintAuthority}`
       );
     }
     return loaded.signer;

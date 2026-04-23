@@ -9,7 +9,7 @@ import {
   utf8ToBytes,
 } from "@noble/hashes/utils";
 import type {
-  A402ProviderConfig,
+  Subly402ProviderConfig,
   AscClaimVoucher,
   AscDeliverResponse,
   AscDeliveryArtifact,
@@ -134,7 +134,7 @@ function keystreamXor(data: Uint8Array, keyBytes: Uint8Array): Uint8Array {
     }
 
     const keystream = sha256(
-      concatBytes(utf8ToBytes("a402-asc-enc-v1"), keyBytes, counter)
+      concatBytes(utf8ToBytes("subly402-asc-enc-v1"), keyBytes, counter)
     );
 
     for (let i = 0; i < 32 && offset + i < data.length; i += 1) {
@@ -162,7 +162,7 @@ export function buildAscPaymentMessage(
   }
 
   return concatBytes(
-    utf8ToBytes("a402-asc-pay-v1"),
+    utf8ToBytes("subly402-asc-pay-v1"),
     channelIdHash,
     requestIdHash,
     amountBytes,
@@ -212,7 +212,7 @@ export function buildAscClaimVoucherMessage(input: {
   }
 
   return concatBytes(
-    utf8ToBytes("A402-ASC-CLAIM-VOUCHER"),
+    utf8ToBytes("SUBLY402-ASC-CLAIM-VOUCHER"),
     new Uint8Array([0]),
     channelIdHash,
     requestIdHash,
@@ -312,7 +312,7 @@ export function generateAscDeliveryArtifact(
 }
 
 export async function submitAscDelivery(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   channelId: string,
   delivery: AscDeliveryArtifact
 ): Promise<AscDeliverResponse> {
@@ -337,7 +337,7 @@ export async function submitAscDelivery(
 }
 
 export async function deliverAscResult(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   input: AscDeliveryInput
 ): Promise<{ delivery: AscDeliveryArtifact; response: AscDeliverResponse }> {
   const delivery = generateAscDeliveryArtifact(input);
@@ -348,7 +348,7 @@ export async function deliverAscResult(
 export async function submitAscCloseClaim(input: {
   program: anchor.Program<any>;
   caller: Keypair;
-  config: Pick<A402ProviderConfig, "vaultConfig" | "vaultSigner">;
+  config: Pick<Subly402ProviderConfig, "vaultConfig" | "vaultSigner">;
   channelId: string;
   requestId: string;
   amount: string | number;

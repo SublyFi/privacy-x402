@@ -1,6 +1,6 @@
 //! Atomic Service Channel (ASC) Lifecycle Manager — Phase 3
 //!
-//! Per design doc §5.4 and §5.5 (A402 Algorithm 1 & 2):
+//! Per design doc §5.4 and §5.5 (Subly402 Algorithm 1 & 2):
 //!   Open → Lock (request submitted) → Pending (adaptor verified) → Closed (settled)
 //!
 //! The ASC manager handles:
@@ -11,12 +11,12 @@
 //!   - Secret extraction and result decryption
 //!   - Settlement crediting
 
-use a402_vault::asc_claim::build_asc_payment_message;
 use chrono::Utc;
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
+use subly402_vault::asc_claim::build_asc_payment_message;
 use tracing::info;
 
 use crate::adaptor_sig::{self, AdaptedSignature, AdaptorPreSignature};
@@ -891,7 +891,7 @@ fn decrypt_with_scalar(ciphertext: &[u8], key_bytes: &[u8; 32]) -> Vec<u8> {
     for chunk in ciphertext.chunks(32) {
         // Derive keystream block: SHA256(key || block_index)
         let mut hasher = Sha256::new();
-        hasher.update(b"a402-asc-enc-v1");
+        hasher.update(b"subly402-asc-enc-v1");
         hasher.update(key_bytes);
         hasher.update(block_idx.to_le_bytes());
         let keystream = hasher.finalize();

@@ -26,23 +26,23 @@ async function main() {
 
   const existingState = loadState() || {};
   let vaultId = BigInt(
-    process.env.A402_VAULT_ID || existingState.vaultId || "1"
+    process.env.SUBLY402_VAULT_ID || existingState.vaultId || "1"
   );
   const enclaveSignerSeedBase64 =
-    process.env.A402_VAULT_SIGNER_SECRET_KEY_B64 ||
+    process.env.SUBLY402_VAULT_SIGNER_SECRET_KEY_B64 ||
     existingState.enclaveSignerSeedBase64 ||
     randomSeedBase64();
   const enclaveSigner = keypairFromSeedBase64(enclaveSignerSeedBase64);
   const auditorMasterPubkeyHex =
-    process.env.A402_AUDITOR_MASTER_PUBKEY_HEX ||
+    process.env.SUBLY402_AUDITOR_MASTER_PUBKEY_HEX ||
     existingState.auditorMasterPubkeyHex ||
     "00".repeat(32);
   const attestationPolicyHashHex =
-    process.env.A402_ATTESTATION_POLICY_HASH_HEX ||
+    process.env.SUBLY402_ATTESTATION_POLICY_HASH_HEX ||
     existingState.attestationPolicyHashHex ||
     "00".repeat(32);
   let usdcMintBase58 =
-    process.env.A402_USDC_MINT || existingState.usdcMint || null;
+    process.env.SUBLY402_USDC_MINT || existingState.usdcMint || null;
   let { vaultConfigPda, vaultTokenAccountPda, vaultIdBn } =
     deriveVaultAddresses(provider.wallet.publicKey, vaultId, program.programId);
   let vaultConfigInfo = await provider.connection.getAccountInfo(
@@ -56,7 +56,7 @@ async function main() {
     existingVaultConfig &&
     existingVaultConfig.vaultSignerPubkey.toBase58() !==
       enclaveSigner.publicKey.toBase58() &&
-    process.env.A402_REUSE_EXISTING_VAULT !== "1"
+    process.env.SUBLY402_REUSE_EXISTING_VAULT !== "1"
   ) {
     usdcMintBase58 = usdcMintBase58 || existingVaultConfig.usdcMint.toBase58();
     vaultId += 1n;
@@ -87,7 +87,7 @@ async function main() {
   }
 
   if (!usdcMintBase58) {
-    throw new Error("A402_USDC_MINT could not be resolved");
+    throw new Error("SUBLY402_USDC_MINT could not be resolved");
   }
 
   let initialized = false;
@@ -96,9 +96,12 @@ async function main() {
       .initializeVault(
         vaultIdBn,
         enclaveSigner.publicKey,
-        decodeHex32("A402_AUDITOR_MASTER_PUBKEY_HEX", auditorMasterPubkeyHex),
         decodeHex32(
-          "A402_ATTESTATION_POLICY_HASH_HEX",
+          "SUBLY402_AUDITOR_MASTER_PUBKEY_HEX",
+          auditorMasterPubkeyHex
+        ),
+        decodeHex32(
+          "SUBLY402_ATTESTATION_POLICY_HASH_HEX",
           attestationPolicyHashHex
         )
       )
@@ -117,7 +120,7 @@ async function main() {
 
   const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
   const signerMinLamports = Number(
-    process.env.A402_VAULT_SIGNER_MIN_LAMPORTS || "50000000"
+    process.env.SUBLY402_VAULT_SIGNER_MIN_LAMPORTS || "50000000"
   );
   const signerBalance = await provider.connection.getBalance(
     enclaveSigner.publicKey
@@ -135,7 +138,7 @@ async function main() {
     programId: program.programId.toBase58(),
     governance: provider.wallet.publicKey.toBase58(),
     rpcUrl: provider.connection.rpcEndpoint,
-    wsUrl: process.env.A402_SOLANA_WS_URL || existingState.wsUrl || "",
+    wsUrl: process.env.SUBLY402_SOLANA_WS_URL || existingState.wsUrl || "",
     usdcMint: vaultConfig.usdcMint.toBase58(),
     vaultConfig: vaultConfigPda.toBase58(),
     vaultTokenAccount: vaultConfig.vaultTokenAccount.toBase58(),
@@ -146,15 +149,15 @@ async function main() {
   };
   saveState(state);
   writeGeneratedEnv({
-    A402_PROGRAM_ID: state.programId,
-    A402_VAULT_CONFIG: state.vaultConfig,
-    A402_VAULT_TOKEN_ACCOUNT: state.vaultTokenAccount,
-    A402_USDC_MINT: state.usdcMint,
-    A402_ATTESTATION_POLICY_HASH_HEX: state.attestationPolicyHashHex,
-    A402_VAULT_SIGNER_SECRET_KEY_B64: state.enclaveSignerSeedBase64,
-    A402_WAL_PATH: "data/wal-devnet.jsonl",
-    A402_WATCHTOWER_URL: "http://127.0.0.1:3200",
-    A402_TEST_ENCLAVE_URL: "http://127.0.0.1:3100",
+    SUBLY402_PROGRAM_ID: state.programId,
+    SUBLY402_VAULT_CONFIG: state.vaultConfig,
+    SUBLY402_VAULT_TOKEN_ACCOUNT: state.vaultTokenAccount,
+    SUBLY402_USDC_MINT: state.usdcMint,
+    SUBLY402_ATTESTATION_POLICY_HASH_HEX: state.attestationPolicyHashHex,
+    SUBLY402_VAULT_SIGNER_SECRET_KEY_B64: state.enclaveSignerSeedBase64,
+    SUBLY402_WAL_PATH: "data/wal-devnet.jsonl",
+    SUBLY402_WATCHTOWER_URL: "http://127.0.0.1:3200",
+    SUBLY402_TEST_ENCLAVE_URL: "http://127.0.0.1:3100",
   });
 
   console.log(

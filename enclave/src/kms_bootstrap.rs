@@ -34,7 +34,7 @@ pub async fn bootstrap_materials(
     snapshot_store: Option<SnapshotStoreClient>,
 ) -> Result<BootstrapMaterials, String> {
     let recipient_keys = RecipientKeyPair::generate()?;
-    let nitro_document = match std::env::var("A402_NITRO_ATTESTATION_DOCUMENT_B64") {
+    let nitro_document = match std::env::var("SUBLY402_NITRO_ATTESTATION_DOCUMENT_B64") {
         Ok(document) => Some(document),
         Err(_) => build_bootstrap_recipient_attestation(recipient_keys.public_key_der())?,
     };
@@ -175,11 +175,11 @@ async fn load_signing_key(
     nitro_document_b64: Option<&str>,
     recipient_keys: &RecipientKeyPair,
 ) -> Result<SigningKey, String> {
-    if let Ok(encoded) = std::env::var("A402_VAULT_SIGNER_SECRET_KEY_B64") {
+    if let Ok(encoded) = std::env::var("SUBLY402_VAULT_SIGNER_SECRET_KEY_B64") {
         return decode_signing_key(&encoded);
     }
 
-    if let Ok(ciphertext_b64) = std::env::var("A402_VAULT_SIGNER_SEED_CIPHERTEXT_B64") {
+    if let Ok(ciphertext_b64) = std::env::var("SUBLY402_VAULT_SIGNER_SEED_CIPHERTEXT_B64") {
         let plaintext = decrypt_kms_ciphertext(
             &ciphertext_b64,
             nitro_document_b64,
@@ -200,11 +200,11 @@ async fn load_storage_key(
     recipient_keys: &RecipientKeyPair,
     snapshot_store: Option<&SnapshotStoreClient>,
 ) -> Result<[u8; 32], String> {
-    if let Ok(encoded) = std::env::var("A402_STORAGE_KEY_B64") {
-        return decode_fixed_b64::<32>(&encoded, "A402_STORAGE_KEY_B64");
+    if let Ok(encoded) = std::env::var("SUBLY402_STORAGE_KEY_B64") {
+        return decode_fixed_b64::<32>(&encoded, "SUBLY402_STORAGE_KEY_B64");
     }
 
-    if let Ok(ciphertext_b64) = std::env::var("A402_STORAGE_KEY_CIPHERTEXT_B64") {
+    if let Ok(ciphertext_b64) = std::env::var("SUBLY402_STORAGE_KEY_CIPHERTEXT_B64") {
         let plaintext = decrypt_kms_ciphertext(
             &ciphertext_b64,
             nitro_document_b64,
@@ -218,9 +218,9 @@ async fn load_storage_key(
     if let (Some(document_b64), Some(snapshot_store), Ok(key_id)) = (
         nitro_document_b64,
         snapshot_store,
-        std::env::var("A402_SNAPSHOT_DATA_KEY_ID"),
+        std::env::var("SUBLY402_SNAPSHOT_DATA_KEY_ID"),
     ) {
-        let metadata_key = std::env::var("A402_STORAGE_KEY_METADATA_KEY")
+        let metadata_key = std::env::var("SUBLY402_STORAGE_KEY_METADATA_KEY")
             .unwrap_or_else(|_| format!("meta/{vault_config}/snapshot-data-key.ciphertext"));
         if let Some(ciphertext_blob) = snapshot_store
             .get(&metadata_key)
@@ -293,13 +293,13 @@ async fn decrypt_kms_ciphertext(
 
 async fn call_kms_proxy(request: KmsProxyRequest<'_>) -> Result<KmsProxyResponse, String> {
     let parent_interconnect = ParentInterconnect::from_env();
-    let addr = std::env::var("A402_KMS_PROXY_ADDR").ok();
-    let port = std::env::var("A402_ENCLAVE_KMS_PORT")
+    let addr = std::env::var("SUBLY402_KMS_PROXY_ADDR").ok();
+    let port = std::env::var("SUBLY402_ENCLAVE_KMS_PORT")
         .ok()
         .map(|value| {
             value
                 .parse()
-                .unwrap_or_else(|_| panic!("A402_ENCLAVE_KMS_PORT must be a valid u32"))
+                .unwrap_or_else(|_| panic!("SUBLY402_ENCLAVE_KMS_PORT must be a valid u32"))
         })
         .unwrap_or(5002);
     let payload = serde_json::to_vec(&request)
@@ -373,13 +373,13 @@ fn derive_local_storage_key(
 ) -> Result<[u8; 32], String> {
     let hkdf = Hkdf::<Sha256>::new(Some(vault_config.as_ref()), &signing_key.to_bytes());
     let mut out = [0u8; 32];
-    hkdf.expand(b"a402-local-storage-key", &mut out)
+    hkdf.expand(b"subly402-local-storage-key", &mut out)
         .map_err(|_| "failed to derive local storage key".to_string())?;
     Ok(out)
 }
 
 fn decode_signing_key(encoded: &str) -> Result<SigningKey, String> {
-    let bytes = decode_fixed_b64::<32>(encoded, "A402_VAULT_SIGNER_SECRET_KEY_B64")?;
+    let bytes = decode_fixed_b64::<32>(encoded, "SUBLY402_VAULT_SIGNER_SECRET_KEY_B64")?;
     Ok(SigningKey::from_bytes(&bytes))
 }
 
@@ -407,18 +407,18 @@ fn decode_fixed_b64<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N
 
 fn signer_encryption_context(vault_config: Pubkey) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([
-        ("a402:component".to_string(), "vault-signer".to_string()),
-        ("a402:vaultConfig".to_string(), vault_config.to_string()),
+        ("subly402:component".to_string(), "vault-signer".to_string()),
+        ("subly402:vaultConfig".to_string(), vault_config.to_string()),
     ])
 }
 
 fn storage_encryption_context(vault_config: Pubkey) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([
         (
-            "a402:component".to_string(),
+            "subly402:component".to_string(),
             "snapshot-data-key".to_string(),
         ),
-        ("a402:vaultConfig".to_string(), vault_config.to_string()),
+        ("subly402:vaultConfig".to_string(), vault_config.to_string()),
     ])
 }
 
@@ -467,7 +467,7 @@ mod tests {
 
     fn self_signed_cert(pkey: &PKey<Private>) -> X509 {
         let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "a402-test-recipient")
+        name.append_entry_by_text("CN", "subly402-test-recipient")
             .unwrap();
         let name = name.build();
 

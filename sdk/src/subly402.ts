@@ -311,13 +311,13 @@ export class Subly402Client {
       ?.map((accept) => ({
         details: accept,
         scheme:
-          accept.scheme === "a402-svm-v1"
+          accept.scheme === "subly402-svm-v1"
             ? this.findSchemeForNetwork(accept.network)
             : undefined,
       }))
       .find(
         (candidate) =>
-          candidate.details.scheme === "a402-svm-v1" && candidate.scheme
+          candidate.details.scheme === "subly402-svm-v1" && candidate.scheme
       );
     if (!selected?.scheme) {
       throw new Error(
@@ -412,7 +412,8 @@ export class Subly402Client {
           details.vault.attestationPolicyHash,
         expectedVaultSigner:
           this.nitroAttestation.expectedVaultSigner ?? details.vault.signer,
-        requireA402UserData: this.nitroAttestation.requireA402UserData ?? true,
+        requireSubly402UserData:
+          this.nitroAttestation.requireSubly402UserData ?? true,
       });
       if (this.attestationVerifier) {
         await this.attestationVerifier(attestation);
@@ -464,7 +465,7 @@ export class Subly402Client {
 
     const signatureMessage = buildSignatureMessage({
       version: 1,
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       paymentId,
       client,
       vault: details.vault.config,
@@ -481,7 +482,7 @@ export class Subly402Client {
 
     return {
       version: 1,
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       paymentId,
       client,
       vault: details.vault.config,
@@ -501,7 +502,7 @@ export class Subly402Client {
 
 export class Subly402ExactScheme {
   readonly scheme = "exact";
-  readonly wireScheme = "a402-svm-v1";
+  readonly wireScheme = "subly402-svm-v1";
 
   constructor(readonly signer: Subly402Signer) {}
 }

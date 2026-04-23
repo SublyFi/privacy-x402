@@ -1,9 +1,3 @@
-use a402_vault::accounts::{RecordAudit, SettleVault};
-use a402_vault::asc_claim::hash_identifier;
-use a402_vault::instruction::{RecordAudit as RecordAuditIx, SettleVault as SettleVaultIx};
-use a402_vault::instructions::record_audit::AuditRecordData;
-use a402_vault::instructions::settle_vault::SettlementEntry;
-use a402_vault::state::AscCloseClaim as OnChainAscCloseClaim;
 use anchor_client::anchor_lang::AccountDeserialize;
 use anchor_client::solana_sdk::commitment_config::CommitmentConfig;
 use anchor_client::solana_sdk::instruction::AccountMeta;
@@ -18,6 +12,12 @@ use solana_sdk_ids::system_program;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use subly402_vault::accounts::{RecordAudit, SettleVault};
+use subly402_vault::asc_claim::hash_identifier;
+use subly402_vault::instruction::{RecordAudit as RecordAuditIx, SettleVault as SettleVaultIx};
+use subly402_vault::instructions::record_audit::AuditRecordData;
+use subly402_vault::instructions::settle_vault::SettlementEntry;
+use subly402_vault::state::AscCloseClaim as OnChainAscCloseClaim;
 use tokio::{
     task,
     time::{self, Duration},
@@ -138,19 +138,19 @@ impl Default for BatchPrivacyConfig {
 impl BatchPrivacyConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(value) = std::env::var("A402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC") {
+        if let Ok(value) = std::env::var("SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC") {
             config.auto_batch_min_provider_payout_atomic = value.parse().unwrap_or_else(|_| {
-                panic!("A402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC must be a valid u64")
+                panic!("SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC must be a valid u64")
             });
         }
-        if let Ok(value) = std::env::var("A402_MIN_ANONYMITY_WINDOW_SEC") {
+        if let Ok(value) = std::env::var("SUBLY402_MIN_ANONYMITY_WINDOW_SEC") {
             config.min_anonymity_window_sec =
-                parse_nonnegative_i64_env("A402_MIN_ANONYMITY_WINDOW_SEC", &value);
+                parse_nonnegative_i64_env("SUBLY402_MIN_ANONYMITY_WINDOW_SEC", &value);
         }
-        if let Ok(value) = std::env::var("A402_MIN_BATCH_PROVIDERS") {
+        if let Ok(value) = std::env::var("SUBLY402_MIN_BATCH_PROVIDERS") {
             let parsed: usize = value
                 .parse()
-                .unwrap_or_else(|_| panic!("A402_MIN_BATCH_PROVIDERS must be a valid usize"));
+                .unwrap_or_else(|_| panic!("SUBLY402_MIN_BATCH_PROVIDERS must be a valid usize"));
             config.min_batch_providers = parsed.max(1);
         }
         config
@@ -1006,7 +1006,7 @@ fn compute_batch_chunk_hash(
     audits: &[BatchAuditEntry],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"a402-batch-chunk-v1");
+    hasher.update(b"subly402-batch-chunk-v1");
     hasher.update(batch_id.to_le_bytes());
     for s in settlements {
         hasher.update(s.provider_token_account.as_ref());

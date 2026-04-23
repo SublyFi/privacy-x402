@@ -42,7 +42,7 @@ impl Default for ParentConfig {
             enclave_ingress_port: 5000,
             enclave_egress_port: 5001,
             enclave_kms_port: 5002,
-            snapshot_dir: "/var/lib/a402/snapshots".to_string(),
+            snapshot_dir: "/var/lib/subly402/snapshots".to_string(),
             enclave_snapshot_port: 5003,
             kms_region: "us-east-1".to_string(),
             egress_allowlist: Vec::new(),
@@ -54,26 +54,26 @@ impl ParentConfig {
     fn from_env() -> Self {
         let defaults = Self::default();
         Self {
-            ingress_listen_addr: env::var("A402_PARENT_INGRESS_LISTEN")
+            ingress_listen_addr: env::var("SUBLY402_PARENT_INGRESS_LISTEN")
                 .unwrap_or(defaults.ingress_listen_addr),
             interconnect_mode: InterconnectMode::from_env_var(
-                "A402_PARENT_INTERCONNECT_MODE",
+                "SUBLY402_PARENT_INTERCONNECT_MODE",
                 defaults.interconnect_mode,
             ),
-            enclave_cid: read_env_u32("A402_ENCLAVE_CID").unwrap_or(defaults.enclave_cid),
-            enclave_ingress_port: read_env_u32("A402_ENCLAVE_INGRESS_PORT")
+            enclave_cid: read_env_u32("SUBLY402_ENCLAVE_CID").unwrap_or(defaults.enclave_cid),
+            enclave_ingress_port: read_env_u32("SUBLY402_ENCLAVE_INGRESS_PORT")
                 .unwrap_or(defaults.enclave_ingress_port),
-            enclave_egress_port: read_env_u32("A402_ENCLAVE_EGRESS_PORT")
+            enclave_egress_port: read_env_u32("SUBLY402_ENCLAVE_EGRESS_PORT")
                 .unwrap_or(defaults.enclave_egress_port),
-            enclave_kms_port: read_env_u32("A402_ENCLAVE_KMS_PORT")
+            enclave_kms_port: read_env_u32("SUBLY402_ENCLAVE_KMS_PORT")
                 .unwrap_or(defaults.enclave_kms_port),
-            snapshot_dir: env::var("A402_SNAPSHOT_DIR").unwrap_or(defaults.snapshot_dir),
-            enclave_snapshot_port: read_env_u32("A402_ENCLAVE_SNAPSHOT_PORT")
+            snapshot_dir: env::var("SUBLY402_SNAPSHOT_DIR").unwrap_or(defaults.snapshot_dir),
+            enclave_snapshot_port: read_env_u32("SUBLY402_ENCLAVE_SNAPSHOT_PORT")
                 .unwrap_or(defaults.enclave_snapshot_port),
-            kms_region: env::var("A402_KMS_REGION")
+            kms_region: env::var("SUBLY402_KMS_REGION")
                 .or_else(|_| env::var("AWS_REGION"))
                 .unwrap_or(defaults.kms_region),
-            egress_allowlist: env::var("A402_EGRESS_ALLOWLIST")
+            egress_allowlist: env::var("SUBLY402_EGRESS_ALLOWLIST")
                 .ok()
                 .map(|value| {
                     value
@@ -94,7 +94,7 @@ async fn main() {
 
     let config = ParentConfig::from_env();
 
-    info!("Starting A402 parent instance services");
+    info!("Starting Subly402 parent instance services");
     info!("  Ingress listen: {}", config.ingress_listen_addr);
     info!("  Interconnect: {}", config.interconnect_mode.label());
     info!("  Enclave CID: {}", config.enclave_cid);

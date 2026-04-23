@@ -4,9 +4,9 @@ const { getJson, loadDefaultEnvFiles, waitForEndpoint } = require("./common");
 
 async function fetchStatus() {
   const enclaveUrl =
-    process.env.A402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
+    process.env.SUBLY402_TEST_ENCLAVE_URL || "http://127.0.0.1:3100";
   const watchtowerUrl =
-    process.env.A402_WATCHTOWER_URL || "http://127.0.0.1:3200";
+    process.env.SUBLY402_WATCHTOWER_URL || "http://127.0.0.1:3200";
 
   const watchtowerRes = await getJson(watchtowerUrl, "/v1/status");
   if (!watchtowerRes.ok) {

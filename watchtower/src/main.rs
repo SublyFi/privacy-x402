@@ -1,4 +1,4 @@
-//! A402 Receipt Watchtower
+//! Subly402 Receipt Watchtower
 //!
 //! Per design doc §4.5: Stores latest ParticipantReceipts per participant and
 //! automatically challenges stale receipts during force_settle disputes.
@@ -42,26 +42,26 @@ struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let vault_config = env::var("A402_VAULT_CONFIG")
+    let vault_config = env::var("SUBLY402_VAULT_CONFIG")
         .ok()
         .and_then(|v| Pubkey::from_str(&v).ok())
         .unwrap_or_default();
 
-    let program_id = env::var("A402_PROGRAM_ID")
+    let program_id = env::var("SUBLY402_PROGRAM_ID")
         .ok()
         .and_then(|v| Pubkey::from_str(&v).ok())
-        .unwrap_or_else(|| a402_vault::ID);
+        .unwrap_or_else(|| subly402_vault::ID);
 
     let rpc_url =
-        env::var("A402_SOLANA_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8899".to_string());
+        env::var("SUBLY402_SOLANA_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8899".to_string());
 
     let listen_addr =
-        env::var("A402_WATCHTOWER_LISTEN").unwrap_or_else(|_| "0.0.0.0:3200".to_string());
+        env::var("SUBLY402_WATCHTOWER_LISTEN").unwrap_or_else(|_| "0.0.0.0:3200".to_string());
 
-    let store_path = env::var("A402_WATCHTOWER_STORE_PATH")
+    let store_path = env::var("SUBLY402_WATCHTOWER_STORE_PATH")
         .unwrap_or_else(|_| "data/watchtower_receipts.json".to_string());
 
-    let poll_interval: u64 = env::var("A402_WATCHTOWER_POLL_SEC")
+    let poll_interval: u64 = env::var("SUBLY402_WATCHTOWER_POLL_SEC")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
@@ -187,10 +187,10 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
 }
 
 fn load_challenger_keypair() -> Keypair {
-    if let Ok(encoded) = env::var("A402_WATCHTOWER_KEYPAIR_B64") {
+    if let Ok(encoded) = env::var("SUBLY402_WATCHTOWER_KEYPAIR_B64") {
         let bytes = BASE64
             .decode(encoded)
-            .expect("A402_WATCHTOWER_KEYPAIR_B64 must be valid base64");
+            .expect("SUBLY402_WATCHTOWER_KEYPAIR_B64 must be valid base64");
         return Keypair::try_from(bytes.as_slice()).expect("Invalid keypair bytes");
     }
 
@@ -281,8 +281,8 @@ fn validate_store_receipt_request_inner(
         )
     })?;
 
-    let decoded =
-        a402_vault::ed25519_utils::decode_participant_receipt_message(&message).map_err(|e| {
+    let decoded = subly402_vault::ed25519_utils::decode_participant_receipt_message(&message)
+        .map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("invalid receipt message: {e}"),

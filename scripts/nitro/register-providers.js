@@ -14,21 +14,23 @@ const {
 function loadNitroEnv() {
   loadDefaultEnvFiles();
   loadEnvFile(
-    process.env.A402_NITRO_CLIENT_ENV ||
+    process.env.SUBLY402_NITRO_CLIENT_ENV ||
       path.join(ROOT, "infra", "nitro", "generated", "client.env")
   );
   loadEnvFile(
-    process.env.A402_DEMO_PROVIDERS_ENV || "/root/a402-demo-providers.env"
+    process.env.SUBLY402_DEMO_PROVIDERS_ENV ||
+      "/root/subly402-demo-providers.env"
   );
 }
 
 function loadProvider(index) {
-  const id = process.env[`A402_DEMO_PROVIDER_${index}_ID`];
-  const tokenAccount = process.env[`A402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`];
-  const apiKey = process.env[`A402_DEMO_PROVIDER_${index}_API_KEY`];
+  const id = process.env[`SUBLY402_DEMO_PROVIDER_${index}_ID`];
+  const tokenAccount =
+    process.env[`SUBLY402_DEMO_PROVIDER_${index}_TOKEN_ACCOUNT`];
+  const apiKey = process.env[`SUBLY402_DEMO_PROVIDER_${index}_API_KEY`];
   if (!id || !tokenAccount || !apiKey) {
     throw new Error(
-      `A402_DEMO_PROVIDER_${index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
+      `SUBLY402_DEMO_PROVIDER_${index}_{ID,TOKEN_ACCOUNT,API_KEY} are required`
     );
   }
   return { index, id, tokenAccount, apiKey };
@@ -52,7 +54,7 @@ async function registerProvider(
 ) {
   const response = await postJson(enclaveUrl, "/v1/provider/register", {
     providerId: provider.id,
-    displayName: `A402 Demo Provider ${provider.index}`,
+    displayName: `Subly402 Demo Provider ${provider.index}`,
     settlementTokenAccount: provider.tokenAccount,
     network,
     assetMint,
@@ -82,14 +84,17 @@ async function registerProvider(
 async function main() {
   loadNitroEnv();
 
-  if (process.env.A402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
+  if (process.env.SUBLY402_NITRO_ALLOW_SELF_SIGNED_TLS !== "0") {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
   }
 
-  const enclaveUrl = requireEnv("A402_PUBLIC_ENCLAVE_URL").replace(/\/$/, "");
-  const network = process.env.A402_NETWORK || "solana:devnet";
-  const assetMint = requireEnv("A402_USDC_MINT");
-  const origin = process.env.A402_REQUEST_ORIGIN || "http://localhost:3000";
+  const enclaveUrl = requireEnv("SUBLY402_PUBLIC_ENCLAVE_URL").replace(
+    /\/$/,
+    ""
+  );
+  const network = process.env.SUBLY402_NETWORK || "solana:devnet";
+  const assetMint = requireEnv("SUBLY402_USDC_MINT");
+  const origin = process.env.SUBLY402_REQUEST_ORIGIN || "http://localhost:3000";
   const providers = [loadProvider(1), loadProvider(2)];
 
   await assertRegistrationRoute(enclaveUrl);
@@ -106,7 +111,7 @@ async function main() {
       {
         ok: true,
         enclaveUrl,
-        vaultConfig: process.env.A402_VAULT_CONFIG,
+        vaultConfig: process.env.SUBLY402_VAULT_CONFIG,
         results,
       },
       null,

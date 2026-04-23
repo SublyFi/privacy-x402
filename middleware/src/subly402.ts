@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
-import { a402Middleware } from "./middleware";
+import { subly402Middleware } from "./middleware";
 import type {
-  A402ProviderConfig,
+  Subly402ProviderConfig,
   Subly402FacilitatorClientOptions,
   Subly402RouteAccept,
   Subly402RouteConfig,
@@ -14,7 +14,7 @@ type AttestationSummary = {
   attestationPolicyHash: string;
 };
 
-const INTERNAL_WIRE_SCHEME = "a402-svm-v1";
+const INTERNAL_WIRE_SCHEME = "subly402-svm-v1";
 const DEFAULT_ASSET_DECIMALS = 6;
 const DEFAULT_ASSET_SYMBOL = "USDC";
 
@@ -111,8 +111,8 @@ export class Subly402ExactScheme {
 export class Subly402FacilitatorClient {
   readonly url: string;
   readonly providerApiKey?: string;
-  readonly authMode?: A402ProviderConfig["authMode"];
-  readonly mtls?: A402ProviderConfig["mtls"];
+  readonly authMode?: Subly402ProviderConfig["authMode"];
+  readonly mtls?: Subly402ProviderConfig["mtls"];
   readonly defaultAssetMint?: string;
   readonly defaultAssetDecimals: number;
   readonly defaultAssetSymbol: string;
@@ -193,7 +193,7 @@ export class Subly402ResourceServer {
 
   async buildProviderConfig(
     accept: Subly402RouteAccept
-  ): Promise<A402ProviderConfig> {
+  ): Promise<Subly402ProviderConfig> {
     if (!this.networks.has(accept.network)) {
       throw new Error(`Subly402 network is not registered: ${accept.network}`);
     }
@@ -247,7 +247,7 @@ export function subly402PaymentMiddleware(
       const accept = selectAccept(route);
       const config = await resourceServer.buildProviderConfig(accept);
       const amount = normalizePriceToAtomic(accept.price, config.assetDecimals);
-      return a402Middleware({
+      return subly402Middleware({
         config,
         pricing: () => amount,
       })(req as any, res, next);

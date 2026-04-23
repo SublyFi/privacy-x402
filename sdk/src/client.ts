@@ -29,7 +29,6 @@ import {
   sha256hex,
 } from "./crypto";
 import {
-  A402ClientConfig,
   AttestationResponse,
   BalanceResponse,
   ChannelFinalizeResponse,
@@ -42,6 +41,7 @@ import {
   PaymentRequiredResponse,
   PaymentResponse,
   SettleResponse,
+  Subly402VaultClientConfig,
   VerifyResponse,
   WithdrawAuthResponse,
 } from "./types";
@@ -165,19 +165,19 @@ async function verifyAttestedTlsEndpointBinding(
 }
 
 /**
- * A402 Client SDK — deposit, withdraw, and x402-compatible fetch.
+ * Subly402 vault client SDK — deposit, withdraw, and direct enclave fetch.
  */
-export class A402Client {
+export class Subly402VaultClient {
   private wallet: { publicKey: PublicKey; secretKey: Uint8Array };
   private vaultAddress: PublicKey;
   private enclaveUrl: string;
   private connection: Connection;
   private cachedAttestation: AttestationResponse | null = null;
   private latestClientReceipt: ParticipantReceiptResponse | null = null;
-  private nitroAttestation: A402ClientConfig["nitroAttestation"];
-  private attestationVerifier: A402ClientConfig["attestationVerifier"];
+  private nitroAttestation: Subly402VaultClientConfig["nitroAttestation"];
+  private attestationVerifier: Subly402VaultClientConfig["attestationVerifier"];
 
-  constructor(config: A402ClientConfig) {
+  constructor(config: Subly402VaultClientConfig) {
     this.wallet = config.walletKeypair;
     this.vaultAddress = config.vaultAddress;
     this.enclaveUrl = config.enclaveUrl.replace(/\/$/, "");
@@ -233,7 +233,8 @@ export class A402Client {
         ...this.nitroAttestation,
         expectedVaultSigner:
           this.nitroAttestation.expectedVaultSigner ?? attestation.vaultSigner,
-        requireA402UserData: this.nitroAttestation.requireA402UserData ?? true,
+        requireSubly402UserData:
+          this.nitroAttestation.requireSubly402UserData ?? true,
       });
       if (this.attestationVerifier) {
         await this.attestationVerifier(attestation);
@@ -396,7 +397,7 @@ export class A402Client {
     );
     const authRequest = this.buildClientAuth((issuedAt, expiresAt) =>
       [
-        "A402-CLIENT-WITHDRAW-AUTH",
+        "SUBLY402-CLIENT-WITHDRAW-AUTH",
         this.wallet.publicKey.toBase58(),
         clientAta.toBase58(),
         String(amount),
@@ -504,7 +505,7 @@ export class A402Client {
   async getBalance(): Promise<BalanceResponse> {
     const auth = this.buildClientAuth((issuedAt, expiresAt) =>
       [
-        "A402-CLIENT-BALANCE",
+        "SUBLY402-CLIENT-BALANCE",
         this.wallet.publicKey.toBase58(),
         String(issuedAt),
         String(expiresAt),
@@ -543,7 +544,7 @@ export class A402Client {
     );
     const auth = this.buildClientAuth((issuedAt, expiresAt) =>
       [
-        "A402-CLIENT-RECEIPT",
+        "SUBLY402-CLIENT-RECEIPT",
         this.wallet.publicKey.toBase58(),
         recipientAta.toBase58(),
         String(issuedAt),
@@ -753,10 +754,10 @@ export class A402Client {
 
     // Parse 402 response
     const body = await readPaymentRequiredResponse(initialRes);
-    const details = body.accepts?.find((a) => a.scheme === "a402-svm-v1");
+    const details = body.accepts?.find((a) => a.scheme === "subly402-svm-v1");
 
     if (!details) {
-      throw new Error("No a402-svm-v1 payment option in 402 response");
+      throw new Error("No subly402-svm-v1 payment option in 402 response");
     }
 
     // Verify attestation if not cached
@@ -794,7 +795,7 @@ export class A402Client {
     initialDeposit: number
   ): Promise<OpenChannelResponse> {
     const message =
-      `A402-CHANNEL-OPEN\n` +
+      `SUBLY402-CHANNEL-OPEN\n` +
       `${this.wallet.publicKey.toBase58()}\n` +
       `${providerId}\n` +
       `${initialDeposit}\n`;
@@ -829,7 +830,7 @@ export class A402Client {
     requestHash: string
   ): Promise<ChannelRequestResponse> {
     const message =
-      `A402-CHANNEL-REQUEST\n` +
+      `SUBLY402-CHANNEL-REQUEST\n` +
       `${channelId}\n` +
       `${requestId}\n` +
       `${amount}\n` +
@@ -868,7 +869,7 @@ export class A402Client {
     adaptorSecret: string
   ): Promise<ChannelFinalizeResponse> {
     const message =
-      `A402-CHANNEL-FINALIZE\n` + `${channelId}\n` + `${adaptorSecret}\n`;
+      `SUBLY402-CHANNEL-FINALIZE\n` + `${channelId}\n` + `${adaptorSecret}\n`;
     const clientSig = this.signTextMessage(message);
 
     const res = await globalThis.fetch(
@@ -896,7 +897,7 @@ export class A402Client {
    * Close an ASC and settle accumulated provider earnings.
    */
   async closeChannel(channelId: string): Promise<CloseChannelResponse> {
-    const message = `A402-CHANNEL-CLOSE\n${channelId}\n`;
+    const message = `SUBLY402-CHANNEL-CLOSE\n${channelId}\n`;
     const clientSig = this.signTextMessage(message);
 
     const res = await globalThis.fetch(`${this.enclaveUrl}/v1/channel/close`, {
@@ -950,7 +951,7 @@ export class A402Client {
 
     const sigMessage = buildSignatureMessage({
       version: 1,
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       paymentId,
       client: this.wallet.publicKey.toBase58(),
       vault: details.vault.config,
@@ -970,7 +971,7 @@ export class A402Client {
 
     return {
       version: 1,
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       paymentId,
       client: this.wallet.publicKey.toBase58(),
       vault: details.vault.config,

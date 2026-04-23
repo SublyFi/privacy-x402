@@ -113,7 +113,7 @@ function computeAttestationPolicy({
   eifSigningCertSha256,
   kmsKeyArnSha256,
   parentRolePcr3,
-  protocol = "a402-svm-v1",
+  protocol = "subly402-svm-v1",
 }) {
   const normalizedMeasurements = normalizeMeasurements(measurements);
   const pcr8 = normalizedMeasurements.PCR8;
@@ -166,14 +166,14 @@ function loadMeasurements(filePath) {
 
 function resolveKmsKeyArnSha256(args) {
   const explicitHash =
-    args.kmsKeyArnSha256 || process.env.A402_KMS_KEY_ARN_SHA256;
+    args.kmsKeyArnSha256 || process.env.SUBLY402_KMS_KEY_ARN_SHA256;
   if (explicitHash) {
-    return normalizeHex(explicitHash, "A402_KMS_KEY_ARN_SHA256");
+    return normalizeHex(explicitHash, "SUBLY402_KMS_KEY_ARN_SHA256");
   }
-  const keyArn = args.kmsKeyArn || process.env.A402_KMS_KEY_ARN;
+  const keyArn = args.kmsKeyArn || process.env.SUBLY402_KMS_KEY_ARN;
   if (!keyArn) {
     throw new Error(
-      "A402_KMS_KEY_ARN or A402_KMS_KEY_ARN_SHA256 must be provided"
+      "SUBLY402_KMS_KEY_ARN or SUBLY402_KMS_KEY_ARN_SHA256 must be provided"
     );
   }
   return sha256hex(Buffer.from(keyArn, "utf8"));
@@ -181,15 +181,15 @@ function resolveKmsKeyArnSha256(args) {
 
 function resolveEifSigningCertSha256(args) {
   const explicitHash =
-    args.eifSigningCertSha256 || process.env.A402_EIF_SIGNING_CERT_SHA256;
+    args.eifSigningCertSha256 || process.env.SUBLY402_EIF_SIGNING_CERT_SHA256;
   if (explicitHash) {
-    return normalizeHex(explicitHash, "A402_EIF_SIGNING_CERT_SHA256");
+    return normalizeHex(explicitHash, "SUBLY402_EIF_SIGNING_CERT_SHA256");
   }
   const certPath =
-    args.eifSigningCertPath || process.env.A402_EIF_SIGNING_CERT_PATH;
+    args.eifSigningCertPath || process.env.SUBLY402_EIF_SIGNING_CERT_PATH;
   if (!certPath) {
     throw new Error(
-      "A402_EIF_SIGNING_CERT_PATH or A402_EIF_SIGNING_CERT_SHA256 must be provided"
+      "SUBLY402_EIF_SIGNING_CERT_PATH or SUBLY402_EIF_SIGNING_CERT_SHA256 must be provided"
     );
   }
   return fileSha256(certPath);
@@ -202,15 +202,17 @@ function fileSha256(filePath) {
 function resolveNitroProjectName(args = {}) {
   return (
     args.projectName ||
-    process.env.A402_NITRO_PROJECT_NAME ||
-    "a402-devnet"
+    process.env.SUBLY402_NITRO_PROJECT_NAME ||
+    "subly402-devnet"
   );
 }
 
 function resolveAwsCallerIdentity(args = {}) {
   const accountId =
-    args.awsAccountId || process.env.A402_AWS_ACCOUNT_ID || process.env.AWS_ACCOUNT_ID;
-  const partition = args.awsPartition || process.env.A402_AWS_PARTITION;
+    args.awsAccountId ||
+    process.env.SUBLY402_AWS_ACCOUNT_ID ||
+    process.env.AWS_ACCOUNT_ID;
+  const partition = args.awsPartition || process.env.SUBLY402_AWS_PARTITION;
   if (accountId) {
     return {
       accountId: String(accountId).trim(),
@@ -248,8 +250,8 @@ function resolveAwsCallerIdentity(args = {}) {
 function resolveParentRoleArn(args = {}) {
   const explicitArn =
     args.parentRoleArn ||
-    process.env.A402_PARENT_ROLE_ARN ||
-    process.env.A402_NITRO_PARENT_ROLE_ARN;
+    process.env.SUBLY402_PARENT_ROLE_ARN ||
+    process.env.SUBLY402_NITRO_PARENT_ROLE_ARN;
   if (explicitArn) {
     return explicitArn.trim();
   }
@@ -269,7 +271,7 @@ function computeParentRolePcr3(parentRoleArn) {
 }
 
 function awsKmsEncryptBase64({ keyId, plaintext, encryptionContext, region }) {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "a402-kms-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "subly402-kms-"));
   const plaintextPath = path.join(tempDir, "plaintext.bin");
   fs.writeFileSync(plaintextPath, plaintext);
   try {
@@ -407,8 +409,8 @@ async function planVault({
 
 function buildSignerEncryptionContext(vaultConfig) {
   return {
-    "a402:component": "vault-signer",
-    "a402:vaultConfig": vaultConfig,
+    "subly402:component": "vault-signer",
+    "subly402:vaultConfig": vaultConfig,
   };
 }
 
@@ -417,9 +419,9 @@ function buildStorageMetadataKey(vaultConfig) {
 }
 
 function loadOrCreateWatchtowerKeypair() {
-  const encoded = process.env.A402_WATCHTOWER_KEYPAIR_B64;
+  const encoded = process.env.SUBLY402_WATCHTOWER_KEYPAIR_B64;
   if (encoded) {
-    return keypairFromBase64(encoded, "A402_WATCHTOWER_KEYPAIR_B64");
+    return keypairFromBase64(encoded, "SUBLY402_WATCHTOWER_KEYPAIR_B64");
   }
   return Keypair.generate();
 }

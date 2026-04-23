@@ -6,7 +6,7 @@ import {
 import { decodeFirstSync, encode, Tagged } from "cbor";
 
 import {
-  A402NitroUserDataEnvelope,
+  Subly402NitroUserDataEnvelope,
   AttestationResponse,
   NitroAttestationConfig,
   NitroAttestationDocument,
@@ -68,11 +68,11 @@ export async function verifyNitroAttestationDocument(
   verifyAttestationTimestamp(document, config.maxAgeMs);
   verifyExpectedPolicy(document, attestation, config);
   verifyExpectedNonce(document, config.expectedNonce);
-  verifyA402UserDataBinding(
+  verifySubly402UserDataBinding(
     document,
     attestation,
     config.expectedVaultSigner,
-    config.requireA402UserData
+    config.requireSubly402UserData
   );
 
   if (config.documentValidator) {
@@ -94,8 +94,7 @@ function assertPcrPinningConfigured(config: NitroAttestationConfig): void {
     return;
   }
   const pcrs = config.policy?.pcrs ?? config.expectedPcrs;
-  const hasPcrPinning =
-    pcrs !== undefined && Object.keys(pcrs).length > 0;
+  const hasPcrPinning = pcrs !== undefined && Object.keys(pcrs).length > 0;
   if (hasPcrPinning) {
     return;
   }
@@ -158,8 +157,8 @@ function parseNitroAttestationPayload(
   );
 
   const userDataBuffer = optionalBuffer(payloadMap.get("user_data"));
-  const parsedA402UserData = userDataBuffer
-    ? parseA402UserDataEnvelope(userDataBuffer)
+  const parsedSubly402UserData = userDataBuffer
+    ? parseSubly402UserDataEnvelope(userDataBuffer)
     : null;
 
   return {
@@ -174,7 +173,7 @@ function parseNitroAttestationPayload(
     ),
     userDataB64: userDataBuffer?.toString("base64"),
     nonceB64: optionalBuffer(payloadMap.get("nonce"))?.toString("base64"),
-    parsedA402UserData,
+    parsedSubly402UserData,
   };
 }
 
@@ -324,33 +323,33 @@ function verifyExpectedNonce(
   }
 }
 
-function verifyA402UserDataBinding(
+function verifySubly402UserDataBinding(
   document: NitroAttestationDocument,
   attestation: AttestationResponse,
   expectedVaultSigner?: string,
-  requireA402UserData?: boolean
+  requireSubly402UserData?: boolean
 ): void {
-  const parsed = document.parsedA402UserData;
+  const parsed = document.parsedSubly402UserData;
   if (!parsed) {
-    if (requireA402UserData || expectedVaultSigner) {
+    if (requireSubly402UserData || expectedVaultSigner) {
       throw new Error(
-        "Attestation document is missing the required A402 user_data envelope"
+        "Attestation document is missing the required Subly402 user_data envelope"
       );
     }
     return;
   }
 
   if (parsed.version !== 1) {
-    throw new Error("Unsupported A402 Nitro user_data envelope version");
+    throw new Error("Unsupported Subly402 Nitro user_data envelope version");
   }
   if (parsed.vaultConfig !== attestation.vaultConfig) {
     throw new Error(
-      "A402 user_data vaultConfig does not match attestation response"
+      "Subly402 user_data vaultConfig does not match attestation response"
     );
   }
   if (parsed.vaultSigner !== attestation.vaultSigner) {
     throw new Error(
-      "A402 user_data vaultSigner does not match attestation response"
+      "Subly402 user_data vaultSigner does not match attestation response"
     );
   }
   if (
@@ -358,18 +357,18 @@ function verifyA402UserDataBinding(
     normalizeHex(attestation.attestationPolicyHash)
   ) {
     throw new Error(
-      "A402 user_data attestationPolicyHash does not match attestation response"
+      "Subly402 user_data attestationPolicyHash does not match attestation response"
     );
   }
   if (expectedVaultSigner && parsed.vaultSigner !== expectedVaultSigner) {
     throw new Error(
-      "A402 user_data vaultSigner does not match the expected vault signer"
+      "Subly402 user_data vaultSigner does not match the expected vault signer"
     );
   }
   if (attestation.snapshotSeqno !== undefined) {
     if (parsed.snapshotSeqno !== attestation.snapshotSeqno) {
       throw new Error(
-        "A402 user_data snapshotSeqno does not match attestation response"
+        "Subly402 user_data snapshotSeqno does not match attestation response"
       );
     }
   }
@@ -403,13 +402,13 @@ function verifyA402UserDataBinding(
   }
 }
 
-export function parseA402UserDataEnvelope(
+export function parseSubly402UserDataEnvelope(
   userData: Uint8Array
-): A402NitroUserDataEnvelope | null {
+): Subly402NitroUserDataEnvelope | null {
   try {
     const parsed = JSON.parse(
       Buffer.from(userData).toString("utf8")
-    ) as Partial<A402NitroUserDataEnvelope>;
+    ) as Partial<Subly402NitroUserDataEnvelope>;
     if (
       typeof parsed.version !== "number" ||
       typeof parsed.vaultConfig !== "string" ||
@@ -423,7 +422,7 @@ export function parseA402UserDataEnvelope(
     ) {
       return null;
     }
-    return parsed as A402NitroUserDataEnvelope;
+    return parsed as Subly402NitroUserDataEnvelope;
   } catch {
     return null;
   }
@@ -444,7 +443,7 @@ function assertMatchingOptionalField(
   }
   if (normalizeHex(documentValue) !== normalizeHex(responseValue)) {
     throw new Error(
-      `A402 user_data ${field} does not match attestation response`
+      `Subly402 user_data ${field} does not match attestation response`
     );
   }
 }

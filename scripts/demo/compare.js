@@ -40,5 +40,5 @@ console.log(
 console.log("");
 
 console.log("Commands for recording:");
-console.log("  A402_DEMO_CONFIRM=1 yarn demo:x402-direct");
-console.log("  A402_DEMO_CONFIRM=1 yarn demo:subly-private");
+console.log("  SUBLY402_DEMO_CONFIRM=1 yarn demo:x402-direct");
+console.log("  SUBLY402_DEMO_CONFIRM=1 yarn demo:subly-private");

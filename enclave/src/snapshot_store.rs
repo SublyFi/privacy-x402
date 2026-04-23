@@ -35,12 +35,12 @@ impl SnapshotStoreClient {
     }
 
     pub fn from_env(interconnect: ParentInterconnect) -> Option<Self> {
-        if let Ok(addr) = std::env::var("A402_SNAPSHOT_STORE_ADDR") {
+        if let Ok(addr) = std::env::var("SUBLY402_SNAPSHOT_STORE_ADDR") {
             return Some(Self::new(addr));
         }
 
         if interconnect.mode() == InterconnectMode::Vsock {
-            let port = read_env_u32("A402_ENCLAVE_SNAPSHOT_PORT", 5003);
+            let port = read_env_u32("SUBLY402_ENCLAVE_SNAPSHOT_PORT", 5003);
             return Some(Self {
                 target: SnapshotStoreTarget::ParentPort { interconnect, port },
             });

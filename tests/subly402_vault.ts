@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { A402Vault } from "../target/types/a402_vault";
+import { Subly402Vault } from "../target/types/subly402_vault";
 import {
   createMint,
   createAccount,
@@ -34,7 +34,7 @@ const SCALAR_ORDER = BigInt(
   "7237005577332262213973186563042994240857116359379907606001950938285454250989"
 );
 
-describe("a402_vault", () => {
+describe("subly402_vault", () => {
   const provider = new anchor.AnchorProvider(
     anchor.AnchorProvider.env().connection,
     anchor.AnchorProvider.env().wallet,
@@ -99,7 +99,7 @@ describe("a402_vault", () => {
     await provider.connection.confirmTransaction(sig, "finalized");
   }
 
-  const program = anchor.workspace.a402Vault as Program<A402Vault>;
+  const program = anchor.workspace.subly402Vault as Program<Subly402Vault>;
   const governance = provider.wallet as anchor.Wallet;
 
   let usdcMint: PublicKey;
@@ -184,7 +184,7 @@ describe("a402_vault", () => {
     auditRecords: AuditRecordInput[]
   ): number[] {
     const hash = createHash("sha256");
-    hash.update("a402-batch-chunk-v1");
+    hash.update("subly402-batch-chunk-v1");
     hash.update(batchId.toArrayLike(Buffer, "le", 8));
 
     for (const settlement of settlements) {
@@ -215,7 +215,7 @@ describe("a402_vault", () => {
 
   function kdfMask(sharedSecretBytes: Uint8Array): Uint8Array {
     const hash = createHash("sha256");
-    hash.update("a402-elgamal-mask-v1");
+    hash.update("subly402-elgamal-mask-v1");
     hash.update(sharedSecretBytes);
     return new Uint8Array(hash.digest());
   }
@@ -228,7 +228,7 @@ describe("a402_vault", () => {
       hkdfSync(
         "sha256",
         masterSecret,
-        Buffer.from("a402-audit-v1"),
+        Buffer.from("subly402-audit-v1"),
         provider.toBuffer(),
         64
       )

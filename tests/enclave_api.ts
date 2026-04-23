@@ -11,33 +11,34 @@ import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
  * Enclave Facilitator API integration tests.
  *
  * Prerequisites: watchtower must be running on localhost:3200 and enclave must
- * be running on localhost:3100 with A402_WATCHTOWER_URL=http://127.0.0.1:3200
- * A402_ENABLE_PROVIDER_REGISTRATION_API=1 and A402_ENABLE_ADMIN_API=1
- * Run: cargo run -p a402-watchtower &
- * Then: A402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p a402-enclave &
+ * be running on localhost:3100 with SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200
+ * SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1 and SUBLY402_ENABLE_ADMIN_API=1
+ * Run: cargo run -p subly402-watchtower &
+ * Then: SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p subly402-enclave &
  * Then: yarn run ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts
  *
  * Optional HTTPS/mTLS:
- * - set A402_TEST_ENCLAVE_URL=https://127.0.0.1:3100
- * - set A402_TEST_TLS_CA_PATH to trust the enclave certificate
- * - set A402_TEST_MTLS_CERT_PATH / A402_TEST_MTLS_KEY_PATH for provider-authenticated calls
+ * - set SUBLY402_TEST_ENCLAVE_URL=https://127.0.0.1:3100
+ * - set SUBLY402_TEST_TLS_CA_PATH to trust the enclave certificate
+ * - set SUBLY402_TEST_MTLS_CERT_PATH / SUBLY402_TEST_MTLS_KEY_PATH for provider-authenticated calls
  */
 
 const ENCLAVE_URL =
-  process.env.A402_TEST_ENCLAVE_URL || "http://localhost:3100";
+  process.env.SUBLY402_TEST_ENCLAVE_URL || "http://localhost:3100";
 const SHARED_TLS: RequestTlsOptions | undefined = process.env
-  .A402_TEST_TLS_CA_PATH
+  .SUBLY402_TEST_TLS_CA_PATH
   ? {
-      caPath: process.env.A402_TEST_TLS_CA_PATH,
-      serverName: process.env.A402_TEST_TLS_SERVER_NAME,
+      caPath: process.env.SUBLY402_TEST_TLS_CA_PATH,
+      serverName: process.env.SUBLY402_TEST_TLS_SERVER_NAME,
     }
   : undefined;
 const PROVIDER_MTLS: RequestTlsOptions | undefined =
-  process.env.A402_TEST_MTLS_CERT_PATH && process.env.A402_TEST_MTLS_KEY_PATH
+  process.env.SUBLY402_TEST_MTLS_CERT_PATH &&
+  process.env.SUBLY402_TEST_MTLS_KEY_PATH
     ? {
         ...SHARED_TLS,
-        certPath: process.env.A402_TEST_MTLS_CERT_PATH,
-        keyPath: process.env.A402_TEST_MTLS_KEY_PATH,
+        certPath: process.env.SUBLY402_TEST_MTLS_CERT_PATH,
+        keyPath: process.env.SUBLY402_TEST_MTLS_KEY_PATH,
       }
     : undefined;
 
@@ -126,7 +127,7 @@ function computeRequestHash(
   paymentDetailsHash: string
 ): string {
   const hash = createHash("sha256");
-  hash.update("A402-SVM-V1-REQ\n");
+  hash.update("SUBLY402-SVM-V1-REQ\n");
   hash.update(ctx.method);
   hash.update("\n");
   hash.update(ctx.origin);
@@ -145,7 +146,7 @@ function signPaymentPayload(
   payload: Omit<PaymentPayload, "clientSig">
 ): string {
   const message =
-    "A402-SVM-V1-AUTH\n" +
+    "SUBLY402-SVM-V1-AUTH\n" +
     `${payload.version}\n` +
     `${payload.scheme}\n` +
     `${payload.paymentId}\n` +
@@ -267,7 +268,7 @@ describe("enclave_api", () => {
       bodySha256: sha256hex(JSON.stringify({ hello: "world" })),
     };
     const paymentDetails = {
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       network: "solana:localnet",
       amount: paymentAmount.toString(),
       asset: {
@@ -293,7 +294,7 @@ describe("enclave_api", () => {
     const requestHash = computeRequestHash(requestContext, paymentDetailsHash);
     const unsignedPayload: Omit<PaymentPayload, "clientSig"> = {
       version: 1,
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       paymentId: `pay_${randomUUID()}`,
       client: client.publicKey.toBase58(),
       vault: attestation.vaultConfig,
@@ -321,7 +322,7 @@ describe("enclave_api", () => {
       },
       {
         Authorization: `Bearer ${providerApiKey}`,
-        "x-a402-provider-id": providerId,
+        "x-subly402-provider-id": providerId,
       },
       PROVIDER_MTLS ?? undefined
     );
@@ -356,7 +357,7 @@ describe("enclave_api", () => {
     const balanceAfterVerifyAuth = buildClientRequestAuth(
       client,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
     );
     const balanceAfterVerifyRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
@@ -380,7 +381,7 @@ describe("enclave_api", () => {
       },
       {
         Authorization: `Bearer ${providerApiKey}`,
-        "x-a402-provider-id": providerId,
+        "x-subly402-provider-id": providerId,
       },
       PROVIDER_MTLS ?? undefined
     );
@@ -412,7 +413,7 @@ describe("enclave_api", () => {
       },
       {
         Authorization: `Bearer ${providerApiKey}`,
-        "x-a402-provider-id": providerId,
+        "x-subly402-provider-id": providerId,
       },
       PROVIDER_MTLS ?? undefined
     );
@@ -423,7 +424,7 @@ describe("enclave_api", () => {
     const balanceAfterSettleAuth = buildClientRequestAuth(
       client,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
     );
     const balanceAfterSettleRes = await postJson("/v1/balance", {
       client: client.publicKey.toBase58(),
@@ -442,7 +443,7 @@ describe("enclave_api", () => {
     const withdrawAuth = buildClientRequestAuth(
       client,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-WITHDRAW-AUTH\n${client.publicKey.toBase58()}\n${withdrawRecipientAta}\n500000\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-WITHDRAW-AUTH\n${client.publicKey.toBase58()}\n${withdrawRecipientAta}\n500000\n${issuedAt}\n${expiresAt}\n`
     );
     const withdrawAuthRes = await postJson("/v1/withdraw-auth", {
       client: client.publicKey.toBase58(),
@@ -464,7 +465,7 @@ describe("enclave_api", () => {
     const receiptAuth = buildClientRequestAuth(
       client,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-RECEIPT\n${client.publicKey.toBase58()}\n${receiptRecipientAta}\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-RECEIPT\n${client.publicKey.toBase58()}\n${receiptRecipientAta}\n${issuedAt}\n${expiresAt}\n`
     );
     const receiptRes = await postJson("/v1/receipt", {
       client: client.publicKey.toBase58(),
@@ -519,7 +520,7 @@ describe("enclave_api", () => {
     const unknownProviderRes = await postJson("/v1/verify", {
       paymentPayload: {
         version: 1,
-        scheme: "a402-svm-v1",
+        scheme: "subly402-svm-v1",
         paymentId: "pay_unknown",
         client: Keypair.generate().publicKey.toBase58(),
         vault: attestation.vaultConfig,
@@ -535,7 +536,7 @@ describe("enclave_api", () => {
         clientSig: "",
       },
       paymentDetails: {
-        scheme: "a402-svm-v1",
+        scheme: "subly402-svm-v1",
       },
       requestContext: {
         method: "POST",
@@ -573,7 +574,7 @@ describe("enclave_api", () => {
     const unknownWithdrawAuth = buildClientRequestAuth(
       unknownClient,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-WITHDRAW-AUTH\n${unknownClient.publicKey.toBase58()}\n${unknownRecipientAta}\n1000000\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-WITHDRAW-AUTH\n${unknownClient.publicKey.toBase58()}\n${unknownRecipientAta}\n1000000\n${issuedAt}\n${expiresAt}\n`
     );
     const withdrawRes = await postJson("/v1/withdraw-auth", {
       client: unknownClient.publicKey.toBase58(),

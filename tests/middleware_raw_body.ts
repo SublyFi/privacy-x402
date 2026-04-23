@@ -4,7 +4,7 @@ import { createServer, Server } from "http";
 import { expect } from "chai";
 import express from "express";
 
-import { a402Middleware, captureA402RawBody } from "../middleware/src";
+import { subly402Middleware, captureSubly402RawBody } from "../middleware/src";
 
 function sha256hex(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex");
@@ -27,7 +27,7 @@ function buildExpectedPaymentDetailsId(args: {
   bodySha256: string;
 }): string {
   const hash = createHash("sha256")
-    .update("A402-SVM-V1-PAYDET\n")
+    .update("SUBLY402-SVM-V1-PAYDET\n")
     .update(args.providerId)
     .update("\n")
     .update(args.payTo)
@@ -83,10 +83,10 @@ describe("middleware_raw_body", () => {
 
   it("uses preserved raw body bytes for request binding", async () => {
     const app = express();
-    app.use(express.json({ verify: captureA402RawBody }));
+    app.use(express.json({ verify: captureSubly402RawBody }));
     app.post(
       "/metered",
-      a402Middleware({
+      subly402Middleware({
         config: {
           facilitatorUrl: "http://127.0.0.1:3999",
           providerId: "prov_test",
@@ -221,7 +221,7 @@ describe("middleware_raw_body", () => {
     const app = express();
     app.get(
       "/metered",
-      a402Middleware({
+      subly402Middleware({
         config: {
           facilitatorUrl,
           providerId: "prov_test",

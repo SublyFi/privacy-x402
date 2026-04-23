@@ -90,7 +90,7 @@ impl OutboundTransport {
     pub fn from_env(parent_interconnect: ParentInterconnect) -> Self {
         Self {
             parent_interconnect,
-            egress_port: read_env_u32("A402_ENCLAVE_EGRESS_PORT", 5001),
+            egress_port: read_env_u32("SUBLY402_ENCLAVE_EGRESS_PORT", 5001),
         }
     }
 

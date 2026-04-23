@@ -1,10 +1,10 @@
 [package]
-name = "a402-parent"
+name = "subly402-parent"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "a402-parent"
+name = "subly402-parent"
 path = "src/main.rs"
 
 [dependencies]

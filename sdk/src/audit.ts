@@ -8,10 +8,10 @@
  *
  * ElGamal ciphertext format (64 bytes):
  *   C1 = r * G           (32 bytes, compressed Ristretto255 point)
- *   C2 = data XOR SHA256("a402-elgamal-mask-v1" || r * P)  (32 bytes)
+ *   C2 = data XOR SHA256("subly402-elgamal-mask-v1" || r * P)  (32 bytes)
  *
  * Key derivation (HKDF-SHA256):
- *   provider_secret = HKDF(master_secret, salt="a402-audit-v1", info=provider_address)
+ *   provider_secret = HKDF(master_secret, salt="subly402-audit-v1", info=provider_address)
  *   provider_key = provider_secret mod l (reduced to Ristretto scalar)
  */
 
@@ -45,7 +45,7 @@ export interface RawAuditRecord {
 }
 
 /**
- * AuditTool for decrypting A402 audit records.
+ * AuditTool for decrypting Subly402 audit records.
  *
  * Usage:
  *   // Full audit (master key)
@@ -159,14 +159,12 @@ export class AuditTool {
    * Derive provider-specific secret from master secret via HKDF.
    * Matches enclave audit.rs derive_provider_key().
    */
-  private async deriveProviderSecret(
-    provider: PublicKey
-  ): Promise<Uint8Array> {
+  private async deriveProviderSecret(provider: PublicKey): Promise<Uint8Array> {
     return new Promise((resolve, reject) => {
       nodeHkdf(
         "sha256",
         this.masterSecret,
-        Buffer.from("a402-audit-v1"),
+        Buffer.from("subly402-audit-v1"),
         provider.toBuffer(),
         64,
         (err, derivedKey) => {
@@ -215,28 +213,35 @@ export class AuditTool {
       ],
     });
 
-    return accounts.map((acc) => parseAuditRecord(acc.pubkey, acc.account.data));
+    return accounts.map((acc) =>
+      parseAuditRecord(acc.pubkey, acc.account.data)
+    );
   }
 }
 
 /**
  * Parse an AuditRecord from raw account data.
  */
-function parseAuditRecord(
-  address: PublicKey,
-  data: Buffer
-): RawAuditRecord {
+function parseAuditRecord(address: PublicKey, data: Buffer): RawAuditRecord {
   // Skip 8-byte discriminator
   let offset = 8;
 
-  const bump = data[offset]; offset += 1;
-  const vault = new PublicKey(data.subarray(offset, offset + 32)); offset += 32;
-  const batchId = Number(data.readBigUInt64LE(offset)); offset += 8;
-  const index = data[offset]; offset += 1;
-  const encryptedSender = new Uint8Array(data.subarray(offset, offset + 64)); offset += 64;
-  const encryptedAmount = new Uint8Array(data.subarray(offset, offset + 64)); offset += 64;
-  const provider = new PublicKey(data.subarray(offset, offset + 32)); offset += 32;
-  const timestamp = Number(data.readBigInt64LE(offset)); offset += 8;
+  const bump = data[offset];
+  offset += 1;
+  const vault = new PublicKey(data.subarray(offset, offset + 32));
+  offset += 32;
+  const batchId = Number(data.readBigUInt64LE(offset));
+  offset += 8;
+  const index = data[offset];
+  offset += 1;
+  const encryptedSender = new Uint8Array(data.subarray(offset, offset + 64));
+  offset += 64;
+  const encryptedAmount = new Uint8Array(data.subarray(offset, offset + 64));
+  offset += 64;
+  const provider = new PublicKey(data.subarray(offset, offset + 32));
+  offset += 32;
+  const timestamp = Number(data.readBigInt64LE(offset));
+  offset += 8;
   const auditorEpoch = data.readUInt32LE(offset);
 
   return {
@@ -257,7 +262,7 @@ function parseAuditRecord(
  *
  * This performs the ECIES-like ElGamal decryption:
  *   shared_secret = secret_scalar * C1
- *   mask = SHA256("a402-elgamal-mask-v1" || shared_secret)
+ *   mask = SHA256("subly402-elgamal-mask-v1" || shared_secret)
  *   plaintext = C2 XOR mask
  *
  * Uses Ristretto255 point multiplication.
@@ -277,9 +282,7 @@ function decryptRecordWithSecret(
     const sender = new PublicKey(senderBytes);
 
     // Amount is LE u64 in first 8 bytes, rest is zero padding
-    const amount = Number(
-      Buffer.from(amountBytes).readBigUInt64LE(0)
-    );
+    const amount = Number(Buffer.from(amountBytes).readBigUInt64LE(0));
 
     return {
       sender,
@@ -337,9 +340,7 @@ function elgamalDecrypt(
   const c2 = ciphertext.slice(32, 64);
 
   // Decompress C1 point
-  const c1Point = RistrettoPoint.fromHex(
-    Buffer.from(c1Bytes).toString("hex")
-  );
+  const c1Point = RistrettoPoint.fromHex(Buffer.from(c1Bytes).toString("hex"));
 
   // Compute shared_secret = secret * C1
   // The secret is 64 bytes from HKDF, needs to be reduced mod l
@@ -394,7 +395,7 @@ function scalarToBytes(scalar: bigint): Uint8Array {
  */
 function kdfMask(sharedSecretBytes: Buffer): Uint8Array {
   const hash = createHash("sha256");
-  hash.update("a402-elgamal-mask-v1");
+  hash.update("subly402-elgamal-mask-v1");
   hash.update(sharedSecretBytes);
   return new Uint8Array(hash.digest());
 }

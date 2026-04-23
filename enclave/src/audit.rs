@@ -45,7 +45,7 @@ pub struct EncryptedAuditRecord {
 ///   derived_secret = HKDF-Expand(HKDF-Extract(master_secret), provider_address)
 ///   derived_pubkey = derived_secret * G
 pub fn derive_provider_key(master_secret: &[u8; 32], provider: &Pubkey) -> ElGamalKeyPair {
-    let hk = Hkdf::<Sha256>::new(Some(b"a402-audit-v1"), master_secret);
+    let hk = Hkdf::<Sha256>::new(Some(b"subly402-audit-v1"), master_secret);
     let mut okm = [0u8; 64];
     hk.expand(provider.as_ref(), &mut okm)
         .expect("HKDF expand should not fail with 64-byte output");
@@ -179,7 +179,7 @@ pub fn decrypt_amount(secret_key: &Scalar, encrypted_amount: &[u8; 64]) -> Optio
 /// Derive a KDF mask from a shared secret point.
 fn kdf_mask(shared_secret_bytes: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"a402-elgamal-mask-v1");
+    hasher.update(b"subly402-elgamal-mask-v1");
     hasher.update(shared_secret_bytes);
     let result = hasher.finalize();
     let mut mask = [0u8; 32];

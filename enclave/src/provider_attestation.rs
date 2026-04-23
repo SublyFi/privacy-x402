@@ -626,7 +626,7 @@ pub fn test_policy() -> ProviderAttestationPolicy {
         ]),
         eif_signing_cert_sha256: "66".repeat(32),
         kms_key_arn_sha256: "77".repeat(32),
-        protocol: "a402-provider-v1".to_string(),
+        protocol: "subly402-provider-v1".to_string(),
     }
 }
 

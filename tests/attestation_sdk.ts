@@ -3,10 +3,10 @@ import { createHash, X509Certificate } from "node:crypto";
 import { createServer, Server } from "node:https";
 import { Keypair, PublicKey } from "@solana/web3.js";
 
-import { A402Client } from "../sdk/src/client";
+import { Subly402VaultClient } from "../sdk/src/client";
 import {
   computeNitroAttestationPolicyHash,
-  parseA402UserDataEnvelope,
+  parseSubly402UserDataEnvelope,
   verifyNitroAttestationDocument,
 } from "../sdk/src/attestation";
 import { bodyToBytes, sha256hex } from "../sdk/src/crypto";
@@ -188,7 +188,7 @@ describe("attestation_sdk", () => {
       },
       eifSigningCertSha256: "0xCC",
       kmsKeyArnSha256: "DD",
-      protocol: "a402",
+      protocol: "subly402",
     };
     const policyB: NitroAttestationPolicy = {
       version: 1,
@@ -198,7 +198,7 @@ describe("attestation_sdk", () => {
       },
       eifSigningCertSha256: "cc",
       kmsKeyArnSha256: "0xdd",
-      protocol: "a402",
+      protocol: "subly402",
     };
 
     expect(computeNitroAttestationPolicyHash(policyA)).to.equal(
@@ -206,8 +206,8 @@ describe("attestation_sdk", () => {
     );
   });
 
-  it("parses the A402 Nitro user_data envelope and rejects invalid JSON", () => {
-    const parsed = parseA402UserDataEnvelope(
+  it("parses the Subly402 Nitro user_data envelope and rejects invalid JSON", () => {
+    const parsed = parseSubly402UserDataEnvelope(
       Buffer.from(
         JSON.stringify({
           version: 1,
@@ -227,9 +227,9 @@ describe("attestation_sdk", () => {
       attestationPolicyHash: "aa".repeat(32),
       snapshotSeqno: 7,
     });
-    expect(parseA402UserDataEnvelope(Buffer.from("not-json", "utf8"))).to.equal(
-      null
-    );
+    expect(
+      parseSubly402UserDataEnvelope(Buffer.from("not-json", "utf8"))
+    ).to.equal(null);
   });
 
   it("accepts a local-dev attestation document", async () => {
@@ -238,7 +238,7 @@ describe("attestation_sdk", () => {
 
     installFetchResponse(attestation);
 
-    const client = new A402Client({
+    const client = new Subly402VaultClient({
       walletKeypair: wallet,
       vaultAddress: new PublicKey(attestation.vaultConfig),
       enclaveUrl: "http://localhost:3100",
@@ -262,7 +262,7 @@ describe("attestation_sdk", () => {
 
     installFetchResponse(attestation);
 
-    const client = new A402Client({
+    const client = new Subly402VaultClient({
       walletKeypair: wallet,
       vaultAddress,
       enclaveUrl: "http://localhost:3100",
@@ -322,9 +322,7 @@ describe("attestation_sdk", () => {
       await verifyNitroAttestationDocument(attestation, {});
       throw new Error("expected PCR pinning guard to reject");
     } catch (error) {
-      expect((error as Error).message).to.match(
-        /requires PCR pinning/
-      );
+      expect((error as Error).message).to.match(/requires PCR pinning/);
     }
 
     try {
@@ -333,9 +331,7 @@ describe("attestation_sdk", () => {
       });
       throw new Error("expected PCR pinning guard to reject hash-only config");
     } catch (error) {
-      expect((error as Error).message).to.match(
-        /requires PCR pinning/
-      );
+      expect((error as Error).message).to.match(/requires PCR pinning/);
     }
   });
 
@@ -354,7 +350,7 @@ describe("attestation_sdk", () => {
 
     installFetchResponse(attestation);
 
-    const client = new A402Client({
+    const client = new Subly402VaultClient({
       walletKeypair: wallet,
       vaultAddress,
       enclaveUrl: "http://localhost:3100",
@@ -382,7 +378,7 @@ describe("attestation_sdk", () => {
       }
     );
     const paymentDetails = {
-      scheme: "a402-svm-v1",
+      scheme: "subly402-svm-v1",
       network: "solana:localnet",
       amount: "1234",
       asset: {
@@ -446,7 +442,7 @@ describe("attestation_sdk", () => {
       } as any;
     }) as typeof fetch;
 
-    const client = new A402Client({
+    const client = new Subly402VaultClient({
       walletKeypair: {
         publicKey: wallet.publicKey,
         secretKey: wallet.secretKey,
@@ -463,7 +459,7 @@ describe("attestation_sdk", () => {
     const payload = JSON.parse(
       Buffer.from(observedPaymentSignature, "base64").toString("utf8")
     ) as { scheme: string; providerId: string; amount: string };
-    expect(payload.scheme).to.equal("a402-svm-v1");
+    expect(payload.scheme).to.equal("subly402-svm-v1");
     expect(payload.providerId).to.equal("prov_test");
     expect(payload.amount).to.equal("1234");
   });
@@ -491,7 +487,7 @@ describe("attestation_sdk", () => {
     installFetchResponse(attestation);
 
     try {
-      const client = new A402Client({
+      const client = new Subly402VaultClient({
         walletKeypair: wallet,
         vaultAddress: new PublicKey(attestation.vaultConfig),
         enclaveUrl: `https://127.0.0.1:${port}`,
@@ -526,7 +522,7 @@ describe("attestation_sdk", () => {
     installFetchResponse(attestation);
 
     try {
-      const client = new A402Client({
+      const client = new Subly402VaultClient({
         walletKeypair: wallet,
         vaultAddress: new PublicKey(attestation.vaultConfig),
         enclaveUrl: `https://127.0.0.1:${port}`,

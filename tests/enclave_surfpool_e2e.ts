@@ -20,7 +20,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { AuditTool } from "../sdk/src/audit";
 import { computePaymentDetailsHash } from "../sdk/src/crypto";
 import { decodeVerificationReceiptEnvelope } from "../sdk/src/receipt";
-import { A402Vault } from "../target/types/a402_vault";
+import { Subly402Vault } from "../target/types/subly402_vault";
 import { buildTestProviderParticipantAttestation } from "./provider_attestation";
 import {
   generateTlsFixture,
@@ -110,7 +110,7 @@ function computeRequestHash(
   paymentDetailsHash: string
 ): string {
   const hash = createHash("sha256");
-  hash.update("A402-SVM-V1-REQ\n");
+  hash.update("SUBLY402-SVM-V1-REQ\n");
   hash.update(ctx.method);
   hash.update("\n");
   hash.update(ctx.origin);
@@ -129,7 +129,7 @@ function signPaymentPayload(
   payload: Omit<PaymentPayload, "clientSig">
 ): string {
   const message =
-    "A402-SVM-V1-AUTH\n" +
+    "SUBLY402-SVM-V1-AUTH\n" +
     `${payload.version}\n` +
     `${payload.scheme}\n` +
     `${payload.paymentId}\n` +
@@ -248,7 +248,7 @@ async function waitForClientBalance(
     const auth = buildClientRequestAuth(
       client,
       (issuedAt, expiresAt) =>
-        `A402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
+        `SUBLY402-CLIENT-BALANCE\n${client.publicKey.toBase58()}\n${issuedAt}\n${expiresAt}\n`
     );
     const response = await postJson(
       baseUrl,
@@ -303,9 +303,9 @@ describe("enclave_surfpool_e2e", function () {
   anchor.setProvider(provider);
 
   const idl = JSON.parse(
-    readFileSync("target/idl/a402_vault.json", "utf8")
-  ) as A402Vault;
-  const program = new Program<A402Vault>(idl as any, provider);
+    readFileSync("target/idl/subly402_vault.json", "utf8")
+  ) as Subly402Vault;
+  const program = new Program<Subly402Vault>(idl as any, provider);
   const governance = provider.wallet as anchor.Wallet;
 
   let enclaveProcess: ChildProcessWithoutNullStreams | undefined;
@@ -431,14 +431,14 @@ describe("enclave_surfpool_e2e", function () {
       walPath = `data/wal-surfpool-e2e-${randomUUID()}.jsonl`;
       watchtowerStorePath = `data/watchtower-surfpool-e2e-${randomUUID()}.json`;
       enclaveLogs = "";
-      watchtowerProcess = spawn("cargo", ["run", "-p", "a402-watchtower"], {
+      watchtowerProcess = spawn("cargo", ["run", "-p", "subly402-watchtower"], {
         cwd: process.cwd(),
         env: {
           ...process.env,
-          A402_PROGRAM_ID: program.programId.toBase58(),
-          A402_VAULT_CONFIG: vaultConfigPda.toBase58(),
-          A402_SOLANA_RPC_URL: RPC_URL,
-          A402_WATCHTOWER_STORE_PATH: watchtowerStorePath,
+          SUBLY402_PROGRAM_ID: program.programId.toBase58(),
+          SUBLY402_VAULT_CONFIG: vaultConfigPda.toBase58(),
+          SUBLY402_SOLANA_RPC_URL: RPC_URL,
+          SUBLY402_WATCHTOWER_STORE_PATH: watchtowerStorePath,
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -450,22 +450,22 @@ describe("enclave_surfpool_e2e", function () {
       });
       await waitForWatchtower();
 
-      enclaveProcess = spawn("cargo", ["run", "-p", "a402-enclave"], {
+      enclaveProcess = spawn("cargo", ["run", "-p", "subly402-enclave"], {
         cwd: process.cwd(),
         env: {
           ...process.env,
-          A402_VAULT_SIGNER_SECRET_KEY_B64:
+          SUBLY402_VAULT_SIGNER_SECRET_KEY_B64:
             enclaveSignerSeed.toString("base64"),
-          A402_PROGRAM_ID: program.programId.toBase58(),
-          A402_VAULT_CONFIG: vaultConfigPda.toBase58(),
-          A402_VAULT_TOKEN_ACCOUNT: vaultTokenAccountPda.toBase58(),
-          A402_USDC_MINT: usdcMint.toBase58(),
-          A402_SOLANA_RPC_URL: RPC_URL,
-          A402_SOLANA_WS_URL: "ws://127.0.0.1:8900",
-          A402_WAL_PATH: walPath,
-          A402_WATCHTOWER_URL: WATCHTOWER_URL,
-          A402_ENABLE_PROVIDER_REGISTRATION_API: "1",
-          A402_ENABLE_ADMIN_API: "1",
+          SUBLY402_PROGRAM_ID: program.programId.toBase58(),
+          SUBLY402_VAULT_CONFIG: vaultConfigPda.toBase58(),
+          SUBLY402_VAULT_TOKEN_ACCOUNT: vaultTokenAccountPda.toBase58(),
+          SUBLY402_USDC_MINT: usdcMint.toBase58(),
+          SUBLY402_SOLANA_RPC_URL: RPC_URL,
+          SUBLY402_SOLANA_WS_URL: "ws://127.0.0.1:8900",
+          SUBLY402_WAL_PATH: walPath,
+          SUBLY402_WATCHTOWER_URL: WATCHTOWER_URL,
+          SUBLY402_ENABLE_PROVIDER_REGISTRATION_API: "1",
+          SUBLY402_ENABLE_ADMIN_API: "1",
           ...(options.enclaveExtraEnv ?? {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -606,7 +606,7 @@ describe("enclave_surfpool_e2e", function () {
         bodySha256: sha256Hex(JSON.stringify({ ok: true })),
       };
       const paymentDetails = {
-        scheme: "a402-svm-v1",
+        scheme: "subly402-svm-v1",
         network: "solana:localnet",
         amount: paymentAmount.toString(),
         asset: {
@@ -637,7 +637,7 @@ describe("enclave_surfpool_e2e", function () {
       );
       const unsignedPayload: Omit<PaymentPayload, "clientSig"> = {
         version: 1,
-        scheme: "a402-svm-v1",
+        scheme: "subly402-svm-v1",
         paymentId: `pay_${randomUUID()}`,
         client: client.publicKey.toBase58(),
         vault: vaultConfigPda.toBase58(),
@@ -660,10 +660,10 @@ describe("enclave_surfpool_e2e", function () {
         options.authMode === "bearer"
           ? {
               Authorization: `Bearer ${providerApiKey}`,
-              "x-a402-provider-id": providerId,
+              "x-subly402-provider-id": providerId,
             }
           : {
-              "x-a402-provider-id": providerId,
+              "x-subly402-provider-id": providerId,
             };
 
       const verifyRes = await postJson(
@@ -792,7 +792,7 @@ describe("enclave_surfpool_e2e", function () {
 
   it("runs the same surfpool flow over https + mtls", async () => {
     await stopLiveProcesses();
-    tlsFixture = generateTlsFixture("a402-surfpool-mtls");
+    tlsFixture = generateTlsFixture("subly402-surfpool-mtls");
 
     await runSurfpoolFlow({
       enclaveUrl: "https://127.0.0.1:3100",
@@ -809,9 +809,9 @@ describe("enclave_surfpool_e2e", function () {
         serverName: "localhost",
       },
       enclaveExtraEnv: {
-        A402_ENCLAVE_TLS_CERT_PATH: tlsFixture.serverCertPath,
-        A402_ENCLAVE_TLS_KEY_PATH: tlsFixture.serverKeyPath,
-        A402_ENCLAVE_TLS_CLIENT_CA_PATH: tlsFixture.caCertPath,
+        SUBLY402_ENCLAVE_TLS_CERT_PATH: tlsFixture.serverCertPath,
+        SUBLY402_ENCLAVE_TLS_KEY_PATH: tlsFixture.serverKeyPath,
+        SUBLY402_ENCLAVE_TLS_CLIENT_CA_PATH: tlsFixture.caCertPath,
       },
       mtlsFingerprintHex: tlsFixture.clientCertFingerprintHex,
     });

@@ -36,7 +36,7 @@ locals {
 
 resource "aws_security_group" "parent" {
   name        = "${var.project_name}-parent"
-  description = "A402 parent ingress"
+  description = "Subly402 parent ingress"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -240,7 +240,7 @@ resource "aws_s3_bucket_versioning" "snapshots" {
 
 resource "aws_kms_key" "runtime" {
   count                   = var.existing_runtime_kms_key_arn == null ? 1 : 0
-  description             = "A402 Nitro runtime key"
+  description             = "Subly402 Nitro runtime key"
   deletion_window_in_days = 7
   enable_key_rotation     = true
   policy                  = data.aws_iam_policy_document.runtime_kms.json

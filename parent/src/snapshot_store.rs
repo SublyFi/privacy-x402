@@ -338,7 +338,7 @@ mod tests {
             .as_nanos();
         let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "a402-parent-snapshot-store-{}-{nonce}-{id}",
+            "subly402-parent-snapshot-store-{}-{nonce}-{id}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

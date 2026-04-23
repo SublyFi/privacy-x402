@@ -1,14 +1,14 @@
 [Unit]
-Description=A402 Nitro parent relay
+Description=Subly402 Nitro parent relay
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=a402
-Group=a402
-WorkingDirectory=/var/lib/a402
-ExecStart=/opt/a402/bin/start-parent.sh /etc/a402/parent.env
+User=subly402
+Group=subly402
+WorkingDirectory=/var/lib/subly402
+ExecStart=/opt/subly402/bin/start-parent.sh /etc/subly402/parent.env
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -17,7 +17,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/a402 /var/log/a402 /etc/a402 /opt/a402
+ReadWritePaths=/var/lib/subly402 /var/log/subly402 /etc/subly402 /opt/subly402
 
 [Install]
 WantedBy=multi-user.target

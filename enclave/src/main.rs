@@ -40,22 +40,22 @@ use wal::Wal;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let vault_config = read_pubkey_env("A402_VAULT_CONFIG", Pubkey::default());
-    let usdc_mint = read_pubkey_env("A402_USDC_MINT", Pubkey::default());
+    let vault_config = read_pubkey_env("SUBLY402_VAULT_CONFIG", Pubkey::default());
+    let usdc_mint = read_pubkey_env("SUBLY402_USDC_MINT", Pubkey::default());
     let attestation_policy_hash = attestation::resolve_attestation_policy_hash_from_env()
         .expect("attestation policy hash must resolve from env or Nitro measurements");
     let solana = SolanaRuntimeConfig {
-        program_id: read_pubkey_env("A402_PROGRAM_ID", a402_vault::ID),
-        vault_token_account: read_pubkey_env("A402_VAULT_TOKEN_ACCOUNT", Pubkey::default()),
-        rpc_url: env::var("A402_SOLANA_RPC_URL")
+        program_id: read_pubkey_env("SUBLY402_PROGRAM_ID", subly402_vault::ID),
+        vault_token_account: read_pubkey_env("SUBLY402_VAULT_TOKEN_ACCOUNT", Pubkey::default()),
+        rpc_url: env::var("SUBLY402_SOLANA_RPC_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
-        ws_url: env::var("A402_SOLANA_WS_URL")
+        ws_url: env::var("SUBLY402_SOLANA_WS_URL")
             .unwrap_or_else(|_| "ws://127.0.0.1:8900".to_string()),
     };
-    let wal_path = env::var("A402_WAL_PATH").unwrap_or_else(|_| "data/wal.jsonl".to_string());
+    let wal_path = env::var("SUBLY402_WAL_PATH").unwrap_or_else(|_| "data/wal.jsonl".to_string());
     let listen_addr =
-        env::var("A402_ENCLAVE_LISTEN").unwrap_or_else(|_| "0.0.0.0:3100".to_string());
-    let ingress_port = read_env_u32("A402_ENCLAVE_INGRESS_PORT", 5000);
+        env::var("SUBLY402_ENCLAVE_LISTEN").unwrap_or_else(|_| "0.0.0.0:3100".to_string());
+    let ingress_port = read_env_u32("SUBLY402_ENCLAVE_INGRESS_PORT", 5000);
     let parent_interconnect = ParentInterconnect::from_env();
     let outbound = OutboundTransport::from_env(parent_interconnect);
     let snapshot_store = SnapshotStoreClient::from_env(parent_interconnect);
@@ -80,7 +80,7 @@ async fn main() {
 
     let wal = if let Some(snapshot_store) = snapshot_store.clone() {
         let wal_prefix =
-            env::var("A402_WAL_PREFIX").unwrap_or_else(|_| format!("wal/{vault_config}"));
+            env::var("SUBLY402_WAL_PREFIX").unwrap_or_else(|_| format!("wal/{vault_config}"));
         Arc::new(
             Wal::new_with_snapshot_store(
                 PathBuf::from(&wal_path),
@@ -101,13 +101,13 @@ async fn main() {
         outbound,
     ));
 
-    let watchtower_url = env::var("A402_WATCHTOWER_URL")
-        .expect("A402_WATCHTOWER_URL must be set for Phase 4 receipt mirroring");
+    let watchtower_url = env::var("SUBLY402_WATCHTOWER_URL")
+        .expect("SUBLY402_WATCHTOWER_URL must be set for Phase 4 receipt mirroring");
     ensure_watchtower_ready(&watchtower_url, outbound)
         .await
         .expect("watchtower health check must succeed before enclave starts serving");
     let batch_privacy = batch::BatchPrivacyConfig::from_env();
-    let manifest_hash = env::var("A402_MANIFEST_HASH_HEX").ok();
+    let manifest_hash = env::var("SUBLY402_MANIFEST_HASH_HEX").ok();
 
     let tls_runtime = tls::TlsRuntime::from_env().expect("TLS configuration must be valid");
     let provider_mtls_enabled = tls_runtime
@@ -144,8 +144,9 @@ async fn main() {
         .clone()
         .and_then(|client| SnapshotManager::from_env(client, bootstrap.storage_key, vault_config))
         .map(Arc::new);
-    let enable_provider_registration_api = read_env_bool("A402_ENABLE_PROVIDER_REGISTRATION_API");
-    let enable_admin_api = read_env_bool("A402_ENABLE_ADMIN_API");
+    let enable_provider_registration_api =
+        read_env_bool("SUBLY402_ENABLE_PROVIDER_REGISTRATION_API");
+    let enable_admin_api = read_env_bool("SUBLY402_ENABLE_ADMIN_API");
 
     let replay_from = if let Some(manager) = snapshot_manager.as_ref() {
         manager

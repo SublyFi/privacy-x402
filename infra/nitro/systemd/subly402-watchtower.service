@@ -1,0 +1,21 @@
+[Unit]
+Description=Subly402 receipt watchtower
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=subly402
+Group=subly402
+WorkingDirectory=/var/lib/subly402
+ExecStart=/opt/subly402/bin/start-watchtower.sh /etc/subly402/watchtower.env
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/subly402 /var/log/subly402 /etc/subly402 /opt/subly402
+
+[Install]
+WantedBy=multi-user.target

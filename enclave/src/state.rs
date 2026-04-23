@@ -15,7 +15,7 @@ use crate::error::EnclaveError;
 /// Unique channel identifier
 pub type ChannelId = String;
 
-/// ASC channel status (A402 Algorithm 1)
+/// ASC channel status (Subly402 Algorithm 1)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelStatus {
     /// Channel open, accepting requests
@@ -271,7 +271,7 @@ impl VaultState {
             last_batch_at: RwLock::new(0),
             last_finalized_slot: AtomicU64::new(0),
             lifecycle: RwLock::new(VaultLifecycle {
-                status: a402_vault::constants::VAULT_STATUS_ACTIVE,
+                status: subly402_vault::constants::VAULT_STATUS_ACTIVE,
                 successor_vault: Pubkey::default(),
                 exit_deadline: 0,
                 synced_at_ms: if cfg!(test) {
@@ -669,7 +669,7 @@ impl VaultState {
         reservation_expires_at: i64,
     ) -> Vec<u8> {
         format!(
-            "A402-VERIFY-RECEIPT\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "SUBLY402-VERIFY-RECEIPT\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
             verification_id,
             reservation_id,
             payment_id,

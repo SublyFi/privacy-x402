@@ -13,7 +13,7 @@ use instructions::*;
 declare_id!("DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR");
 
 #[program]
-pub mod a402_vault {
+pub mod subly402_vault {
     use super::*;
 
     pub fn initialize_vault(

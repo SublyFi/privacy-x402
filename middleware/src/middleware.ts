@@ -1,9 +1,9 @@
 import { createHash } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import {
-  A402MiddlewareOptions,
-  A402ProviderConfig,
-  A402Request,
+  Subly402MiddlewareOptions,
+  Subly402ProviderConfig,
+  Subly402Request,
   SettlementStatusResponse,
 } from "./types";
 import { postFacilitatorJson } from "./facilitator";
@@ -59,7 +59,7 @@ function buildResultHash(
   body: unknown
 ): string {
   const hash = createHash("sha256");
-  hash.update("A402-SVM-V1-RESULT\n");
+  hash.update("SUBLY402-SVM-V1-RESULT\n");
   hash.update(verificationId);
   hash.update("\n");
   hash.update(String(statusCode));
@@ -71,16 +71,16 @@ function buildResultHash(
 }
 
 /**
- * Express middleware implementing the a402-svm-v1 payment protocol.
+ * Express middleware implementing the subly402-svm-v1 payment protocol.
  *
  * Flow (§4.2, §8):
  * 1. If no PAYMENT-SIGNATURE header → return 402 with payment details
  * 2. If PAYMENT-SIGNATURE present → verify → execute → settle → PAYMENT-RESPONSE → return
  */
-export function a402Middleware(options: A402MiddlewareOptions) {
+export function subly402Middleware(options: Subly402MiddlewareOptions) {
   const { config, pricing } = options;
 
-  return async (req: A402Request, res: Response, next: NextFunction) => {
+  return async (req: Subly402Request, res: Response, next: NextFunction) => {
     // Check if payment is required
     const price = pricing(req);
     if (price === null) {
@@ -150,7 +150,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
       executionCache.set(verificationId, entry);
 
       // Attach payment context to request
-      req.a402 = {
+      req.subly402 = {
         verificationId,
         paymentId: payload.paymentId,
         amount: payload.amount,
@@ -225,7 +225,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
           message: err?.message || "Payment settlement failed",
         };
         const failurePaymentResponse = encodeJsonHeader({
-          scheme: "a402-svm-v1",
+          scheme: "subly402-svm-v1",
           paymentId: payload.paymentId,
           verificationId,
           settlementId: null,
@@ -253,7 +253,7 @@ export function a402Middleware(options: A402MiddlewareOptions) {
 
       // C1: Build PAYMENT-RESPONSE header (§8.6)
       const paymentResponse = encodeJsonHeader({
-        scheme: "a402-svm-v1",
+        scheme: "subly402-svm-v1",
         paymentId: payload.paymentId,
         verificationId,
         settlementId: settleResult?.settlementId ?? null,
@@ -292,17 +292,17 @@ export function a402Middleware(options: A402MiddlewareOptions) {
 
 /**
  * Express verify callback that preserves the exact request body bytes for
- * A402 request binding. Use with express.json({ verify: captureA402RawBody }).
+ * Subly402 request binding. Use with express.json({ verify: captureSubly402RawBody }).
  */
-export function captureA402RawBody(
+export function captureSubly402RawBody(
   req: Request,
   _res: Response,
   buf: Buffer
 ): void {
-  (req as A402Request).rawBody = Buffer.from(buf);
+  (req as Subly402Request).rawBody = Buffer.from(buf);
 }
 
-function getRawRequestBody(req: A402Request): Buffer | string {
+function getRawRequestBody(req: Subly402Request): Buffer | string {
   if (req.rawBody !== undefined) {
     return req.rawBody;
   }
@@ -321,7 +321,7 @@ function buildRequestContext(req: Request): {
   pathAndQuery: string;
   bodySha256: string;
 } {
-  const body = getRawRequestBody(req as A402Request);
+  const body = getRawRequestBody(req as Subly402Request);
 
   return {
     method: req.method.toUpperCase(),
@@ -332,7 +332,7 @@ function buildRequestContext(req: Request): {
 }
 
 function buildPaymentDetailsId(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   amount: string,
   requestContext: {
     method: string;
@@ -342,7 +342,7 @@ function buildPaymentDetailsId(
   }
 ): string {
   const hash = createHash("sha256")
-    .update("A402-SVM-V1-PAYDET\n")
+    .update("SUBLY402-SVM-V1-PAYDET\n")
     .update(config.providerId)
     .update("\n")
     .update(config.payTo)
@@ -370,7 +370,7 @@ function buildPaymentDetailsId(
 
 /** Build payment details object (§5) */
 function buildPaymentDetails(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   amount: string,
   requestContext: {
     method: string;
@@ -380,7 +380,7 @@ function buildPaymentDetails(
   }
 ): Record<string, unknown> {
   return {
-    scheme: "a402-svm-v1",
+    scheme: "subly402-svm-v1",
     network: config.network,
     amount,
     asset: {
@@ -407,7 +407,7 @@ function buildPaymentDetails(
 /** Send 402 Payment Required response */
 function send402(
   res: Response,
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   amount: string,
   requestContext: {
     method: string;
@@ -431,13 +431,13 @@ function send402(
 async function callFacilitator(
   url: string,
   body: any,
-  config: A402ProviderConfig
+  config: Subly402ProviderConfig
 ): Promise<any> {
   return postFacilitatorJson(url, body, config);
 }
 
 export async function lookupSettlementStatus(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   settlementId: string
 ): Promise<SettlementStatusResponse> {
   return callFacilitator(
@@ -449,7 +449,7 @@ export async function lookupSettlementStatus(
 
 /** Settle payment with facilitator and return settle result (C2: synchronous) */
 async function settlePayment(
-  config: A402ProviderConfig,
+  config: Subly402ProviderConfig,
   verificationId: string,
   statusCode: number,
   responseBody: unknown
