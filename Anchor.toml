@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-subly402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
+subly402_vault = "3iusaL6ys79DsbpweDwGhHvtjdnhAhtpyczPtMbu5Mbe"
 
 [programs.devnet]
-subly402_vault = "DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR"
+subly402_vault = "3iusaL6ys79DsbpweDwGhHvtjdnhAhtpyczPtMbu5Mbe"
 
 [registry]
 url = "https://api.apr.dev"

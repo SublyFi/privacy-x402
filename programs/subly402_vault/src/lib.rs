@@ -10,7 +10,7 @@ pub mod state;
 
 use instructions::*;
 
-declare_id!("DeEyzGPw8yPL1UgCC6JuPfeDWU4E1QHh9j3ZmdfCc4RR");
+declare_id!("3iusaL6ys79DsbpweDwGhHvtjdnhAhtpyczPtMbu5Mbe");
 
 #[program]
 pub mod subly402_vault {
