@@ -31,6 +31,9 @@ pub enum EnclaveError {
     #[error("paymentDetails is required")]
     PaymentDetailsRequired,
 
+    #[error("paymentDetails is invalid")]
+    InvalidPaymentDetails,
+
     #[error("paymentDetails.verifyWindowSec is required")]
     VerifyWindowSecRequired,
 
@@ -165,6 +168,9 @@ impl IntoResponse for EnclaveError {
             EnclaveError::InvalidScheme => (StatusCode::BAD_REQUEST, "invalid_scheme"),
             EnclaveError::PaymentDetailsRequired => {
                 (StatusCode::BAD_REQUEST, "payment_details_required")
+            }
+            EnclaveError::InvalidPaymentDetails => {
+                (StatusCode::BAD_REQUEST, "invalid_payment_details")
             }
             EnclaveError::VerifyWindowSecRequired => {
                 (StatusCode::BAD_REQUEST, "verify_window_sec_required")

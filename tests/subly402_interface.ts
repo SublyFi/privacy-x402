@@ -1,6 +1,10 @@
 import { createServer, Server } from "http";
 
-import { generateKeyPairSigner } from "@solana/kit";
+import { address as solanaAddress, generateKeyPairSigner } from "@solana/kit";
+import {
+  findAssociatedTokenPda,
+  TOKEN_PROGRAM_ADDRESS,
+} from "@solana-program/token";
 import { expect } from "chai";
 import express from "express";
 
@@ -22,6 +26,15 @@ import type {
 
 function decodeJsonHeader<T>(value: string): T {
   return JSON.parse(Buffer.from(value, "base64").toString("utf8")) as T;
+}
+
+async function deriveAta(owner: string, mint: string): Promise<string> {
+  const [ata] = await findAssociatedTokenPda({
+    owner: solanaAddress(owner),
+    tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    mint: solanaAddress(mint),
+  });
+  return ata;
 }
 
 function buildLocalAttestation(args: {
@@ -88,13 +101,16 @@ describe("subly402 x402-compatible interface", () => {
   });
 
   it("lets sellers declare x402-like exact routes without exposing subly402 config", async () => {
+    const sellerWallet = (await generateKeyPairSigner()).address;
+    const assetMint = (await generateKeyPairSigner()).address;
+    const payTo = await deriveAta(sellerWallet, assetMint);
     const facilitator = new Subly402FacilitatorClient({
       url: "http://facilitator.example",
       providerApiKey: "provider-secret",
       vaultConfig: "vault-config",
       vaultSigner: "vault-signer",
       attestationPolicyHash: "ab".repeat(32),
-      assetMint: "usdc-mint",
+      assetMint,
       assetDecimals: 6,
       assetSymbol: "USDC",
     });
@@ -115,7 +131,7 @@ describe("subly402 x402-compatible interface", () => {
                 price: "$0.001",
                 network: "solana:devnet",
                 providerId: "weather-provider",
-                payTo: "provider-token-account",
+                sellerWallet,
               },
             ],
           },
@@ -141,7 +157,7 @@ describe("subly402 x402-compatible interface", () => {
     expect(details.scheme).to.equal("subly402-svm-v1");
     expect(details.amount).to.equal("1000");
     expect(details.providerId).to.equal("weather-provider");
-    expect(details.payTo).to.equal("provider-token-account");
+    expect(details.payTo).to.equal(payTo);
     expect(details.facilitatorUrl).to.equal("http://facilitator.example");
     expect(details.vault.config).to.equal("vault-config");
   });
@@ -401,6 +417,128 @@ describe("subly402 x402-compatible interface", () => {
       const attestation = await facilitator.getAttestation();
       expect(attestation.vaultConfig).to.equal("vault-config");
       expect(callCount).to.equal(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("runs on-demand deposit after an insufficient-balance paid retry", async () => {
+    const signer = await generateKeyPairSigner();
+    const attestation = buildLocalAttestation({
+      vaultConfig: "vault-config",
+      vaultSigner: "vault-signer",
+      attestationPolicyHash: "cd".repeat(32),
+    });
+    const details: PaymentDetails = {
+      scheme: "subly402-svm-v1",
+      network: "solana:devnet",
+      amount: "1000",
+      asset: {
+        kind: "spl-token",
+        mint: "usdc-mint",
+        decimals: 6,
+        symbol: "USDC",
+      },
+      payTo: "provider-token-account",
+      providerId: "weather-provider",
+      facilitatorUrl: "http://facilitator.example",
+      vault: {
+        config: attestation.vaultConfig,
+        signer: attestation.vaultSigner,
+        attestationPolicyHash: attestation.attestationPolicyHash,
+      },
+      paymentDetailsId: "paydet_weather",
+      verifyWindowSec: 60,
+      maxSettlementDelaySec: 900,
+      privacyMode: "vault-batched-v1",
+    };
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = input.toString();
+      if (url === "http://facilitator.example/v1/attestation") {
+        return new Response(JSON.stringify(attestation), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected global fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      let providerRequests = 0;
+      let depositCalls = 0;
+      const observedPaymentIds: string[] = [];
+      const providerFetch = async (
+        _input: string | URL,
+        init?: RequestInit
+      ): Promise<Response> => {
+        providerRequests += 1;
+        if (providerRequests === 1) {
+          return new Response(JSON.stringify({ accepts: [details] }), {
+            status: 402,
+            headers: {
+              "content-type": "application/json",
+              "PAYMENT-REQUIRED": Buffer.from(
+                JSON.stringify({ accepts: [details] }),
+                "utf8"
+              ).toString("base64"),
+            },
+          });
+        }
+
+        const signature = new Headers(init?.headers).get("PAYMENT-SIGNATURE");
+        expect(signature).to.be.a("string").and.not.equal("");
+        observedPaymentIds.push(
+          decodeJsonHeader<PaymentPayload>(signature!).paymentId
+        );
+
+        if (providerRequests === 2) {
+          return new Response(
+            JSON.stringify({
+              accepts: [details],
+              error: "payment_verification_failed",
+              facilitatorError: "insufficient_balance",
+              message: "Insufficient client balance",
+            }),
+            {
+              status: 402,
+              headers: { "content-type": "application/json" },
+            }
+          );
+        }
+
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      };
+
+      const client = new Subly402Client({
+        trustedFacilitators: ["http://facilitator.example"],
+        policy: { maxPaymentPerRequest: "$0.01" },
+        autoDeposit: {
+          maxDepositPerRequest: "$0.01",
+          deposit: async ({ amount, amountAtomic, details }) => {
+            depositCalls += 1;
+            expect(amount).to.equal("1000");
+            expect(amountAtomic).to.equal(1000n);
+            expect(details.providerId).to.equal("weather-provider");
+          },
+        },
+      }).register("solana:*", new BuyerSubly402ExactScheme(signer));
+
+      const response = await client.fetch(
+        "https://seller.example/weather",
+        { method: "GET" },
+        providerFetch
+      );
+
+      expect(response.status).to.equal(200);
+      expect(providerRequests).to.equal(3);
+      expect(depositCalls).to.equal(1);
+      expect(observedPaymentIds).to.have.length(2);
+      expect(observedPaymentIds[0]).to.not.equal(observedPaymentIds[1]);
     } finally {
       globalThis.fetch = originalFetch;
     }

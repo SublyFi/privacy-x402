@@ -29,6 +29,9 @@ export interface PaymentDetails {
 /** 402 Payment Required response body */
 export interface PaymentRequiredResponse {
   accepts: PaymentDetails[];
+  error?: string;
+  facilitatorError?: string;
+  message?: string;
 }
 
 /** Payment signature payload sent by client */
@@ -283,6 +286,28 @@ export interface Subly402Signer {
   signMessages?: MessagePartialSigner["signMessages"];
 }
 
+export interface Subly402AutoDepositContext {
+  /** Amount requested by the selected payment details, in atomic token units. */
+  amount: string;
+  amountAtomic: bigint;
+  details: PaymentDetails;
+  facilitatorUrl: string;
+  reason: string;
+  attempt: number;
+}
+
+export interface Subly402AutoDepositConfig {
+  mode?: "on-demand";
+  /** Budget guard for the on-demand deposit itself. */
+  maxDepositPerRequest?: string | number;
+  /**
+   * Performs the deposit/top-up and waits until the facilitator can observe it.
+   * Browser, Node, and agent runtimes can provide wallet-adapter, Anchor, or
+   * custody-specific implementations here.
+   */
+  deposit: (context: Subly402AutoDepositContext) => Promise<void> | void;
+}
+
 /** x402-compatible wrapper client configuration */
 export interface Subly402ClientConfig {
   /**
@@ -301,4 +326,13 @@ export interface Subly402ClientConfig {
   attestationVerifier?: (
     attestation: AttestationResponse
   ) => Promise<void> | void;
+  /**
+   * Optional x402-like on-demand deposit. When a signed retry fails because the
+   * vault balance is insufficient, the SDK calls this hook, then signs and
+   * retries the request once more.
+   */
+  autoDeposit?:
+    | false
+    | Subly402AutoDepositConfig
+    | Subly402AutoDepositConfig["deposit"];
 }

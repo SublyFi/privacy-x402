@@ -8,7 +8,9 @@ Express middleware that serves paid APIs through the Subly privacy-first x402 fa
 yarn add subly402-express
 ```
 
-## Quickstart
+## Quickstart for Sellers
+
+No provider registration or API key is required for the default seller flow. The facilitator derives the seller identity from `network + asset mint + payTo` and auto-registers that open seller the first time a valid paid request is verified. For Solana, sellers can provide a wallet owner and the middleware derives the USDC associated token account.
 
 ```ts
 import express from "express";
@@ -17,21 +19,19 @@ import {
   Subly402ResourceServer,
   Subly402ExactScheme,
   paymentMiddleware,
-  captureA402RawBody,
+  captureSubly402RawBody,
 } from "subly402-express";
 
 const app = express();
-app.use(express.json({ verify: captureA402RawBody }));
+app.use(express.json({ verify: captureSubly402RawBody }));
 
 const facilitator = new Subly402FacilitatorClient({
   url: "https://enclave.example.com",
-  providerApiKey: process.env.SUBLY_PROVIDER_API_KEY,
-  authMode: "bearer",
-  assetMint: "<USDC mint>",
+  assetMint: process.env.USDC_MINT!,
 });
 
 const resourceServer = new Subly402ResourceServer(facilitator).register(
-  "solana:devnet",
+  "solana:*",
   new Subly402ExactScheme()
 );
 
@@ -44,10 +44,11 @@ app.use(
             scheme: "exact",
             price: "$0.001",
             network: "solana:devnet",
-            payTo: "<provider settlement token account>",
-            providerId: "prov_demo",
+            sellerWallet: process.env.SELLER_WALLET!,
           },
         ],
+        description: "Weather data",
+        mimeType: "application/json",
       },
     },
     resourceServer
@@ -60,6 +61,12 @@ app.get("/weather", (_req, res) => {
 
 app.listen(3000);
 ```
+
+That is the full seller integration: install the package, point it at a deployed Subly facilitator, choose a route, price, network, and receiving wallet.
+
+Advanced sellers can still pass `payTo` directly when they want to settle to a specific token account instead of the wallet's associated token account.
+
+If a seller needs a pinned `providerId`, mTLS, API-key-authenticated provider operations, or ASC provider participant attestation, use the explicit registration flow and pass `providerApiKey` / `authMode` as before.
 
 ## Behaviour
 

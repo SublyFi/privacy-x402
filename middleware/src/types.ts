@@ -7,7 +7,7 @@ export interface Subly402ProviderConfig {
   /** Provider's registered ID */
   providerId: string;
   /** Provider auth mode used against the facilitator */
-  authMode?: "bearer" | "api-key" | "mtls";
+  authMode?: "none" | "bearer" | "api-key" | "mtls";
   /** Provider API key for facilitator auth */
   apiKey?: string;
   /** Optional mTLS client certificate configuration */
@@ -113,10 +113,12 @@ export interface Subly402RouteAccept {
   price: string | number;
   /** CAIP-2 network identifier. */
   network: string;
-  /** Provider identifier registered with the Subly402 facilitator. */
-  providerId: string;
-  /** Provider settlement token account. */
-  payTo: string;
+  /** Optional provider identifier. If omitted, Subly402 derives one from network, asset mint, and payTo. */
+  providerId?: string;
+  /** Seller wallet owner. If payTo is omitted, Subly402 derives the seller's associated token account. */
+  sellerWallet?: string;
+  /** Provider settlement token account. Advanced override; normally derive this from sellerWallet. */
+  payTo?: string;
   /** Optional per-route asset override. Defaults to the facilitator client's asset config. */
   asset?: {
     kind?: "spl-token";

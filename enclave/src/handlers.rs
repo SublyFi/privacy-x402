@@ -42,6 +42,7 @@ const PROVIDER_ID_HEADER: &str = "x-subly402-provider-id";
 const PROVIDER_AUTH_HEADER: &str = "x-subly402-provider-auth";
 const CLIENT_AUTH_MAX_WINDOW_SEC: i64 = 300;
 const CLIENT_AUTH_MAX_CLOCK_SKEW_SEC: i64 = 60;
+const OPEN_PROVIDER_ID_PREFIX: &str = "payto_";
 
 pub struct AppState {
     pub vault: Arc<VaultState>,
@@ -150,6 +151,57 @@ pub struct VerifyRequest {
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn derive_open_provider_id(network: &str, asset_mint: &str, pay_to: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"SUBLY402-OPEN-PROVIDER-V1\n");
+    hasher.update(network.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(asset_mint.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(pay_to.as_bytes());
+    hasher.update(b"\n");
+    let digest = hex::encode(hasher.finalize());
+    format!("{}{}", OPEN_PROVIDER_ID_PREFIX, &digest[..32])
+}
+
+fn payment_details_str<'a>(
+    payment_details: &'a serde_json::Value,
+    path: &[&str],
+) -> Result<&'a str, EnclaveError> {
+    let mut current = payment_details;
+    for key in path {
+        current = current
+            .get(*key)
+            .ok_or(EnclaveError::InvalidPaymentDetails)?;
+    }
+    current.as_str().ok_or(EnclaveError::InvalidPaymentDetails)
+}
+
+fn validate_payment_details_match_payload(
+    payment_details: &serde_json::Value,
+    payload: &PaymentPayload,
+) -> Result<(), EnclaveError> {
+    if payment_details_str(payment_details, &["providerId"])? != payload.provider_id {
+        return Err(EnclaveError::ProviderIdMismatch);
+    }
+    if payment_details_str(payment_details, &["payTo"])? != payload.pay_to {
+        return Err(EnclaveError::PayToMismatch);
+    }
+    if payment_details_str(payment_details, &["network"])? != payload.network {
+        return Err(EnclaveError::NetworkMismatch);
+    }
+    if payment_details_str(payment_details, &["asset", "mint"])? != payload.asset_mint {
+        return Err(EnclaveError::AssetMintMismatch);
+    }
+    if payment_details_str(payment_details, &["amount"])? != payload.amount {
+        return Err(EnclaveError::InvalidPaymentDetails);
+    }
+    if payment_details_str(payment_details, &["vault", "config"])? != payload.vault {
+        return Err(EnclaveError::VaultNotActive);
+    }
+    Ok(())
 }
 
 async fn load_vault_lifecycle(state: &Arc<AppState>) -> Result<VaultLifecycle, EnclaveError> {
@@ -311,6 +363,14 @@ fn authenticate_registered_provider(
             }
             Ok(())
         }
+        "none" => {
+            if let Some(provider_id) = header_value(headers, PROVIDER_ID_HEADER) {
+                if provider_id != provider.provider_id {
+                    return Err(EnclaveError::ProviderIdMismatch);
+                }
+            }
+            Ok(())
+        }
         _ => Err(EnclaveError::UnsupportedProviderAuthMode),
     }
 }
@@ -327,6 +387,72 @@ fn authenticate_provider(
         .ok_or(EnclaveError::ProviderNotFound)?;
     authenticate_registered_provider(provider.value(), headers)?;
     Ok(expected_provider_id.to_string())
+}
+
+async fn ensure_open_provider_registered(
+    state: &Arc<AppState>,
+    payload: &PaymentPayload,
+) -> Result<(), EnclaveError> {
+    if state.vault.providers.contains_key(&payload.provider_id) {
+        return Ok(());
+    }
+
+    let derived_provider_id =
+        derive_open_provider_id(&payload.network, &payload.asset_mint, &payload.pay_to);
+    if payload.provider_id != derived_provider_id {
+        return Ok(());
+    }
+
+    let settlement_token_account =
+        Pubkey::from_str(&payload.pay_to).map_err(|_| EnclaveError::InvalidPaymentDetails)?;
+    let asset_mint =
+        Pubkey::from_str(&payload.asset_mint).map_err(|_| EnclaveError::InvalidPaymentDetails)?;
+    let registration = crate::state::ProviderRegistration {
+        provider_id: payload.provider_id.clone(),
+        display_name: "Open x402 seller".to_string(),
+        participant_pubkey: None,
+        participant_attestation_policy_hash: None,
+        participant_attestation_verified_at_ms: None,
+        participant_attestation_mode: None,
+        settlement_token_account,
+        network: payload.network.clone(),
+        asset_mint,
+        allowed_origins: Vec::new(),
+        auth_mode: "none".to_string(),
+        api_key_hash: None,
+        mtls_cert_fingerprint: None,
+    };
+
+    let _persist_guard = state.persistence_lock.lock().await;
+    if state.vault.providers.contains_key(&payload.provider_id) {
+        return Ok(());
+    }
+    state
+        .wal
+        .append(WalEntry::ProviderRegistered {
+            provider_id: payload.provider_id.clone(),
+            display_name: registration.display_name.clone(),
+            participant_pubkey: None,
+            participant_attestation_policy_hash: None,
+            participant_attestation_verified_at_ms: None,
+            participant_attestation_mode: None,
+            settlement_token_account: payload.pay_to.clone(),
+            network: payload.network.clone(),
+            asset_mint: payload.asset_mint.clone(),
+            allowed_origins: Vec::new(),
+            auth_mode: "none".to_string(),
+            api_key_hash: None,
+            mtls_cert_fingerprint: None,
+        })
+        .await
+        .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+
+    state
+        .vault
+        .providers
+        .insert(payload.provider_id.clone(), registration);
+    info!(provider_id = %payload.provider_id, "Open provider auto-registered");
+    Ok(())
 }
 
 /// Compute canonical JSON hash of payment details (§6, paymentDetailsHash).
@@ -467,6 +593,52 @@ pub async fn post_verify(
         return Err(EnclaveError::InvalidScheme);
     }
 
+    // C7: Validate paymentDetailsHash via canonical JSON (§8.2 requirement 3).
+    // Registrationless providers rely on these signed details, so this runs
+    // before provider lookup can auto-create an open seller entry.
+    let computed_hash = compute_payment_details_hash(payment_details);
+    let provided_hash = hex::decode(&payload.payment_details_hash)
+        .map_err(|_| EnclaveError::PaymentDetailsHashMismatch)?;
+    if computed_hash != provided_hash {
+        return Err(EnclaveError::PaymentDetailsHashMismatch);
+    }
+    validate_payment_details_match_payload(payment_details, payload)?;
+
+    // 3. Validate vault address
+    if payload.vault != state.vault.vault_config.to_string() {
+        return Err(EnclaveError::VaultNotActive);
+    }
+
+    // 4. Validate expiration
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&payload.expires_at)
+        .map_err(|_| EnclaveError::PaymentExpired)?;
+    if expires_at < Utc::now() {
+        return Err(EnclaveError::PaymentExpired);
+    }
+
+    // 5. Verify client signature
+    let client_pubkey =
+        Pubkey::from_str(&payload.client).map_err(|_| EnclaveError::InvalidClientSignature)?;
+
+    verify_client_signature(payload)?;
+
+    // 6. Verify request hash
+    let computed_request_hash =
+        compute_request_hash(&req.request_context, &payload.payment_details_hash);
+    let provided_request_hash =
+        hex::decode(&payload.request_hash).map_err(|_| EnclaveError::RequestHashMismatch)?;
+    if computed_request_hash != provided_request_hash.as_slice() {
+        return Err(EnclaveError::RequestHashMismatch);
+    }
+
+    let amount: u64 = payload
+        .amount
+        .parse()
+        .map_err(|_| EnclaveError::Internal("Invalid amount".into()))?;
+    let verify_window_sec = parse_verify_window_sec(payment_details)?;
+
+    ensure_open_provider_registered(&state, payload).await?;
+
     // C5: Authenticate provider from provider registration + headers (§8.2 requirement 1)
     let authenticated_provider_id = authenticate_provider(&state, &headers, &payload.provider_id)?;
 
@@ -501,49 +673,8 @@ pub async fn post_verify(
         return Err(EnclaveError::OriginNotAllowed);
     }
 
-    // C7: Validate paymentDetailsHash via canonical JSON (§8.2 requirement 3)
-    let computed_hash = compute_payment_details_hash(payment_details);
-    let provided_hash = hex::decode(&payload.payment_details_hash)
-        .map_err(|_| EnclaveError::PaymentDetailsHashMismatch)?;
-    if computed_hash != provided_hash {
-        return Err(EnclaveError::PaymentDetailsHashMismatch);
-    }
-
     // Drop the provider reference before further borrows
     drop(provider);
-
-    // 3. Validate vault address
-    if payload.vault != state.vault.vault_config.to_string() {
-        return Err(EnclaveError::VaultNotActive);
-    }
-
-    // 4. Validate expiration
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&payload.expires_at)
-        .map_err(|_| EnclaveError::PaymentExpired)?;
-    if expires_at < Utc::now() {
-        return Err(EnclaveError::PaymentExpired);
-    }
-
-    // 5. Verify client signature
-    let client_pubkey =
-        Pubkey::from_str(&payload.client).map_err(|_| EnclaveError::InvalidClientSignature)?;
-
-    verify_client_signature(payload)?;
-
-    // 6. Verify request hash
-    let computed_request_hash =
-        compute_request_hash(&req.request_context, &payload.payment_details_hash);
-    let provided_request_hash =
-        hex::decode(&payload.request_hash).map_err(|_| EnclaveError::RequestHashMismatch)?;
-    if computed_request_hash != provided_request_hash.as_slice() {
-        return Err(EnclaveError::RequestHashMismatch);
-    }
-
-    let amount: u64 = payload
-        .amount
-        .parse()
-        .map_err(|_| EnclaveError::Internal("Invalid amount".into()))?;
-    let verify_window_sec = parse_verify_window_sec(payment_details)?;
 
     // 7. Idempotency: check if payment_id already used
     if let Some(existing_ver_id) = state.vault.payment_id_index.get(&payload.payment_id) {
@@ -1587,6 +1718,12 @@ pub async fn post_register_provider(
                 return Err(EnclaveError::InvalidProviderAuthConfig);
             }
             (None, Some(fingerprint))
+        }
+        "none" => {
+            if participant_pubkey.is_some() {
+                return Err(EnclaveError::InvalidProviderAuthConfig);
+            }
+            (None, None)
         }
         _ => return Err(EnclaveError::UnsupportedProviderAuthMode),
     };
@@ -3167,6 +3304,129 @@ mod tests {
                 .unwrap()
                 .timestamp();
         assert_eq!(response_expires_at, reservation.expires_at);
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn verify_and_settle_auto_register_open_provider_without_auth_headers() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let settlement_token_account = Pubkey::new_unique();
+        let asset_mint = Pubkey::new_unique();
+        let provider_id = derive_open_provider_id(
+            "solana:localnet",
+            &asset_mint.to_string(),
+            &settlement_token_account.to_string(),
+        );
+
+        let _ = post_seed_balance(
+            State(state.clone()),
+            Json(SeedBalanceRequest {
+                client: client.to_string(),
+                free: 2_000_000,
+                locked: Some(0),
+                max_lock_expires_at: Some(0),
+                total_deposited: Some(2_000_000),
+                total_withdrawn: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+
+        state
+            .deposit_detector
+            .is_synced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let request_context = RequestContext {
+            method: "GET".to_string(),
+            origin: "http://localhost".to_string(),
+            path_and_query: "/open".to_string(),
+            body_sha256: "00".repeat(32),
+        };
+        let payment_details = serde_json::json!({
+            "scheme": "subly402-svm-v1",
+            "network": "solana:localnet",
+            "amount": "600000",
+            "asset": {
+                "kind": "spl-token",
+                "mint": asset_mint.to_string(),
+                "decimals": 6,
+                "symbol": "USDC",
+            },
+            "payTo": settlement_token_account.to_string(),
+            "providerId": provider_id,
+            "facilitatorUrl": "https://localhost:3100/v1",
+            "vault": {
+                "config": state.vault.vault_config.to_string(),
+                "signer": state.vault.vault_signer_pubkey.to_string(),
+                "attestationPolicyHash": hex::encode(state.vault.attestation_policy_hash),
+            },
+            "paymentDetailsId": "paydet_open_provider",
+            "verifyWindowSec": 60,
+            "maxSettlementDelaySec": 900,
+            "privacyMode": "vault-batched-v1",
+        });
+        let payment_details_hash = hex::encode(compute_payment_details_hash(&payment_details));
+        let request_hash = hex::encode(compute_request_hash(
+            &request_context,
+            &payment_details_hash,
+        ));
+
+        let mut payment_payload = PaymentPayload {
+            version: 1,
+            scheme: "subly402-svm-v1".to_string(),
+            payment_id: "pay_open_provider".to_string(),
+            client: client.to_string(),
+            vault: state.vault.vault_config.to_string(),
+            provider_id: provider_id.clone(),
+            pay_to: settlement_token_account.to_string(),
+            network: "solana:localnet".to_string(),
+            asset_mint: asset_mint.to_string(),
+            amount: "600000".to_string(),
+            request_hash,
+            payment_details_hash,
+            expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            nonce: "1".to_string(),
+            client_sig: String::new(),
+        };
+        payment_payload.client_sig = sign_payment_payload(&client_signing_key, &payment_payload);
+
+        let verify_response = post_verify(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(VerifyRequest {
+                payment_payload,
+                payment_details: Some(payment_details),
+                request_context,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let provider = state.vault.providers.get(&provider_id).unwrap();
+        assert_eq!(provider.auth_mode, "none");
+        assert_eq!(provider.settlement_token_account, settlement_token_account);
+        drop(provider);
+
+        let settle_response = post_settle(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SettleRequest {
+                verification_id: verify_response.0.verification_id,
+                result_hash: "55".repeat(32),
+                status_code: 200,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(settle_response.0.ok);
+        let credit = state.vault.provider_credits.get(&provider_id).unwrap();
+        assert_eq!(credit.settlement_token_account, settlement_token_account);
+        assert_eq!(credit.credited_amount, 600_000);
 
         let _ = tokio::fs::remove_file(wal_path).await;
     }

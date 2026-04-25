@@ -39,6 +39,64 @@ parent EC2
 - `parent`: parent instance 上の relay / KMS proxy / snapshot store
 - `watchtower`: stale receipt challenge 用常駐プロセス
 
+## x402 互換の導入イメージ
+
+facilitator をデプロイした後の Buyer / Seller 導入は、通常の x402 quickstart と同じく API key 発行や provider 登録なしで始められます。
+
+Seller は保護したい route、価格、network、受取 wallet だけを渡します。Solana では middleware が USDC ATA を `payTo` として自動導出します。`providerId` は `network + assetMint + payTo` から自動導出され、最初の有効な支払い検証時に enclave が open seller として自動登録します。
+
+```ts
+const facilitator = new Subly402FacilitatorClient({
+  url: "https://<your-subly-facilitator>",
+  assetMint: process.env.USDC_MINT!,
+});
+
+const resourceServer = new Subly402ResourceServer(facilitator).register(
+  "solana:*",
+  new Subly402ExactScheme()
+);
+
+app.use(
+  paymentMiddleware(
+    {
+      "GET /weather": {
+        accepts: [
+          {
+            scheme: "exact",
+            price: "$0.001",
+            network: "solana:devnet",
+            sellerWallet: process.env.SELLER_WALLET!,
+          },
+        ],
+      },
+    },
+    resourceServer
+  )
+);
+```
+
+Buyer も Subly の API key やアカウント登録は不要です。funded signer と、信頼する facilitator の Nitro attestation policy を渡して `fetch` を wrap します。
+
+```ts
+const client = new Subly402Client({
+  signer,
+  network: "solana:devnet",
+  trustedFacilitators: ["https://<your-subly-facilitator>"],
+  autoDeposit: {
+    maxDepositPerRequest: "$0.05",
+    deposit: async ({ amount, details }) => {
+      await depositIntoSublyVault({ amount, mint: details.asset.mint });
+    },
+  },
+  nitroAttestation: { policy },
+});
+
+const fetchWithPayment = wrapFetchWithPayment(fetch, client);
+const res = await fetchWithPayment("https://api.example.com/weather");
+```
+
+残高が足りない場合は、Buyer SDK の `autoDeposit` hook で必要額を on-demand deposit してから再署名/retry できます。これにより x402 と同じ「402 を受けて支払って retry」体験を維持しつつ、Seller への支払いは vault batching で相関を隠します。
+
 ## 最短ルート
 
 最短で公開 Devnet まで持っていく流れは次です。

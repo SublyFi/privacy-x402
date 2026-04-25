@@ -1,4 +1,10 @@
 import type { Request, Response, NextFunction } from "express";
+import { createHash } from "crypto";
+import { address as solanaAddress } from "@solana/kit";
+import {
+  findAssociatedTokenPda,
+  TOKEN_PROGRAM_ADDRESS,
+} from "@solana-program/token";
 import { subly402Middleware } from "./middleware";
 import type {
   Subly402ProviderConfig,
@@ -20,6 +26,58 @@ const DEFAULT_ASSET_SYMBOL = "USDC";
 
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/$/, "");
+}
+
+function networkMatches(pattern: string, network: string): boolean {
+  if (pattern === "*" || pattern === network) {
+    return true;
+  }
+  if (pattern.endsWith(":*")) {
+    return network.startsWith(pattern.slice(0, -1));
+  }
+  return false;
+}
+
+function deriveProviderId(
+  network: string,
+  assetMint: string,
+  payTo: string
+): string {
+  const hash = createHash("sha256")
+    .update("SUBLY402-OPEN-PROVIDER-V1\n")
+    .update(network)
+    .update("\n")
+    .update(assetMint)
+    .update("\n")
+    .update(payTo)
+    .update("\n")
+    .digest("hex");
+  return `payto_${hash.slice(0, 32)}`;
+}
+
+async function deriveAssociatedTokenAccount(
+  owner: string,
+  mint: string
+): Promise<string> {
+  const [ata] = await findAssociatedTokenPda({
+    owner: solanaAddress(owner),
+    tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    mint: solanaAddress(mint),
+  });
+  return ata;
+}
+
+async function resolvePayTo(
+  accept: Subly402RouteAccept,
+  assetMint: string
+): Promise<string> {
+  if (accept.payTo) {
+    return accept.payTo;
+  }
+  if (accept.sellerWallet) {
+    return await deriveAssociatedTokenAccount(accept.sellerWallet, assetMint);
+  }
+  throw new Error("Subly402 route requires sellerWallet or payTo");
 }
 
 function requestPath(req: Request): string {
@@ -194,7 +252,11 @@ export class Subly402ResourceServer {
   async buildProviderConfig(
     accept: Subly402RouteAccept
   ): Promise<Subly402ProviderConfig> {
-    if (!this.networks.has(accept.network)) {
+    if (
+      ![...this.networks].some((network) =>
+        networkMatches(network, accept.network)
+      )
+    ) {
       throw new Error(`Subly402 network is not registered: ${accept.network}`);
     }
 
@@ -206,14 +268,17 @@ export class Subly402ResourceServer {
     if (!assetMint) {
       throw new Error("Subly402 asset mint is required");
     }
+    const payTo = await resolvePayTo(accept, assetMint);
+    const providerId =
+      accept.providerId ?? deriveProviderId(accept.network, assetMint, payTo);
 
     return {
       facilitatorUrl: this.facilitatorClient.url,
-      providerId: accept.providerId,
+      providerId,
       authMode: this.facilitatorClient.authMode,
       apiKey: this.facilitatorClient.providerApiKey,
       mtls: this.facilitatorClient.mtls,
-      payTo: accept.payTo,
+      payTo,
       network: accept.network,
       assetMint,
       assetDecimals:

@@ -43,6 +43,8 @@ export type {
   NitroAttestationDocument,
   NitroAttestationPolicy,
   SettleResponse,
+  Subly402AutoDepositConfig,
+  Subly402AutoDepositContext,
   Subly402ClientConfig,
   Subly402Signer,
   VerifyResponse,

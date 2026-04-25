@@ -15,11 +15,17 @@ import type {
   PaymentDetails,
   PaymentPayload,
   PaymentRequiredResponse,
+  Subly402AutoDepositConfig,
   Subly402ClientConfig,
   Subly402Signer,
 } from "./types";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+type NormalizedAutoDepositConfig = Required<
+  Pick<Subly402AutoDepositConfig, "deposit">
+> &
+  Omit<Subly402AutoDepositConfig, "deposit">;
 
 type LocalDevAttestationDocument = {
   version: number;
@@ -157,6 +163,35 @@ function parseAmountToAtomic(
   );
 }
 
+function normalizeAutoDeposit(
+  autoDeposit: Subly402ClientConfig["autoDeposit"]
+): NormalizedAutoDepositConfig | undefined {
+  if (!autoDeposit) {
+    return undefined;
+  }
+  if (typeof autoDeposit === "function") {
+    return { mode: "on-demand", deposit: autoDeposit };
+  }
+  return {
+    mode: autoDeposit.mode ?? "on-demand",
+    maxDepositPerRequest: autoDeposit.maxDepositPerRequest,
+    deposit: autoDeposit.deposit,
+  };
+}
+
+function insufficientBalanceReason(
+  body: PaymentRequiredResponse
+): string | null {
+  const code = body.facilitatorError ?? body.error;
+  if (code === "insufficient_balance") {
+    return code;
+  }
+  if (body.message?.toLowerCase().includes("insufficient")) {
+    return body.message;
+  }
+  return null;
+}
+
 function decodeLocalAttestationDocument(
   attestation: AttestationResponse
 ): LocalDevAttestationDocument | null {
@@ -283,6 +318,7 @@ async function verifyAttestedTlsBinding(
 export class Subly402Client {
   private readonly trustedFacilitators: string[];
   private readonly maxPaymentPerRequest?: string | number;
+  private readonly autoDeposit?: NormalizedAutoDepositConfig;
   private readonly nitroAttestation: Subly402ClientConfig["nitroAttestation"];
   private readonly attestationVerifier: Subly402ClientConfig["attestationVerifier"];
   private readonly attestationCache = new Map<string, AttestationResponse>();
@@ -297,6 +333,7 @@ export class Subly402Client {
       normalizeBaseUrl
     );
     this.maxPaymentPerRequest = config.policy?.maxPaymentPerRequest;
+    this.autoDeposit = normalizeAutoDeposit(config.autoDeposit);
     this.nitroAttestation = config.nitroAttestation;
     this.attestationVerifier = config.attestationVerifier;
 
@@ -361,9 +398,42 @@ export class Subly402Client {
       Buffer.from(JSON.stringify(payload)).toString("base64")
     );
 
-    return fetchImpl(url, {
+    const paidResponse = await fetchImpl(url, {
       ...options,
       headers: retryHeaders,
+    });
+    if (paidResponse.status !== 402 || !this.autoDeposit) {
+      return paidResponse;
+    }
+
+    let retryBody: PaymentRequiredResponse;
+    try {
+      retryBody = await readPaymentRequiredResponse(paidResponse.clone());
+    } catch {
+      return paidResponse;
+    }
+    const reason = insufficientBalanceReason(retryBody);
+    if (!reason) {
+      return paidResponse;
+    }
+
+    await this.depositOnDemand(details, reason, 1);
+
+    const secondPayload = await this.buildPaymentPayload(
+      url,
+      options,
+      details,
+      scheme.signer
+    );
+    const secondHeaders = new Headers(options?.headers || {});
+    secondHeaders.set(
+      "PAYMENT-SIGNATURE",
+      Buffer.from(JSON.stringify(secondPayload)).toString("base64")
+    );
+
+    return fetchImpl(url, {
+      ...options,
+      headers: secondHeaders,
     });
   }
 
@@ -392,6 +462,39 @@ export class Subly402Client {
         } > ${maxAmount.toString()}`
       );
     }
+  }
+
+  private async depositOnDemand(
+    details: PaymentDetails,
+    reason: string,
+    attempt: number
+  ): Promise<void> {
+    if (!this.autoDeposit) {
+      return;
+    }
+    const amountAtomic = BigInt(details.amount);
+    if (this.autoDeposit.maxDepositPerRequest !== undefined) {
+      const maxDeposit = parseAmountToAtomic(
+        this.autoDeposit.maxDepositPerRequest,
+        details.asset.decimals
+      );
+      if (amountAtomic > maxDeposit) {
+        throw new Error(
+          `Subly402 autoDeposit exceeds policy: ${
+            details.amount
+          } > ${maxDeposit.toString()}`
+        );
+      }
+    }
+
+    await this.autoDeposit.deposit({
+      amount: details.amount,
+      amountAtomic,
+      details,
+      facilitatorUrl: normalizeBaseUrl(details.facilitatorUrl),
+      reason,
+      attempt,
+    });
   }
 
   private async verifyAttestation(

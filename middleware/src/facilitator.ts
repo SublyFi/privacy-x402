@@ -7,8 +7,17 @@ const pemFileCache = new Map<string, Promise<Buffer>>();
 
 function getAuthMode(
   config: Subly402ProviderConfig
-): "bearer" | "api-key" | "mtls" {
-  return config.authMode ?? "bearer";
+): "none" | "bearer" | "api-key" | "mtls" {
+  if (config.authMode) {
+    return config.authMode;
+  }
+  if (config.mtls) {
+    return "mtls";
+  }
+  if (config.apiKey) {
+    return "bearer";
+  }
+  return "none";
 }
 
 function requireApiKey(config: Subly402ProviderConfig): string {
@@ -22,7 +31,7 @@ function requireApiKey(config: Subly402ProviderConfig): string {
 
 function buildAuthHeaders(
   config: Subly402ProviderConfig,
-  authMode: "bearer" | "api-key" | "mtls"
+  authMode: "none" | "bearer" | "api-key" | "mtls"
 ): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

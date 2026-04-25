@@ -13,10 +13,12 @@ Privacy-first x402 client SDK for Solana. Pays paid APIs through a TEE-based vau
 yarn add subly402-sdk
 ```
 
-## Quickstart
+## Quickstart for Buyers
+
+No Subly API key or account registration is required. A buyer only needs a funded Solana signer and the attestation policy for the facilitator they are willing to trust.
 
 ```ts
-import { Subly402Client } from "subly402-sdk";
+import { Subly402Client, wrapFetchWithPayment } from "subly402-sdk";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 
 const secretKeyBytes = Uint8Array.from(/* your 64-byte keypair */);
@@ -26,6 +28,15 @@ const client = new Subly402Client({
   signer,
   network: "solana:devnet",
   trustedFacilitators: ["https://enclave.example.com"],
+  autoDeposit: {
+    maxDepositPerRequest: "$0.05",
+    deposit: async ({ amount, details }) => {
+      // Send a vault deposit transaction for `amount`, then wait until the
+      // facilitator observes it. Browser wallets, custodial wallets, and agents
+      // can each plug in their own transaction implementation here.
+      await depositIntoSublyVault({ amount, mint: details.asset.mint });
+    },
+  },
   nitroAttestation: {
     policy: {
       version: 1,
@@ -43,15 +54,20 @@ const client = new Subly402Client({
   },
 });
 
-const res = await client.fetch("https://paid-api.example.com/resource");
+const fetchWithPayment = wrapFetchWithPayment(fetch, client);
+
+const res = await fetchWithPayment("https://paid-api.example.com/resource");
 const body = await res.json();
 ```
 
 If the server returns HTTP 402, the client automatically:
 
 1. Downloads and verifies the Nitro attestation (fails closed unless PCR pinning is configured)
-2. Opens / reuses a reservation in the vault
+2. Builds and signs the Subly x402 payment payload for the selected Solana payment option
 3. Retries the request with a signed `PAYMENT-SIGNATURE`
+4. If the vault balance is insufficient and `autoDeposit` is configured, deposits on demand, signs a fresh payment payload, and retries once more
+
+If `autoDeposit` is disabled, the buyer must already have spendable balance in the Subly vault for the facilitator. The vault replaces direct buyer-to-seller settlement with batched settlement, which is the privacy layer.
 
 ## Security defaults
 

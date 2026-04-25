@@ -119,6 +119,7 @@ export function subly402Middleware(options: Subly402MiddlewareOptions) {
       if (!verifyRes.ok) {
         return send402(res, config, price, requestContext, {
           error: "payment_verification_failed",
+          facilitatorError: verifyRes.error,
           message: verifyRes.message || "Payment verification failed",
         });
       }
