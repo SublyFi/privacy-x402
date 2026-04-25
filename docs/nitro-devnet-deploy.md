@@ -2,6 +2,9 @@
 
 この手順は、`Privacy First x402` を AWS Nitro Enclaves 前提で Devnet 公開するための最短導線です。
 
+既存の `api.demo.sublyfi.com` 環境へ修正を反映する通常更新は、[Devnet Redeploy Runbook](./redeploy-devnet.md) を使います。
+Build EC2 で artifact を作り、S3 経由で Parent EC2 に配置する手順を固定しています。
+
 前提:
 
 - Solana program を Devnet に deploy できる

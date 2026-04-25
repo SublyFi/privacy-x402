@@ -99,6 +99,9 @@ const res = await fetchWithPayment("https://api.example.com/weather");
 
 ## 最短ルート
 
+既存の `api.demo.sublyfi.com` 環境へ今回のようなコード修正を反映する通常更新は、毎回同じ手順で [docs/redeploy-devnet.md](./docs/redeploy-devnet.md) を使います。
+Build EC2 で生成した runtime archive を S3 に置き、Parent EC2 がそこから取得して `/opt/subly402` と `/etc/subly402` を更新する流れです。
+
 最短で公開 Devnet まで持っていく流れは次です。
 
 1. AWS で Region / VPC / KMS key を先に決める
@@ -676,6 +679,7 @@ yarn nitro:terminate
 
 ## 10. 参照ドキュメント
 
+- 既存 Devnet の反復デプロイ手順: [docs/redeploy-devnet.md](./docs/redeploy-devnet.md)
 - 詳細な Nitro 手順: [docs/nitro-devnet-deploy.md](./docs/nitro-devnet-deploy.md)
 - Nitro 雛形: [infra/nitro/README.md](./infra/nitro/README.md)
 - ローカル Devnet 手順: [docs/devnet-setup.md](./docs/devnet-setup.md)
