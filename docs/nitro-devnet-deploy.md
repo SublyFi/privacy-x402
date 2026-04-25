@@ -237,10 +237,10 @@ curl -sk https://<nlb-dns>/v1/attestation | jq .
 - `SUBLY402_ENABLE_ADMIN_API=1`
 - `SUBLY402_ADMIN_AUTH_TOKEN=<operator-only-random-token>`
 
-で EIF を作り直し、公開 smoke を通したら両方 `0` に戻して EIF を再buildする。
+で EIF を作り直し、公開 smoke を通したら両方 `0` に戻して EIF を再 build する。
 `prepare` は enclave env へ raw token ではなく `SUBLY402_ADMIN_AUTH_TOKEN_SHA256` を出力する。
-単一providerのdemoで即時batchが必要な時だけ
-`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1` を使う。公開runtimeでは `0` のままにする。
+単一 provider の demo で即時 batch が必要な時だけ
+`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1` を使う。公開 runtime では `0` のままにする。
 
 ## Notes
 

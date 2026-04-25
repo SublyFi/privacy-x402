@@ -315,7 +315,7 @@ parent EC2 には次の考え方で設定します。
 許可:
 
 - `443/tcp` from `0.0.0.0/0`
-- `22/tcp` from 自分の固定IPだけ
+- `22/tcp` from 自分の固定 IP だけ
 
 禁止:
 
@@ -350,7 +350,7 @@ AWS Console での推奨手順:
 4. `Symmetric` を選ぶ
 5. `Encrypt and decrypt` を選ぶ
 6. key alias を決める
-  例: `alias/a402-devnet-runtime`
+   例: `alias/a402-devnet-runtime`
 7. key administrator は自分の admin role を選ぶ
 8. key usage permissions は、まず自分の作業用 principal だけ入れて作成する
 9. 作成後に key ARN をコピーする
@@ -575,8 +575,8 @@ export SUBLY402_ADMIN_AUTH_TOKEN='<operator-only-random-token>'
 
 smoke が終わったら、両方 `0` に戻して EIF を作り直してください。
 `prepare` は enclave 側には `SUBLY402_ADMIN_AUTH_TOKEN_SHA256` だけを書き出します。
-単一providerのsmokeで即時batchが必要な時だけ
-`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1` を使い、公開runtimeでは `0` のままにします。
+単一 provider の smoke で即時 batch が必要な時だけ
+`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1` を使い、公開 runtime では `0` のままにします。
 
 ## 7. 日常的に使うコマンド
 
