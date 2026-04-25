@@ -190,6 +190,12 @@ impl AttestationProvider {
             }
         };
 
+        if !matches!(mode, AttestationMode::LocalDev { .. }) && tls_binding.is_none() {
+            return Err(
+                "non-local attestation requires enclave TLS public key binding".to_string(),
+            );
+        }
+
         Ok(Self {
             mode,
             tls_binding,

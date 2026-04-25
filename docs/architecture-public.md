@@ -87,7 +87,7 @@ sequenceDiagram
     A402->>API: Forward request privately
     API-->>A402: Response
     A402-->>Agent: Data delivered
-    Note over A402: Payments batched and settled\nonly as provider aggregates
+    Note over A402: Payments delayed and mixed\nbefore provider aggregate settlement
 ```
 
 ## Tech Stack

@@ -63,7 +63,7 @@ app.listen(3000);
 
 ## Behaviour
 
-- Returns HTTP 402 with `a402-svm-v1` details when a request does not present a valid `PAYMENT-SIGNATURE`.
+- Returns HTTP 402 with `subly402-svm-v1` details when a request does not present a valid `PAYMENT-SIGNATURE`.
 - Verifies + reserves in the enclave before the route handler runs.
 - Settles in the enclave before returning the 2xx response, so WAL durability is honored (`§8.3`).
 - Adds a `PAYMENT-RESPONSE` header describing the settlement / batch / receipt identifiers.

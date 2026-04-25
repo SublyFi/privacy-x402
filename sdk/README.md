@@ -2,7 +2,7 @@
 
 Privacy-first x402 client SDK for Solana. Pays paid APIs through a TEE-based vault so on-chain observers never see a direct buyer-to-provider edge.
 
-- `a402-svm-v1` scheme on top of the x402 HTTP envelope
+- `subly402-svm-v1` scheme on top of the x402 HTTP envelope
 - Nitro attestation verification (PCR pinning required by default)
 - Batched vault settlement hides the sender / amount / timing correlation
 - Selective disclosure via hierarchical ElGamal audit records

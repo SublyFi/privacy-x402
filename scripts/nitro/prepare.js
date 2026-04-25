@@ -25,8 +25,23 @@ const {
   resolveNitroProjectName,
   resolveParentRoleArn,
   saveJson,
+  sha256hex,
   writeEnvFile,
 } = require("./common");
+
+function isEnvEnabled(value) {
+  return ["1", "true", "TRUE", "yes", "YES"].includes(value || "");
+}
+
+function resolveAdminAuthTokenSha256() {
+  if (process.env.SUBLY402_ADMIN_AUTH_TOKEN_SHA256) {
+    return process.env.SUBLY402_ADMIN_AUTH_TOKEN_SHA256;
+  }
+  if (process.env.SUBLY402_ADMIN_AUTH_TOKEN) {
+    return sha256hex(process.env.SUBLY402_ADMIN_AUTH_TOKEN);
+  }
+  return undefined;
+}
 
 async function main() {
   loadDefaultEnvFiles();
@@ -101,6 +116,22 @@ async function main() {
     args.snapshotDataKeyId ||
     process.env.SUBLY402_SNAPSHOT_DATA_KEY_ID ||
     kmsKeyId;
+  const enableProviderRegistrationApi =
+    process.env.SUBLY402_ENABLE_PROVIDER_REGISTRATION_API || "0";
+  const enableAdminApi = process.env.SUBLY402_ENABLE_ADMIN_API || "0";
+  const adminAuthTokenSha256 = resolveAdminAuthTokenSha256();
+  if (
+    (isEnvEnabled(enableProviderRegistrationApi) ||
+      isEnvEnabled(enableAdminApi)) &&
+    !adminAuthTokenSha256
+  ) {
+    throw new Error(
+      [
+        "SUBLY402_ADMIN_AUTH_TOKEN or SUBLY402_ADMIN_AUTH_TOKEN_SHA256",
+        "is required when control-plane APIs are enabled",
+      ].join(" ")
+    );
+  }
   const ciphertextB64 = awsKmsEncryptBase64({
     keyId: kmsKeyId,
     plaintext: Buffer.from(localSigner.secretKey.slice(0, 32)),
@@ -145,9 +176,17 @@ async function main() {
     SUBLY402_ENCLAVE_TLS_KEY_PATH:
       process.env.SUBLY402_ENCLAVE_TLS_KEY_PATH ||
       "/etc/subly402/tls/server.key",
-    SUBLY402_ENABLE_PROVIDER_REGISTRATION_API:
-      process.env.SUBLY402_ENABLE_PROVIDER_REGISTRATION_API || "0",
-    SUBLY402_ENABLE_ADMIN_API: process.env.SUBLY402_ENABLE_ADMIN_API || "0",
+    SUBLY402_ENABLE_PROVIDER_REGISTRATION_API: enableProviderRegistrationApi,
+    SUBLY402_ENABLE_ADMIN_API: enableAdminApi,
+    SUBLY402_ADMIN_AUTH_TOKEN_SHA256: adminAuthTokenSha256,
+    SUBLY402_MIN_BATCH_PROVIDERS:
+      process.env.SUBLY402_MIN_BATCH_PROVIDERS || "2",
+    SUBLY402_MIN_ANONYMITY_WINDOW_SEC:
+      process.env.SUBLY402_MIN_ANONYMITY_WINDOW_SEC || "300",
+    SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC:
+      process.env.SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC || "1000000",
+    SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH:
+      process.env.SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH || "0",
     SUBLY402_MANIFEST_HASH_HEX: process.env.SUBLY402_MANIFEST_HASH_HEX,
   };
 

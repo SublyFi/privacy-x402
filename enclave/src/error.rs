@@ -139,6 +139,9 @@ pub enum EnclaveError {
     #[error("Request origin not in provider allowed origins")]
     OriginNotAllowed,
 
+    #[error("Admin privacy-bypass batching is disabled")]
+    AdminPrivacyBypassDisabled,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -240,6 +243,9 @@ impl IntoResponse for EnclaveError {
             EnclaveError::AssetMintMismatch => (StatusCode::BAD_REQUEST, "asset_mint_mismatch"),
             EnclaveError::NetworkMismatch => (StatusCode::BAD_REQUEST, "network_mismatch"),
             EnclaveError::OriginNotAllowed => (StatusCode::FORBIDDEN, "origin_not_allowed"),
+            EnclaveError::AdminPrivacyBypassDisabled => {
+                (StatusCode::FORBIDDEN, "admin_privacy_bypass_disabled")
+            }
             EnclaveError::Internal(ref _s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
 

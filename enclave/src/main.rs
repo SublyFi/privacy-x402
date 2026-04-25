@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod adaptor_sig;
+mod admin_auth;
 mod asc_manager;
 mod attestation;
 mod audit;
@@ -18,6 +19,7 @@ mod state;
 mod tls;
 mod wal;
 
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use solana_sdk::pubkey::Pubkey;
@@ -110,6 +112,14 @@ async fn main() {
     let manifest_hash = env::var("SUBLY402_MANIFEST_HASH_HEX").ok();
 
     let tls_runtime = tls::TlsRuntime::from_env().expect("TLS configuration must be valid");
+    if !bootstrap.attestation.is_local_dev
+        && tls_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.binding())
+            .is_none()
+    {
+        panic!("non-local attested runtime requires enclave TLS with attested public key binding");
+    }
     let provider_mtls_enabled = tls_runtime
         .as_ref()
         .map(|runtime| runtime.mtls_enabled())
@@ -193,15 +203,20 @@ async fn main() {
         )
         .route("/v1/channel/close", post(handlers::post_channel_close));
     if enable_provider_registration_api {
-        app = app.route(
-            "/v1/provider/register",
-            post(handlers::post_register_provider),
-        );
+        let provider_registration_routes = Router::new()
+            .route(
+                "/v1/provider/register",
+                post(handlers::post_register_provider),
+            )
+            .route_layer(middleware::from_fn(admin_auth::require_admin_auth));
+        app = app.merge(provider_registration_routes);
     }
     if enable_admin_api {
-        app = app
+        let admin_routes = Router::new()
             .route("/v1/admin/seed-balance", post(handlers::post_seed_balance))
-            .route("/v1/admin/fire-batch", post(handlers::post_fire_batch));
+            .route("/v1/admin/fire-batch", post(handlers::post_fire_batch))
+            .route_layer(middleware::from_fn(admin_auth::require_admin_auth));
+        app = app.merge(admin_routes);
     }
     let app = app.with_state(app_state);
 

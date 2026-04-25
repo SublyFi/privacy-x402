@@ -500,8 +500,9 @@ curl -sk https://<your-nlb-dns>/v1/attestation | jq .
 初回だけ管理 API を使いたい場合は、EIF build 前の `enclave.env` に次を入れます。
 
 ```bash
-export A402_ENABLE_PROVIDER_REGISTRATION_API='1'
-export A402_ENABLE_ADMIN_API='1'
+export SUBLY402_ENABLE_PROVIDER_REGISTRATION_API='1'
+export SUBLY402_ENABLE_ADMIN_API='1'
+export SUBLY402_ADMIN_AUTH_TOKEN='<operator-only-random-token>'
 ```
 
 その状態で:
@@ -512,6 +513,9 @@ export A402_ENABLE_ADMIN_API='1'
 4. enclave 再起動
 
 smoke が終わったら、両方 `0` に戻して EIF を作り直してください。
+`prepare` は enclave 側には `SUBLY402_ADMIN_AUTH_TOKEN_SHA256` だけを書き出します。
+単一providerのsmokeで即時batchが必要な時だけ
+`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1` を使い、公開runtimeでは `0` のままにします。
 
 ## 7. 日常的に使うコマンド
 

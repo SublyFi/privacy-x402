@@ -147,10 +147,16 @@ export async function probeTlsPublicKeySha256(
 
 async function verifyAttestedTlsEndpointBinding(
   enclaveUrl: string,
-  expectedTlsPublicKeySha256: string | undefined
+  expectedTlsPublicKeySha256: string | undefined,
+  allowMissingForLocalDev: boolean
 ): Promise<void> {
   if (!expectedTlsPublicKeySha256) {
-    return;
+    if (allowMissingForLocalDev) {
+      return;
+    }
+    throw new Error(
+      "Non-local attestation is missing attested tlsPublicKeySha256"
+    );
   }
 
   const observedTlsPublicKeySha256 = await probeTlsPublicKeySha256(enclaveUrl);
@@ -226,7 +232,9 @@ export class Subly402VaultClient {
       localDocument = null;
     }
 
+    let isLocalDevAttestation = false;
     if (localDocument?.mode === "local-dev") {
+      isLocalDevAttestation = true;
       this.verifyLocalAttestationDocument(attestation, localDocument);
     } else if (this.nitroAttestation) {
       await verifyNitroAttestationDocument(attestation, {
@@ -249,7 +257,8 @@ export class Subly402VaultClient {
 
     await verifyAttestedTlsEndpointBinding(
       this.enclaveUrl,
-      attestation.tlsPublicKeySha256
+      attestation.tlsPublicKeySha256,
+      isLocalDevAttestation
     );
 
     this.cachedAttestation = attestation;

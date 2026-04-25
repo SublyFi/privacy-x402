@@ -9,7 +9,7 @@
 
 ## 1. Scope
 
-`a402-svm-v1` は、x402 の HTTP envelope を維持したまま、支払いの意味論を「client が直接 on-chain transfer を出す」方式から「Nitro Enclave 内 vault balance を条件付きで予約し、後で batched settlement する」方式へ置き換える custom payment scheme である。
+`subly402-svm-v1` は、x402 の HTTP envelope を維持したまま、支払いの意味論を「client が直接 on-chain transfer を出す」方式から「Nitro Enclave 内 vault balance を条件付きで予約し、後で batched settlement する」方式へ置き換える custom payment scheme である。
 
 この spec が固定するもの:
 
@@ -28,7 +28,7 @@
 
 ## 2. Compatibility Profile
 
-`a402-svm-v1` は以下を維持する:
+`subly402-svm-v1` は以下を維持する:
 
 - client は paid resource に対して通常の HTTP request を送る
 - server は `402 Payment Required` を返す
@@ -36,7 +36,7 @@
 - server は facilitator に verify / settle を委譲する
 - server は `PAYMENT-RESPONSE` を返す
 
-`a402-svm-v1` は以下を変更する:
+`subly402-svm-v1` は以下を変更する:
 
 - `PAYMENT-SIGNATURE` の中身は raw Solana transfer transaction ではない
 - verify / settle 先は汎用 x402 facilitator ではなく、A402-aware facilitator である
@@ -118,7 +118,7 @@ provider は `accepts[]` の各要素として以下を返す。
 
 ```json
 {
-  "scheme": "a402-svm-v1",
+  "scheme": "subly402-svm-v1",
   "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
   "amount": "1000000",
   "asset": {
@@ -146,7 +146,7 @@ provider は `accepts[]` の各要素として以下を返す。
 
 | Field                         | Type    | Meaning                                                |
 | ----------------------------- | ------- | ------------------------------------------------------ |
-| `scheme`                      | string  | 固定値 `a402-svm-v1`                                   |
+| `scheme`                      | string  | 固定値 `subly402-svm-v1`                                   |
 | `network`                     | string  | CAIP-2 形式の Solana network id                        |
 | `amount`                      | string  | atomic units の decimal string                         |
 | `asset.mint`                  | string  | SPL token mint                                         |
@@ -183,7 +183,7 @@ paymentDetailsHash = SHA-256(canonical_json(selected_accept_object))
 ```json
 {
   "version": 1,
-  "scheme": "a402-svm-v1",
+  "scheme": "subly402-svm-v1",
   "paymentId": "pay_01JQ8VKGW2P4M0C31Q1QKQQR4M",
   "client": "4xzJcN4h...",
   "vault": "9oX9G2xD...",
@@ -335,7 +335,7 @@ response:
 `/verify` で facilitator が必ず行う検証:
 
 1. provider 認証が registration と一致する
-2. `paymentDetails.scheme == "a402-svm-v1"`
+2. `paymentDetails.scheme == "subly402-svm-v1"`
 3. `paymentDetails.verifyWindowSec` が正の整数である
 4. `paymentDetailsHash` が一致する
 5. `requestHash` が `requestContext` から再計算した値と一致する
@@ -452,7 +452,7 @@ header 値は Base64-encoded JSON とする。
 
 ```json
 {
-  "scheme": "a402-svm-v1",
+  "scheme": "subly402-svm-v1",
   "paymentId": "pay_01JQ8VKGW2P4M0C31Q1QKQQR4M",
   "verificationId": "ver_01JQ8VQ6M1MS4KTW46ZF4GJKF3",
   "settlementId": "set_01JQ8VV2SEQQFG28M0WSTC3Q59",
@@ -532,8 +532,8 @@ batch は以下のいずれかで発火する:
 - facilitator SHOULD defer automatic batch inclusion for provider credits smaller than a configured payout floor (Phase 1 推奨: `AUTO_BATCH_MIN_PROVIDER_PAYOUT = 1_000_000` atomic units = 1 USDC) and wait for aggregation, unless `MAX_SETTLEMENT_DELAY_SEC` has been reached
 - batch submit 時刻には jitter を入れる
 - provider には `/settle` 成功時点で off-chain receipt を返し、on-chain 着金より前に credit を確定させる
-- `MIN_ANONYMITY_WINDOW_SEC = 60`（Phase 1 推奨値、env `A402_MIN_ANONYMITY_WINDOW_SEC`）: 各 settlement は age がこの値に達するまで automatic batch の対象外になる。old sibling が先に支払い対象になっても、fresh sibling は window を満たすまで vault 内で aging を続ける。batch cadence から独立して個別 settlement に最低待機時間を与えるための time-based anonymity gate。
-- `MIN_BATCH_PROVIDERS = 1`（Phase 1 デフォルト、env `A402_MIN_BATCH_PROVIDERS`）: batch 内の provider 数がこの値未満の場合、`MAX_SETTLEMENT_DELAY_SEC` まで待機して他の provider の credit と合流させる。`1` は time-based anonymity gate だけに依存する最小設定。高ボリューム時は `2` 以上に上げて k-anonymity を併用する。いずれにせよ settle_vault tx は Vault→Provider の送金のみで client 情報は含まれないため、linkability は「この期間にこの provider を使った誰かがいる」レベルに留まる
+- `MIN_ANONYMITY_WINDOW_SEC = 300`（Phase 1 public default、env `SUBLY402_MIN_ANONYMITY_WINDOW_SEC`）: 各 settlement は age がこの値に達するまで automatic batch の対象外になる。old sibling が先に支払い対象になっても、fresh sibling は window を満たすまで vault 内で aging を続ける。batch cadence から独立して個別 settlement に最低待機時間を与えるための time-based anonymity gate。
+- `MIN_BATCH_PROVIDERS = 2`（Phase 1 public default、env `SUBLY402_MIN_BATCH_PROVIDERS`）: batch 内の provider 数がこの値未満の場合、`MAX_SETTLEMENT_DELAY_SEC` まで待機して他の provider の credit と合流させる。最後尾の atomic chunk が単独 provider になる場合も liveness deadline まで保留する。いずれにせよ settle_vault tx は Vault→Provider の送金のみで client 情報は含まれないため、linkability は「この期間にこの provider 群を使った誰かがいる」レベルに留まる
 
 ### 10.3 Batch Receipts
 

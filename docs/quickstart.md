@@ -2,7 +2,7 @@
 
 Privacy-first x402 for Solana. Your AI agent pays paid APIs through a TEE-backed vault so on-chain observers never see the direct buyer-to-provider edge.
 
-- **Client**: you ship an agent, call any `a402-svm-v1` API with `subly402-sdk`, and the vault handles the rest.
+- **Client**: you ship an agent, call any `subly402-svm-v1` API with `subly402-sdk`, and the vault handles the rest.
 - **Provider**: you ship a paid API, plug in `subly402-express`, and settle through the facilitator instead of direct on-chain transfers.
 
 ## 1. Prerequisites
@@ -147,13 +147,13 @@ Defaults for the time-based anonymity window:
 
 | Constant | Default | Env override |
 |---|---|---|
-| `MIN_ANONYMITY_WINDOW_SEC` | `60` | `A402_MIN_ANONYMITY_WINDOW_SEC` |
+| `MIN_ANONYMITY_WINDOW_SEC` | `300` | `SUBLY402_MIN_ANONYMITY_WINDOW_SEC` |
 | `BATCH_WINDOW_SEC` | `120` | — |
-| `MIN_BATCH_PROVIDERS` | `1` | `A402_MIN_BATCH_PROVIDERS` |
+| `MIN_BATCH_PROVIDERS` | `2` | `SUBLY402_MIN_BATCH_PROVIDERS` |
 | `MAX_SETTLEMENT_DELAY_SEC` | `900` | — |
 
-Every individual settlement is held in the vault for at least `MIN_ANONYMITY_WINDOW_SEC` before it is eligible for an on-chain batch — fresh siblings in the same provider credit keep aging even when an older sibling is already being paid out. Operators running high-volume vaults should raise `MIN_BATCH_PROVIDERS` to enforce k-anonymity across providers in addition to the time window.
+Every individual settlement is held in the vault for at least `MIN_ANONYMITY_WINDOW_SEC` before it is eligible for an on-chain batch — fresh siblings in the same provider credit keep aging even when an older sibling is already being paid out. Automatic batches require at least `MIN_BATCH_PROVIDERS` distinct providers unless the liveness deadline is reached.
 
 ## 6. Running your own facilitator
 
-End-to-end Nitro deployment (KMS bootstrap, PCR pinning, NLB, watchtower, Terraform) is in the root [`README.md`](../README.md). Protocol-level details are in [`a402-svm-v1-protocol.md`](./a402-svm-v1-protocol.md) and [`a402-solana-design.md`](./a402-solana-design.md).
+End-to-end Nitro deployment (KMS bootstrap, PCR pinning, NLB, watchtower, Terraform) is in the root [`README.md`](../README.md). Protocol-level details are in [`subly402-svm-v1-protocol.md`](./a402-svm-v1-protocol.md) and [`a402-solana-design.md`](./a402-solana-design.md).

@@ -260,6 +260,26 @@ function verifyLocalAttestationDocument(
   }
 }
 
+async function verifyAttestedTlsBinding(
+  facilitatorUrl: string,
+  attestation: AttestationResponse,
+  allowMissingForLocalDev: boolean
+): Promise<void> {
+  if (!attestation.tlsPublicKeySha256) {
+    if (allowMissingForLocalDev) {
+      return;
+    }
+    throw new Error(
+      "Subly402 non-local attestation is missing attested tlsPublicKeySha256"
+    );
+  }
+
+  const observed = await probeTlsPublicKeySha256(facilitatorUrl);
+  if (observed.toLowerCase() !== attestation.tlsPublicKeySha256.toLowerCase()) {
+    throw new Error("Subly402 attested TLS public key mismatch");
+  }
+}
+
 export class Subly402Client {
   private readonly trustedFacilitators: string[];
   private readonly maxPaymentPerRequest?: string | number;
@@ -402,7 +422,8 @@ export class Subly402Client {
     assertAttestationMatchesDetails(attestation, details);
 
     const localDocument = decodeLocalAttestationDocument(attestation);
-    if (localDocument?.mode === "local-dev") {
+    const isLocalDevAttestation = localDocument?.mode === "local-dev";
+    if (isLocalDevAttestation) {
       verifyLocalAttestationDocument(attestation, localDocument);
     } else if (this.nitroAttestation) {
       await verifyNitroAttestationDocument(attestation, {
@@ -426,14 +447,11 @@ export class Subly402Client {
       );
     }
 
-    if (attestation.tlsPublicKeySha256) {
-      const observed = await probeTlsPublicKeySha256(facilitatorUrl);
-      if (
-        observed.toLowerCase() !== attestation.tlsPublicKeySha256.toLowerCase()
-      ) {
-        throw new Error("Subly402 attested TLS public key mismatch");
-      }
-    }
+    await verifyAttestedTlsBinding(
+      facilitatorUrl,
+      attestation,
+      isLocalDevAttestation
+    );
 
     this.attestationCache.set(facilitatorUrl, attestation);
     return attestation;

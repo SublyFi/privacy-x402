@@ -47,11 +47,11 @@ const DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC: u64 = 1_000_000;
 /// for an automatic batch. Guarantees every settlement was held in the vault
 /// for at least this long, so on-chain observers cannot trivially correlate a
 /// fresh deposit/reservation with an immediate payout to a provider.
-const DEFAULT_MIN_ANONYMITY_WINDOW_SEC: i64 = 60;
-/// Default minimum number of distinct providers in a batch. `1` means the
-/// time-based anonymity window is the sole anonymity knob; operators who want
-/// to additionally require N-way mixing can raise this via env.
-const DEFAULT_MIN_BATCH_PROVIDERS: usize = 1;
+const DEFAULT_MIN_ANONYMITY_WINDOW_SEC: i64 = 300;
+/// Default minimum number of distinct providers in an automatic batch. Public
+/// deployments should avoid single-provider on-chain chunks unless the liveness
+/// ceiling is reached.
+const DEFAULT_MIN_BATCH_PROVIDERS: usize = 2;
 
 /// Settlement entry ready for on-chain batch
 #[derive(Debug, Clone)]
@@ -239,8 +239,40 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
     }
 }
 
+/// Trigger a batch only when the automatic privacy gates say it is ready.
+pub async fn fire_ready_batch_now(state: &Arc<AppState>) -> Result<BatchSubmitResult, String> {
+    let now = chrono::Utc::now().timestamp();
+    let batch_privacy = state.batch_privacy;
+    let last_batch = *state.vault.last_batch_at.read().await;
+    let elapsed = now - last_batch;
+    let cursors = build_provider_batch_cursors(state, now, BatchBuildMode::Auto, batch_privacy);
+    let provider_count = cursors.len();
+    let oldest_credit_age = cursors
+        .iter()
+        .map(|cursor| now - cursor.oldest_credit_at)
+        .max()
+        .unwrap_or(0);
+    let (decision, _) = decide_batch_action(
+        now,
+        elapsed,
+        provider_count,
+        oldest_credit_age,
+        None,
+        0,
+        batch_privacy.min_batch_providers,
+    );
+
+    if !matches!(decision, BatchLoopDecision::Fire) {
+        return Ok(BatchSubmitResult::no_op());
+    }
+
+    fire_batch_at(state, now, BatchBuildMode::Auto).await
+}
+
 /// Trigger a batch immediately, bypassing timing/privacy gates.
-pub async fn fire_batch_now(state: &Arc<AppState>) -> Result<BatchSubmitResult, String> {
+pub async fn fire_batch_privacy_bypass_now(
+    state: &Arc<AppState>,
+) -> Result<BatchSubmitResult, String> {
     fire_batch_at(state, chrono::Utc::now().timestamp(), BatchBuildMode::Flush).await
 }
 
@@ -255,23 +287,40 @@ async fn fire_batch_at(
         return Ok(BatchSubmitResult::no_op());
     }
 
-    let provider_count = prepared
+    let batch_id = now as u64;
+    let chunks = privacy_filter_batch_chunks(
+        build_batch_chunks(&prepared),
+        now,
+        mode,
+        state.batch_privacy,
+    );
+    if chunks.is_empty() {
+        return Ok(BatchSubmitResult::no_op());
+    }
+
+    let submitted_entries: Vec<&PreparedSettlement> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.entries.iter())
+        .collect();
+    let provider_count = submitted_entries
         .iter()
         .map(|entry| entry.provider_id.clone())
         .collect::<HashSet<_>>()
         .len();
-    let total_amount: u64 = prepared.iter().map(|entry| entry.settlement.amount).sum();
-    let batch_id = now as u64;
+    let total_amount: u64 = submitted_entries
+        .iter()
+        .map(|entry| entry.settlement.amount)
+        .sum();
+    let settlement_count = submitted_entries.len();
 
     info!(
         batch_id,
         provider_count,
-        audit_count = prepared.len(),
+        audit_count = settlement_count,
         total_amount,
         "Batch settlement ready for on-chain submission"
     );
 
-    let chunks = build_batch_chunks(&prepared);
     let mut tx_signatures = Vec::with_capacity(chunks.len());
 
     for (chunk_idx, chunk) in chunks.iter().cloned().enumerate() {
@@ -347,7 +396,7 @@ async fn fire_batch_at(
         submitted: true,
         batch_id: Some(batch_id),
         provider_count,
-        settlement_count: prepared.len(),
+        settlement_count,
         total_amount,
         tx_signatures,
     })
@@ -754,6 +803,34 @@ fn build_batch_chunks(entries: &[PreparedSettlement]) -> Vec<BatchChunk> {
     }
 
     chunks
+}
+
+fn privacy_filter_batch_chunks(
+    chunks: Vec<BatchChunk>,
+    batch_timestamp: i64,
+    mode: BatchBuildMode,
+    config: BatchPrivacyConfig,
+) -> Vec<BatchChunk> {
+    if matches!(mode, BatchBuildMode::Flush) || config.min_batch_providers <= 1 {
+        return chunks;
+    }
+
+    chunks
+        .into_iter()
+        .filter(|chunk| {
+            let provider_count = chunk
+                .entries
+                .iter()
+                .map(|entry| entry.settlement.provider_token_account)
+                .collect::<HashSet<_>>()
+                .len();
+            let liveness_deadline_reached = chunk
+                .entries
+                .iter()
+                .any(|entry| batch_timestamp - entry.audit.timestamp >= MAX_SETTLEMENT_DELAY_SEC);
+            provider_count >= config.min_batch_providers || liveness_deadline_reached
+        })
+        .collect()
 }
 
 fn aggregate_settlements(
@@ -1487,8 +1564,8 @@ mod tests {
 
     #[test]
     fn decide_batch_action_single_provider_fires_when_min_is_one() {
-        // With default min_batch_providers = 1, one provider should be enough
-        // to fire the batch as long as the time window has elapsed.
+        // With min_batch_providers = 1, one provider is enough to fire the
+        // batch as long as the time window has elapsed.
         let (decision, _) = decide_batch_action(
             1_000,
             BATCH_WINDOW_SEC as i64,
@@ -1657,8 +1734,8 @@ mod tests {
 
     #[test]
     fn select_provider_batch_entries_flush_mode_ignores_window() {
-        // `BatchBuildMode::Flush` is used by the admin /fire-batch path and
-        // must bypass anonymity gating so the operator can force a settlement.
+        // `BatchBuildMode::Flush` is only used by the explicit admin
+        // privacy-bypass path and must pick up fresh credits.
         let config = BatchPrivacyConfig::default();
         let candidates = vec![("fresh".to_string(), 119i64, 500_000u64)];
 
@@ -1669,10 +1746,46 @@ mod tests {
     }
 
     #[test]
+    fn privacy_filter_holds_singleton_tail_chunk_before_liveness() {
+        let entries: Vec<PreparedSettlement> = (0..3).map(sample_entry).collect();
+        let chunks = build_batch_chunks(&entries);
+        let filtered = privacy_filter_batch_chunks(
+            chunks,
+            120,
+            BatchBuildMode::Auto,
+            BatchPrivacyConfig {
+                min_batch_providers: 2,
+                ..BatchPrivacyConfig::default()
+            },
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn privacy_filter_allows_singleton_tail_at_liveness_deadline() {
+        let entries: Vec<PreparedSettlement> = (0..3).map(sample_entry).collect();
+        let chunks = build_batch_chunks(&entries);
+        let filtered = privacy_filter_batch_chunks(
+            chunks,
+            MAX_SETTLEMENT_DELAY_SEC + 3,
+            BatchBuildMode::Auto,
+            BatchPrivacyConfig {
+                min_batch_providers: 2,
+                ..BatchPrivacyConfig::default()
+            },
+        );
+
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[1].entries.len(), 1);
+    }
+
+    #[test]
     fn batch_privacy_config_defaults_match_public_launch_posture() {
         let config = BatchPrivacyConfig::default();
-        assert_eq!(config.min_anonymity_window_sec, 60);
-        assert_eq!(config.min_batch_providers, 1);
+        assert_eq!(config.min_anonymity_window_sec, 300);
+        assert_eq!(config.min_batch_providers, 2);
         assert_eq!(
             config.auto_batch_min_provider_payout_atomic,
             DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC

@@ -17,7 +17,7 @@ Privacy-preserving x402 payment protocol for AI agents on Solana.
 | Privacy Facilitator | AWS Nitro Enclave | x402 payment processing, batch construction, receipt signing |
 | Yield Vault | Arcium MPC | Confidential balance management, yield accrual |
 | Client SDK | TypeScript | Deposit, withdraw, x402-compatible fetch, attestation |
-| Provider Middleware | TypeScript/Express | HTTP 402 envelope with `a402-svm-v1` scheme |
+| Provider Middleware | TypeScript/Express | HTTP 402 envelope with `subly402-svm-v1` scheme |
 
 ### Academic Foundation
 

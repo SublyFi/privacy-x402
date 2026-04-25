@@ -43,6 +43,16 @@ function buildClientRequestAuth(client, buildMessage) {
   };
 }
 
+function adminHeaders() {
+  const token = process.env.SUBLY402_ADMIN_AUTH_TOKEN;
+  if (!token) {
+    throw new Error(
+      "SUBLY402_ADMIN_AUTH_TOKEN is required for provider/register and admin/fire-batch"
+    );
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
 async function main() {
   loadDefaultEnvFiles();
 
@@ -138,17 +148,23 @@ async function main() {
 
   const providerId = `prov_${crypto.randomUUID()}`;
   const providerApiKey = `provider-secret-${crypto.randomUUID()}`;
-  const registerRes = await postJson(enclaveUrl, "/v1/provider/register", {
-    providerId,
-    displayName: "Devnet Smoke Provider",
-    participantPubkey: providerOwner.publicKey.toBase58(),
-    settlementTokenAccount: providerTokenAccount.toBase58(),
-    network,
-    assetMint: state.usdcMint,
-    allowedOrigins: [requestOrigin],
-    authMode: "bearer",
-    apiKeyHash: sha256hex(providerApiKey),
-  });
+  const controlPlaneHeaders = adminHeaders();
+  const registerRes = await postJson(
+    enclaveUrl,
+    "/v1/provider/register",
+    {
+      providerId,
+      displayName: "Devnet Smoke Provider",
+      participantPubkey: providerOwner.publicKey.toBase58(),
+      settlementTokenAccount: providerTokenAccount.toBase58(),
+      network,
+      assetMint: state.usdcMint,
+      allowedOrigins: [requestOrigin],
+      authMode: "bearer",
+      apiKeyHash: sha256hex(providerApiKey),
+    },
+    controlPlaneHeaders
+  );
   if (!registerRes.ok) {
     throw new Error(
       `provider/register failed: ${
@@ -247,7 +263,14 @@ async function main() {
   }
   const settleBody = await settleRes.json();
 
-  const fireBatchRes = await postJson(enclaveUrl, "/v1/admin/fire-batch", {});
+  const fireBatchRes = await postJson(
+    enclaveUrl,
+    "/v1/admin/fire-batch",
+    process.env.SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH === "1"
+      ? { privacyBypass: true }
+      : {},
+    controlPlaneHeaders
+  );
   if (!fireBatchRes.ok) {
     throw new Error(
       `fire-batch failed: ${

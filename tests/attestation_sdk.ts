@@ -335,7 +335,7 @@ describe("attestation_sdk", () => {
     }
   });
 
-  it("delegates non-local attestation verification to the custom verifier", async () => {
+  it("rejects non-local attestation without an attested TLS binding", async () => {
     const wallet = Keypair.generate();
     const vaultAddress = Keypair.generate().publicKey;
     const attestation: AttestationResponse = {
@@ -362,7 +362,14 @@ describe("attestation_sdk", () => {
       },
     });
 
-    await client.verifyAttestation();
+    try {
+      await client.verifyAttestation();
+      throw new Error("expected verifyAttestation to reject");
+    } catch (error) {
+      expect((error as Error).message).to.equal(
+        "Non-local attestation is missing attested tlsPublicKeySha256"
+      );
+    }
     expect(verifierCalls).to.equal(1);
   });
 

@@ -49,10 +49,16 @@ This executes:
 - client funding
 - mint to client ATA
 - on-chain `deposit`
-- `provider/register`
+- authenticated `provider/register`
 - `verify`
 - `settle`
-- `fire-batch`
+- authenticated `fire-batch`
+
+Set `SUBLY402_ADMIN_AUTH_TOKEN` in `.env.devnet.local` when
+`SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1` or `SUBLY402_ENABLE_ADMIN_API=1`.
+Single-provider smoke tests that need immediate on-chain payout must also set
+`SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH=1`; keep it unset or `0` for public
+runtime.
 
 ```bash
 yarn devnet:smoke

@@ -13,6 +13,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use spl_associated_token_account::get_associated_token_address;
 use std::any::Any;
+use std::env;
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -1740,7 +1741,10 @@ pub async fn post_seed_balance(
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct FireBatchRequest {}
+pub struct FireBatchRequest {
+    #[serde(default)]
+    pub privacy_bypass: bool,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1756,11 +1760,27 @@ pub struct FireBatchResponse {
 
 pub async fn post_fire_batch(
     State(state): State<Arc<AppState>>,
-    Json(_req): Json<FireBatchRequest>,
+    Json(req): Json<FireBatchRequest>,
 ) -> Result<Json<FireBatchResponse>, EnclaveError> {
-    info!("Admin fire-batch requested");
+    info!(
+        privacy_bypass = req.privacy_bypass,
+        "Admin fire-batch requested"
+    );
 
-    let result = AssertUnwindSafe(batch::fire_batch_now(&state))
+    if req.privacy_bypass && !admin_privacy_bypass_enabled() {
+        return Err(EnclaveError::AdminPrivacyBypassDisabled);
+    }
+
+    let batch_future: futures_util::future::BoxFuture<
+        '_,
+        Result<batch::BatchSubmitResult, String>,
+    > = if req.privacy_bypass {
+        Box::pin(batch::fire_batch_privacy_bypass_now(&state))
+    } else {
+        Box::pin(batch::fire_ready_batch_now(&state))
+    };
+
+    let result = AssertUnwindSafe(batch_future)
         .catch_unwind()
         .await
         .map_err(|panic| {
@@ -1792,6 +1812,15 @@ pub async fn post_fire_batch(
 }
 
 // ── Helper functions ──
+
+fn admin_privacy_bypass_enabled() -> bool {
+    matches!(
+        env::var("SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
 
 fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {

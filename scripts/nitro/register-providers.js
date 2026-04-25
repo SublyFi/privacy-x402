@@ -36,8 +36,23 @@ function loadProvider(index) {
   return { index, id, tokenAccount, apiKey };
 }
 
-async function assertRegistrationRoute(enclaveUrl) {
-  const response = await postJson(enclaveUrl, "/v1/provider/register", {});
+function adminHeaders() {
+  const token = process.env.SUBLY402_ADMIN_AUTH_TOKEN;
+  if (!token) {
+    throw new Error(
+      "SUBLY402_ADMIN_AUTH_TOKEN is required to call /v1/provider/register"
+    );
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function assertRegistrationRoute(enclaveUrl, headers) {
+  const response = await postJson(
+    enclaveUrl,
+    "/v1/provider/register",
+    {},
+    headers
+  );
   if (response.status === 404) {
     throw new Error(
       "/v1/provider/register is 404. Start the provider-bootstrap EIF before registering providers."
@@ -50,18 +65,24 @@ async function registerProvider(
   provider,
   network,
   assetMint,
-  origin
+  origin,
+  headers
 ) {
-  const response = await postJson(enclaveUrl, "/v1/provider/register", {
-    providerId: provider.id,
-    displayName: `Subly402 Demo Provider ${provider.index}`,
-    settlementTokenAccount: provider.tokenAccount,
-    network,
-    assetMint,
-    allowedOrigins: [origin],
-    authMode: "bearer",
-    apiKeyHash: sha256hex(provider.apiKey),
-  });
+  const response = await postJson(
+    enclaveUrl,
+    "/v1/provider/register",
+    {
+      providerId: provider.id,
+      displayName: `Subly402 Demo Provider ${provider.index}`,
+      settlementTokenAccount: provider.tokenAccount,
+      network,
+      assetMint,
+      allowedOrigins: [origin],
+      authMode: "bearer",
+      apiKeyHash: sha256hex(provider.apiKey),
+    },
+    headers
+  );
   const text = await response.text();
 
   if (response.ok) {
@@ -96,13 +117,21 @@ async function main() {
   const assetMint = requireEnv("SUBLY402_USDC_MINT");
   const origin = process.env.SUBLY402_REQUEST_ORIGIN || "http://localhost:3000";
   const providers = [loadProvider(1), loadProvider(2)];
+  const headers = adminHeaders();
 
-  await assertRegistrationRoute(enclaveUrl);
+  await assertRegistrationRoute(enclaveUrl, headers);
 
   const results = [];
   for (const provider of providers) {
     results.push(
-      await registerProvider(enclaveUrl, provider, network, assetMint, origin)
+      await registerProvider(
+        enclaveUrl,
+        provider,
+        network,
+        assetMint,
+        origin,
+        headers
+      )
     );
   }
 

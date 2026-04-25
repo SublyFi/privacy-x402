@@ -33,6 +33,10 @@ import {
 const RPC_URL = process.env.ANCHOR_PROVIDER_URL || "http://127.0.0.1:8899";
 const DEFAULT_ENCLAVE_URL = "http://127.0.0.1:3100";
 const WATCHTOWER_URL = "http://127.0.0.1:3200";
+const E2E_ADMIN_AUTH_TOKEN = "subly402-surfpool-admin-token";
+const E2E_ADMIN_HEADERS = {
+  Authorization: `Bearer ${E2E_ADMIN_AUTH_TOKEN}`,
+};
 
 type RequestContext = {
   method: string;
@@ -466,6 +470,8 @@ describe("enclave_surfpool_e2e", function () {
           SUBLY402_WATCHTOWER_URL: WATCHTOWER_URL,
           SUBLY402_ENABLE_PROVIDER_REGISTRATION_API: "1",
           SUBLY402_ENABLE_ADMIN_API: "1",
+          SUBLY402_ADMIN_AUTH_TOKEN: E2E_ADMIN_AUTH_TOKEN,
+          SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH: "1",
           ...(options.enclaveExtraEnv ?? {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -586,7 +592,7 @@ describe("enclave_surfpool_e2e", function () {
               ? options.mtlsFingerprintHex
               : undefined,
         },
-        undefined,
+        E2E_ADMIN_HEADERS,
         options.sharedTls
       );
       expect(registerRes.status, await registerRes.text()).to.equal(200);
@@ -710,8 +716,8 @@ describe("enclave_surfpool_e2e", function () {
       const fireBatchRes = await postJson(
         options.enclaveUrl,
         "/v1/admin/fire-batch",
-        {},
-        undefined,
+        { privacyBypass: true },
+        E2E_ADMIN_HEADERS,
         options.sharedTls
       );
       expect(fireBatchRes.status, await fireBatchRes.text()).to.equal(200);

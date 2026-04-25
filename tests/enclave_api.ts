@@ -11,10 +11,16 @@ import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
  * Enclave Facilitator API integration tests.
  *
  * Prerequisites: watchtower must be running on localhost:3200 and enclave must
- * be running on localhost:3100 with SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200
- * SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1 and SUBLY402_ENABLE_ADMIN_API=1
+ * be running on localhost:3100 with SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200,
+ * SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1, SUBLY402_ENABLE_ADMIN_API=1,
+ * and SUBLY402_ADMIN_AUTH_TOKEN=subly402-test-admin-token
  * Run: cargo run -p subly402-watchtower &
- * Then: SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200 cargo run -p subly402-enclave &
+ * Then:
+ *   SUBLY402_WATCHTOWER_URL=http://127.0.0.1:3200 \
+ *   SUBLY402_ENABLE_PROVIDER_REGISTRATION_API=1 \
+ *   SUBLY402_ENABLE_ADMIN_API=1 \
+ *   SUBLY402_ADMIN_AUTH_TOKEN=subly402-test-admin-token \
+ *   cargo run -p subly402-enclave &
  * Then: yarn run ts-mocha -p ./tsconfig.json -t 30000 tests/enclave_api.ts
  *
  * Optional HTTPS/mTLS:
@@ -25,6 +31,13 @@ import { requestJson, RequestTlsOptions, TestResponse } from "./live_transport";
 
 const ENCLAVE_URL =
   process.env.SUBLY402_TEST_ENCLAVE_URL || "http://localhost:3100";
+const ADMIN_AUTH_TOKEN =
+  process.env.SUBLY402_TEST_ADMIN_AUTH_TOKEN ||
+  process.env.SUBLY402_ADMIN_AUTH_TOKEN ||
+  "subly402-test-admin-token";
+const ADMIN_HEADERS = {
+  Authorization: `Bearer ${ADMIN_AUTH_TOKEN}`,
+};
 const SHARED_TLS: RequestTlsOptions | undefined = process.env
   .SUBLY402_TEST_TLS_CA_PATH
   ? {
@@ -236,29 +249,37 @@ describe("enclave_api", () => {
     const assetMint = Keypair.generate().publicKey;
     const paymentAmount = 600_000;
 
-    const registerRes = await postJson("/v1/provider/register", {
-      providerId,
-      displayName: "Integration Test Provider",
-      participantPubkey: providerParticipant.publicKey.toBase58(),
-      participantAttestation: buildTestProviderParticipantAttestation(
+    const registerRes = await postJson(
+      "/v1/provider/register",
+      {
         providerId,
-        providerParticipant.publicKey.toBase58()
-      ),
-      settlementTokenAccount: providerSettlementAccount.toBase58(),
-      network: "solana:localnet",
-      assetMint: assetMint.toBase58(),
-      allowedOrigins: ["http://localhost"],
-      authMode: "bearer",
-      apiKeyHash: sha256hex(providerApiKey),
-    });
+        displayName: "Integration Test Provider",
+        participantPubkey: providerParticipant.publicKey.toBase58(),
+        participantAttestation: buildTestProviderParticipantAttestation(
+          providerId,
+          providerParticipant.publicKey.toBase58()
+        ),
+        settlementTokenAccount: providerSettlementAccount.toBase58(),
+        network: "solana:localnet",
+        assetMint: assetMint.toBase58(),
+        allowedOrigins: ["http://localhost"],
+        authMode: "bearer",
+        apiKeyHash: sha256hex(providerApiKey),
+      },
+      ADMIN_HEADERS
+    );
     expect(registerRes.status).to.equal(200);
 
-    const seedRes = await postJson("/v1/admin/seed-balance", {
-      client: client.publicKey.toBase58(),
-      free: 2_000_000,
-      locked: 0,
-      totalDeposited: 2_000_000,
-    });
+    const seedRes = await postJson(
+      "/v1/admin/seed-balance",
+      {
+        client: client.publicKey.toBase58(),
+        free: 2_000_000,
+        locked: 0,
+        totalDeposited: 2_000_000,
+      },
+      ADMIN_HEADERS
+    );
     expect(seedRes.status).to.equal(200);
 
     const requestContext: RequestContext = {
