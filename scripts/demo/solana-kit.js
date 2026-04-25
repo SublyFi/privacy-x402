@@ -119,7 +119,8 @@ async function loadMintAuthoritySigner(rpc, mintAddress, fallbackSigner) {
 
 async function waitForSignature(rpc, signature) {
   for (let attempt = 0; attempt < CONFIRMATION_ATTEMPTS; attempt += 1) {
-    const [status] = await rpc.getSignatureStatuses([signature]).send();
+    const response = await rpc.getSignatureStatuses([signature]).send();
+    const [status] = Array.isArray(response) ? response : response.value;
     if (status?.err) {
       throw new Error(
         `transaction ${signature} failed: ${JSON.stringify(status.err)}`

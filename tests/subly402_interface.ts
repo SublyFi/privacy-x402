@@ -503,7 +503,13 @@ describe("subly402 x402-compatible interface", () => {
             }),
             {
               status: 402,
-              headers: { "content-type": "application/json" },
+              headers: {
+                "content-type": "application/json",
+                "PAYMENT-REQUIRED": Buffer.from(
+                  JSON.stringify({ accepts: [details] }),
+                  "utf8"
+                ).toString("base64"),
+              },
             }
           );
         }

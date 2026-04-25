@@ -95,10 +95,16 @@ async function readPaymentRequiredResponse(
     response.headers.get("PAYMENT-REQUIRED") ??
     response.headers.get("payment-required");
   if (header) {
-    return decodeJsonHeader<PaymentRequiredResponse>(
+    const decoded = decodeJsonHeader<PaymentRequiredResponse>(
       header,
       "PAYMENT-REQUIRED"
     );
+    try {
+      const body = (await response.clone().json()) as PaymentRequiredResponse;
+      return { ...body, ...decoded };
+    } catch {
+      return decoded;
+    }
   }
 
   return readJson<PaymentRequiredResponse>(response);
