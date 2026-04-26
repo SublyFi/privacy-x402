@@ -1,4 +1,3 @@
-export { Subly402VaultClient } from "./client";
 export {
   Subly402Client,
   Subly402Client as subly402Client,
@@ -6,7 +5,6 @@ export {
   wrapFetchWithSubly402Payment,
   wrapFetchWithSubly402Payment as wrapFetchWithPayment,
 } from "./subly402";
-export { AuditTool } from "./audit";
 export {
   computeNitroAttestationPolicyHash,
   parseSubly402UserDataEnvelope,
@@ -16,7 +14,7 @@ export {
   decodeParticipantReceiptEnvelope,
   decodeVerificationReceiptEnvelope,
 } from "./receipt";
-export type { DecryptedAuditRecord, RawAuditRecord } from "./audit";
+export { probeTlsPublicKeySha256 } from "./tls";
 export {
   computePaymentDetailsHash,
   computeRequestHash,
@@ -46,6 +44,7 @@ export type {
   Subly402AutoDepositConfig,
   Subly402AutoDepositContext,
   Subly402ClientConfig,
+  Subly402PublicKeyLike,
   Subly402Signer,
   VerifyResponse,
   WithdrawAuthResponse,

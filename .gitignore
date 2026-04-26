@@ -13,6 +13,7 @@ data/*.pid
 data/logs
 data/wal-devnet.jsonl
 data/watchtower_receipts.json
+data/*.bak-*
 infra/nitro/terraform/.terraform
 infra/nitro/terraform/*.tfstate
 infra/nitro/terraform/*.tfstate.*
@@ -25,3 +26,4 @@ infra/nitro/generated
 *.key
 sdk/dist
 middleware/dist
+provider.env

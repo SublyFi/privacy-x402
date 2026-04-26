@@ -155,7 +155,6 @@ async function main() {
     {
       providerId,
       displayName: "Devnet Smoke Provider",
-      participantPubkey: providerOwner.publicKey.toBase58(),
       settlementTokenAccount: providerTokenAccount.toBase58(),
       network,
       assetMint: state.usdcMint,

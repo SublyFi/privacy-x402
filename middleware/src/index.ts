@@ -12,16 +12,6 @@ export {
   subly402ResourceServer,
 } from "./subly402";
 export { postFacilitatorJson } from "./facilitator";
-export {
-  buildAscPaymentMessage,
-  buildAscClaimVoucherMessage,
-  submitAscCloseClaim,
-  decryptAscResult,
-  deliverAscResult,
-  encryptAscResult,
-  generateAscDeliveryArtifact,
-  submitAscDelivery,
-} from "./asc";
 export type {
   Subly402MiddlewareOptions,
   Subly402ProviderConfig,

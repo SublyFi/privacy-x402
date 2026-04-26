@@ -8,6 +8,8 @@ Express middleware that serves paid APIs through the Subly privacy-first x402 fa
 yarn add subly402-express
 ```
 
+The default import path is the x402-like Seller middleware and uses `@solana/kit` plus `@solana-program/token` for Solana address handling. Advanced ASC helpers are available from `subly402-express/asc`; that optional path requires the legacy Solana/Anchor dependencies.
+
 ## Quickstart for Sellers
 
 No provider registration or API key is required for the default seller flow. The facilitator derives the seller identity from `network + asset mint + payTo` and auto-registers that open seller the first time a valid paid request is verified. For Solana, sellers can provide a wallet owner and the middleware derives the USDC associated token account.
@@ -64,9 +66,7 @@ app.listen(3000);
 
 That is the full seller integration: install the package, point it at a deployed Subly facilitator, choose a route, price, network, and receiving wallet.
 
-Advanced sellers can still pass `payTo` directly when they want to settle to a specific token account instead of the wallet's associated token account.
-
-If a seller needs a pinned `providerId`, mTLS, API-key-authenticated provider operations, or ASC provider participant attestation, use the explicit registration flow and pass `providerApiKey` / `authMode` as before.
+Advanced sellers can still pass `payTo` directly when they want to settle to a specific token account instead of the wallet's associated token account. The normal x402-compatible path does not require pre-registration, API-key issuance, or a cloud-provider account.
 
 ## Behaviour
 

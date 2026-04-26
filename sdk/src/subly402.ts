@@ -8,8 +8,8 @@ import {
   ed25519Sign,
   sha256hex,
 } from "./crypto";
-import { probeTlsPublicKeySha256 } from "./client";
 import { verifyNitroAttestationDocument } from "./attestation";
+import { probeTlsPublicKeySha256 } from "./tls";
 import type {
   AttestationResponse,
   PaymentDetails,
@@ -198,6 +198,21 @@ function insufficientBalanceReason(
   return null;
 }
 
+function depositSyncReason(body: PaymentRequiredResponse): string | null {
+  const code = body.facilitatorError ?? body.error;
+  if (code === "deposit_sync_in_progress") {
+    return code;
+  }
+  if (body.message?.toLowerCase().includes("deposit synchronization")) {
+    return body.message;
+  }
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function decodeLocalAttestationDocument(
   attestation: AttestationResponse
 ): LocalDevAttestationDocument | null {
@@ -247,6 +262,8 @@ function assertAttestationMatchesDetails(
  *   expire while the pending request is still in flight.
  */
 const EXPIRY_SAFETY_MARGIN_MS = 60 * 1000;
+const DEPOSIT_SYNC_RETRY_ATTEMPTS = 12;
+const DEPOSIT_SYNC_RETRY_DELAY_MS = 1000;
 
 function cacheEntryStaleReason(
   cached: AttestationResponse,
@@ -425,22 +442,43 @@ export class Subly402Client {
 
     await this.depositOnDemand(details, reason, 1);
 
-    const secondPayload = await this.buildPaymentPayload(
-      url,
-      options,
-      details,
-      scheme.signer
-    );
-    const secondHeaders = new Headers(options?.headers || {});
-    secondHeaders.set(
-      "PAYMENT-SIGNATURE",
-      Buffer.from(JSON.stringify(secondPayload)).toString("base64")
-    );
+    let lastSyncResponse: Response | null = null;
+    for (let attempt = 0; attempt < DEPOSIT_SYNC_RETRY_ATTEMPTS; attempt += 1) {
+      const secondPayload = await this.buildPaymentPayload(
+        url,
+        options,
+        details,
+        scheme.signer
+      );
+      const secondHeaders = new Headers(options?.headers || {});
+      secondHeaders.set(
+        "PAYMENT-SIGNATURE",
+        Buffer.from(JSON.stringify(secondPayload)).toString("base64")
+      );
 
-    return fetchImpl(url, {
-      ...options,
-      headers: secondHeaders,
-    });
+      const retryResponse = await fetchImpl(url, {
+        ...options,
+        headers: secondHeaders,
+      });
+      if (retryResponse.status !== 402) {
+        return retryResponse;
+      }
+
+      let retryBody: PaymentRequiredResponse;
+      try {
+        retryBody = await readPaymentRequiredResponse(retryResponse.clone());
+      } catch {
+        return retryResponse;
+      }
+      const syncReason = depositSyncReason(retryBody);
+      if (!syncReason) {
+        return retryResponse;
+      }
+      lastSyncResponse = retryResponse;
+      await sleep(DEPOSIT_SYNC_RETRY_DELAY_MS);
+    }
+
+    return lastSyncResponse ?? paidResponse;
   }
 
   private findSchemeForNetwork(network: string): Subly402ExactScheme | null {

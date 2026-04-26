@@ -13,6 +13,8 @@ Privacy-first x402 client SDK for Solana. Pays paid APIs through a TEE-based vau
 yarn add subly402-sdk
 ```
 
+The default import path is the x402-like Buyer SDK and uses `@solana/kit` signers. Advanced direct-vault and audit helpers live behind `subly402-sdk/vault` and `subly402-sdk/audit`; those optional paths require the legacy Solana/Anchor dependencies.
+
 ## Quickstart for Buyers
 
 No Subly API key or account registration is required. A buyer only needs a funded Solana signer and the attestation policy for the facilitator they are willing to trust.
@@ -49,7 +51,7 @@ const client = new Subly402Client({
       },
       eifSigningCertSha256: "<hex>",
       kmsKeyArnSha256: "<hex>",
-      protocol: "a402",
+      protocol: "subly402-svm-v1",
     },
   },
 });

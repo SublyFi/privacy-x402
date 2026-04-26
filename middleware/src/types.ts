@@ -4,11 +4,11 @@ import type { Request, Response, NextFunction } from "express";
 export interface Subly402ProviderConfig {
   /** Base URL of the enclave facilitator */
   facilitatorUrl: string;
-  /** Provider's registered ID */
+  /** Seller/provider identifier. Open sellers can use the derived ID. */
   providerId: string;
   /** Provider auth mode used against the facilitator */
   authMode?: "none" | "bearer" | "api-key" | "mtls";
-  /** Provider API key for facilitator auth */
+  /** Optional advanced facilitator auth secret; not used by the default open seller flow. */
   apiKey?: string;
   /** Optional mTLS client certificate configuration */
   mtls?: {
@@ -142,7 +142,7 @@ export type Subly402Routes = Record<string, Subly402RouteConfig>;
 export interface Subly402FacilitatorClientOptions {
   /** Base URL of the Subly402 facilitator / Nitro enclave ingress. */
   url: string;
-  /** Provider API key used by the seller middleware for /verify and /settle. */
+  /** Optional advanced facilitator auth secret; omit for the default open seller flow. */
   providerApiKey?: string;
   authMode?: Subly402ProviderConfig["authMode"];
   mtls?: Subly402ProviderConfig["mtls"];

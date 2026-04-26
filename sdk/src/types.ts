@@ -1,5 +1,13 @@
-import { PublicKey } from "@solana/web3.js";
 import type { Address, MessagePartialSigner } from "@solana/kit";
+
+export type Subly402PublicKeyLike =
+  | string
+  | Uint8Array
+  | {
+      toBase58(): string;
+      toBuffer?(): Uint8Array;
+      toBytes?(): Uint8Array;
+    };
 
 /** Payment details from a 402 response */
 export interface PaymentDetails {
@@ -261,11 +269,11 @@ export interface CloseChannelResponse {
 export interface Subly402VaultClientConfig {
   /** Client wallet keypair */
   walletKeypair: {
-    publicKey: PublicKey;
+    publicKey: Subly402PublicKeyLike;
     secretKey: Uint8Array;
   };
   /** VaultConfig PDA address */
-  vaultAddress: PublicKey;
+  vaultAddress: Subly402PublicKeyLike;
   /** Enclave facilitator base URL */
   enclaveUrl: string;
   /** Solana RPC URL */

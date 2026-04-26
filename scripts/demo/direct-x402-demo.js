@@ -50,11 +50,8 @@ const DEFAULT_X402_NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const DEFAULT_X402_FACILITATOR_URL = "https://x402.org/facilitator";
 
 function buildX402Price(usdcMint, paymentAmount) {
-  if (process.env.SUBLY402_X402_PRICE) {
-    return process.env.SUBLY402_X402_PRICE;
-  }
   return {
-    asset: process.env.SUBLY402_X402_ASSET_MINT || usdcMint,
+    asset: usdcMint,
     amount: paymentAmount.toString(),
   };
 }

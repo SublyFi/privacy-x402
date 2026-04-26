@@ -1,7 +1,4 @@
 import * as anchor from "@coral-xyz/anchor";
-import { X509Certificate } from "node:crypto";
-import { isIP } from "node:net";
-import tls from "node:tls";
 import {
   createAccount,
   getAssociatedTokenAddressSync,
@@ -41,10 +38,12 @@ import {
   PaymentRequiredResponse,
   PaymentResponse,
   SettleResponse,
+  Subly402PublicKeyLike,
   Subly402VaultClientConfig,
   VerifyResponse,
   WithdrawAuthResponse,
 } from "./types";
+import { probeTlsPublicKeySha256 } from "./tls";
 
 type ErrorResponse = {
   message?: string;
@@ -110,47 +109,6 @@ async function readPaymentRequiredResponse(
   return readJson<PaymentRequiredResponse>(response);
 }
 
-export async function probeTlsPublicKeySha256(
-  urlString: string
-): Promise<string> {
-  const url = new URL(urlString);
-  if (url.protocol !== "https:") {
-    throw new Error("TLS endpoint binding requires an https:// enclaveUrl");
-  }
-
-  return new Promise((resolve, reject) => {
-    const socket = tls.connect({
-      host: url.hostname,
-      port: Number(url.port || 443),
-      servername: isIP(url.hostname) === 0 ? url.hostname : undefined,
-      rejectUnauthorized: false,
-    });
-
-    socket.once("secureConnect", () => {
-      try {
-        const certificate = socket.getPeerCertificate(true);
-        if (!certificate || !certificate.raw) {
-          throw new Error("TLS peer certificate is missing");
-        }
-        const x509 = new X509Certificate(certificate.raw);
-        const publicKeyDer = x509.publicKey.export({
-          format: "der",
-          type: "spki",
-        }) as Buffer;
-        resolve(sha256hex(publicKeyDer));
-      } catch (error) {
-        reject(error);
-      } finally {
-        socket.end();
-      }
-    });
-
-    socket.once("error", (error) => {
-      reject(error);
-    });
-  });
-}
-
 async function verifyAttestedTlsEndpointBinding(
   enclaveUrl: string,
   expectedTlsPublicKeySha256: string | undefined,
@@ -176,6 +134,22 @@ async function verifyAttestedTlsEndpointBinding(
   }
 }
 
+function toWeb3PublicKey(value: Subly402PublicKeyLike): PublicKey {
+  if (value instanceof PublicKey) {
+    return value;
+  }
+  if (typeof value === "string" || value instanceof Uint8Array) {
+    return new PublicKey(value);
+  }
+  if (typeof value.toBuffer === "function") {
+    return new PublicKey(value.toBuffer());
+  }
+  if (typeof value.toBytes === "function") {
+    return new PublicKey(value.toBytes());
+  }
+  return new PublicKey(value.toBase58());
+}
+
 /**
  * Subly402 vault client SDK — deposit, withdraw, and direct enclave fetch.
  */
@@ -190,8 +164,11 @@ export class Subly402VaultClient {
   private attestationVerifier: Subly402VaultClientConfig["attestationVerifier"];
 
   constructor(config: Subly402VaultClientConfig) {
-    this.wallet = config.walletKeypair;
-    this.vaultAddress = config.vaultAddress;
+    this.wallet = {
+      publicKey: toWeb3PublicKey(config.walletKeypair.publicKey),
+      secretKey: config.walletKeypair.secretKey,
+    };
+    this.vaultAddress = toWeb3PublicKey(config.vaultAddress);
     this.enclaveUrl = config.enclaveUrl.replace(/\/$/, "");
     this.nitroAttestation = config.nitroAttestation;
     this.attestationVerifier = config.attestationVerifier;

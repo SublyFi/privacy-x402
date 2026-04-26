@@ -3,29 +3,80 @@
   "version": "0.1.0",
   "description": "Privacy-first x402 client SDK for Solana. Pay paid APIs through a TEE-based vault so on-chain observers never see the buyer-to-provider edge.",
   "license": "ISC",
+  "author": "SublyFi",
+  "homepage": "https://github.com/SublyFi/privacy-x402#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SublyFi/privacy-x402.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/SublyFi/privacy-x402/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js"
+    },
+    "./vault": {
+      "types": "./dist/client.d.ts",
+      "require": "./dist/client.js"
+    },
+    "./audit": {
+      "types": "./dist/audit.d.ts",
+      "require": "./dist/audit.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "^0.32.1",
-    "@noble/curves": "^1.4.0",
-    "@noble/hashes": "^1.4.0",
     "@solana/kit": "^6.8.0",
-    "@solana/spl-token": "^0.4.14",
-    "@solana/web3.js": "^1.95.0",
-    "bn.js": "^5.2.1",
     "cbor": "^10.0.12",
     "tweetnacl": "^1.0.3"
   },
   "peerDependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@noble/curves": "^1.4.0",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.95.0",
+    "bn.js": "^5.2.1"
+  },
+  "peerDependenciesMeta": {
+    "@coral-xyz/anchor": {
+      "optional": true
+    },
+    "@noble/curves": {
+      "optional": true
+    },
+    "@solana/spl-token": {
+      "optional": true
+    },
+    "@solana/web3.js": {
+      "optional": true
+    },
+    "bn.js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@noble/curves": "^1.4.0",
+    "@solana/spl-token": "^0.4.14",
+    "@types/bn.js": "^5.1.6",
+    "bn.js": "^5.2.1",
     "@solana/web3.js": "^1.95.0"
   },
   "engines": {

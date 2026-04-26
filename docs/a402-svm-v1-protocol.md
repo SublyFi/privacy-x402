@@ -55,11 +55,30 @@
 
 ---
 
-## 4. Provider Registration
+## 4. Seller Identity
 
-provider は route ごとの `PAYMENT-REQUIRED` を返す前に、facilitator へ out-of-band 登録されていなければならない。
+default の seller flow では、事前の provider 登録や API key 発行は不要である。Seller middleware は route ごとの `PAYMENT-REQUIRED` を返す時に `network`, `asset.mint`, `payTo` を含める。facilitator は最初の有効な `/verify` で、この組み合わせから open seller を自動登録する。
 
-`ProviderRegistration`:
+open seller identity:
+
+```text
+providerId = "payto_" || SHA-256(
+  "SUBLY402-OPEN-PROVIDER-V1\n" ||
+  network || "\n" ||
+  assetMint || "\n" ||
+  payTo || "\n"
+)[0..32]
+```
+
+制約:
+
+- `payTo` は seller が最終受領する SPL token account
+- Solana middleware は `sellerWallet` が渡された場合、その wallet owner の USDC ATA を `payTo` として自動導出してよい
+- open seller は `network`, `assetMint`, `payTo`, `vault` に束縛される
+- `providerId` を明示しない場合、middleware / facilitator は上記の deterministic id を使う
+- 明示的な `providerId`, mTLS, bearer/API-key 認証、ASC provider participant attestation が必要な seller は advanced registration flow を使う
+
+advanced `ProviderRegistration`:
 
 ```json
 {
@@ -144,21 +163,21 @@ provider は `accepts[]` の各要素として以下を返す。
 
 必須フィールド:
 
-| Field                         | Type    | Meaning                                                |
-| ----------------------------- | ------- | ------------------------------------------------------ |
-| `scheme`                      | string  | 固定値 `subly402-svm-v1`                                   |
-| `network`                     | string  | CAIP-2 形式の Solana network id                        |
-| `amount`                      | string  | atomic units の decimal string                         |
-| `asset.mint`                  | string  | SPL token mint                                         |
-| `payTo`                       | string  | provider settlement token account                      |
-| `providerId`                  | string  | facilitator に登録済み provider id                     |
-| `facilitatorUrl`              | string  | `/verify` `/settle` `/attestation` を提供する base URL |
-| `vault.config`                | string  | VaultConfig PDA                                        |
-| `vault.signer`                | string  | Enclave signer pubkey                                  |
-| `vault.attestationPolicyHash` | string  | attestation policy hash                                |
-| `paymentDetailsId`            | string  | provider 発行の一意 id                                 |
-| `verifyWindowSec`             | integer | verify 後に `/settle` を待つ秒数                       |
-| `maxSettlementDelaySec`       | integer | provider credit が on-chain batch されるまでの最大遅延 |
+| Field                         | Type    | Meaning                                                     |
+| ----------------------------- | ------- | ----------------------------------------------------------- |
+| `scheme`                      | string  | 固定値 `subly402-svm-v1`                                    |
+| `network`                     | string  | CAIP-2 形式の Solana network id                             |
+| `amount`                      | string  | atomic units の decimal string                              |
+| `asset.mint`                  | string  | SPL token mint                                              |
+| `payTo`                       | string  | provider settlement token account                           |
+| `providerId`                  | string  | open seller の deterministic id、または登録済み provider id |
+| `facilitatorUrl`              | string  | `/verify` `/settle` `/attestation` を提供する base URL      |
+| `vault.config`                | string  | VaultConfig PDA                                             |
+| `vault.signer`                | string  | Enclave signer pubkey                                       |
+| `vault.attestationPolicyHash` | string  | attestation policy hash                                     |
+| `paymentDetailsId`            | string  | provider 発行の一意 id                                      |
+| `verifyWindowSec`             | integer | verify 後に `/settle` を待つ秒数                            |
+| `maxSettlementDelaySec`       | integer | provider credit が on-chain batch されるまでの最大遅延      |
 
 `paymentDetailsHash` は、client / provider / facilitator で共通に次式で計算する:
 
@@ -300,8 +319,9 @@ response:
 
 認証:
 
-- `Authorization: Bearer <provider-api-key>` または mTLS
-- bearer mode では `X-A402-Provider-Id` が必須
+- default open seller flow では provider API key は不要
+- advanced registered provider では `Authorization: Bearer <provider-api-key>` / API key header / mTLS を使ってよい
+- bearer mode では `x-subly402-provider-id` または `X-A402-Provider-Id` が provider identity を示す
 
 request:
 
@@ -334,14 +354,14 @@ response:
 
 `/verify` で facilitator が必ず行う検証:
 
-1. provider 認証が registration と一致する
+1. open seller identity が `paymentDetails` / payload と一致する、または provider 認証が advanced registration と一致する
 2. `paymentDetails.scheme == "subly402-svm-v1"`
 3. `paymentDetails.verifyWindowSec` が正の整数である
 4. `paymentDetailsHash` が一致する
 5. `requestHash` が `requestContext` から再計算した値と一致する
 6. `clientSig` が有効
 7. `expiresAt` が未来
-8. `providerId`, `payTo`, `assetMint`, `network`, `vault` が registration / vault config と一致する
+8. `providerId`, `payTo`, `assetMint`, `network`, `vault` が open seller identity または advanced registration / vault config と一致する
 9. client の `free_balance >= amount`
 10. `paymentId` が未使用、または同一 request への idempotent replay である
 11. vault status が `Active` である
@@ -358,7 +378,7 @@ response:
 
 認証:
 
-- `/verify` と同じ
+- `/verify` と同じ。default open seller flow では settlement request は verification に束縛された seller identity で扱う。
 
 request:
 

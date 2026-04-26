@@ -100,13 +100,12 @@ describe("subly402 x402-compatible interface", () => {
     server = undefined;
   });
 
-  it("lets sellers declare x402-like exact routes without exposing subly402 config", async () => {
+  it("lets sellers declare x402-like exact routes without provider registration", async () => {
     const sellerWallet = (await generateKeyPairSigner()).address;
     const assetMint = (await generateKeyPairSigner()).address;
     const payTo = await deriveAta(sellerWallet, assetMint);
     const facilitator = new Subly402FacilitatorClient({
       url: "http://facilitator.example",
-      providerApiKey: "provider-secret",
       vaultConfig: "vault-config",
       vaultSigner: "vault-signer",
       attestationPolicyHash: "ab".repeat(32),
@@ -130,7 +129,6 @@ describe("subly402 x402-compatible interface", () => {
                 scheme: "exact",
                 price: "$0.001",
                 network: "solana:devnet",
-                providerId: "weather-provider",
                 sellerWallet,
               },
             ],
@@ -156,7 +154,7 @@ describe("subly402 x402-compatible interface", () => {
 
     expect(details.scheme).to.equal("subly402-svm-v1");
     expect(details.amount).to.equal("1000");
-    expect(details.providerId).to.equal("weather-provider");
+    expect(details.providerId).to.match(/^payto_[0-9a-f]{32}$/);
     expect(details.payTo).to.equal(payTo);
     expect(details.facilitatorUrl).to.equal("http://facilitator.example");
     expect(details.vault.config).to.equal("vault-config");
@@ -514,6 +512,27 @@ describe("subly402 x402-compatible interface", () => {
           );
         }
 
+        if (providerRequests === 3) {
+          return new Response(
+            JSON.stringify({
+              accepts: [details],
+              error: "payment_verification_failed",
+              facilitatorError: "deposit_sync_in_progress",
+              message: "Deposit synchronization in progress",
+            }),
+            {
+              status: 402,
+              headers: {
+                "content-type": "application/json",
+                "PAYMENT-REQUIRED": Buffer.from(
+                  JSON.stringify({ accepts: [details] }),
+                  "utf8"
+                ).toString("base64"),
+              },
+            }
+          );
+        }
+
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -541,10 +560,11 @@ describe("subly402 x402-compatible interface", () => {
       );
 
       expect(response.status).to.equal(200);
-      expect(providerRequests).to.equal(3);
+      expect(providerRequests).to.equal(4);
       expect(depositCalls).to.equal(1);
-      expect(observedPaymentIds).to.have.length(2);
+      expect(observedPaymentIds).to.have.length(3);
       expect(observedPaymentIds[0]).to.not.equal(observedPaymentIds[1]);
+      expect(observedPaymentIds[1]).to.not.equal(observedPaymentIds[2]);
     } finally {
       globalThis.fetch = originalFetch;
     }
