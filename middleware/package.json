@@ -1,6 +1,6 @@
 {
   "name": "subly402-express",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Express middleware that serves paid APIs through the Subly privacy-first x402 facilitator. Drop-in replacement for x402 sellers that want their settlements hidden behind a TEE vault.",
   "license": "ISC",
   "author": "SublyFi",

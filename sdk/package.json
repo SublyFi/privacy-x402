@@ -1,6 +1,6 @@
 {
   "name": "subly402-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Privacy-first x402 client SDK for Solana. Pay paid APIs through a TEE-based vault so on-chain observers never see the buyer-to-provider edge.",
   "license": "ISC",
   "author": "SublyFi",
