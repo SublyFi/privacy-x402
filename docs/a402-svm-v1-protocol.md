@@ -533,7 +533,7 @@ facilitator は provider ごとの off-chain credit を持ち、on-chain では 
 
 Phase 1 推奨値:
 
-- `BATCH_WINDOW_SEC = 120`
+- `BATCH_WINDOW_SEC = 120`（env `SUBLY402_BATCH_WINDOW_SEC`）
 - `MAX_SETTLEMENT_DELAY_SEC = 900`
 - `MAX_SETTLEMENTS_PER_TX = 20`
 - `JITTER_SEC = 0..30`

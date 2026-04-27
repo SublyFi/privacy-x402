@@ -171,11 +171,17 @@ Defaults for the time-based anonymity window:
 | Constant                   | Default | Env override                        |
 | -------------------------- | ------- | ----------------------------------- |
 | `MIN_ANONYMITY_WINDOW_SEC` | `300`   | `SUBLY402_MIN_ANONYMITY_WINDOW_SEC` |
-| `BATCH_WINDOW_SEC`         | `120`   | —                                   |
+| `BATCH_WINDOW_SEC`         | `120`   | `SUBLY402_BATCH_WINDOW_SEC`         |
 | `MIN_BATCH_PROVIDERS`      | `2`     | `SUBLY402_MIN_BATCH_PROVIDERS`      |
 | `MAX_SETTLEMENT_DELAY_SEC` | `900`   | —                                   |
 
 Every individual settlement is held in the vault for at least `MIN_ANONYMITY_WINDOW_SEC` before it is eligible for an on-chain batch — fresh siblings in the same provider credit keep aging even when an older sibling is already being paid out. Automatic batches require at least `MIN_BATCH_PROVIDERS` distinct providers unless the liveness deadline is reached.
+
+For a public demo you can set `SUBLY402_BATCH_WINDOW_SEC=60`,
+`SUBLY402_MIN_ANONYMITY_WINDOW_SEC=60`, and
+`SUBLY402_MIN_BATCH_PROVIDERS=1` so viewers can see the payout resolve. Do not
+use that posture for production unless traffic volume supports it; low-volume
+one-minute batches are easier to correlate.
 
 ## 5. Running your own facilitator
 

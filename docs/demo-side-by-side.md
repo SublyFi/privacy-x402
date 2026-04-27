@@ -100,6 +100,18 @@ What to show:
 The public privacy defaults intentionally delay payout batching. Depending on
 the deployed facilitator settings, the payout transaction may appear minutes
 after the paid API response. That delay is the privacy feature being shown.
+For the hosted demo, use a one-minute payout posture only when you want viewers
+to see the `Vault -> Seller` movement during the session:
+
+```bash
+export SUBLY402_BATCH_WINDOW_SEC=60
+export SUBLY402_MIN_ANONYMITY_WINDOW_SEC=60
+export SUBLY402_MIN_BATCH_PROVIDERS=1
+```
+
+This is a demo tradeoff. With low volume, one-minute batches can make it easier
+to correlate who participated, so keep longer windows for public production
+deployments.
 
 ## EC2 Seller Host
 

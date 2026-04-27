@@ -29,7 +29,7 @@ use crate::handlers::AppState;
 use crate::state::{PendingWithdrawal, ReservationStatus, SettlementRecord};
 use crate::wal::WalEntry;
 
-const BATCH_WINDOW_SEC: u64 = 120;
+const DEFAULT_BATCH_WINDOW_SEC: i64 = 120;
 const MAX_SETTLEMENT_DELAY_SEC: i64 = 900;
 const MAX_SETTLEMENTS_PER_TX: usize = 20;
 /// Max audit records per atomic settle/audit transaction.
@@ -110,6 +110,9 @@ impl BatchSubmitResult {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BatchPrivacyConfig {
+    /// Automatic batch cadence in seconds. Public deployments should keep this
+    /// above the demo cadence unless traffic volume supports tighter windows.
+    pub batch_window_sec: i64,
     /// Automatic batches defer provider payouts smaller than this floor unless
     /// `MAX_SETTLEMENT_DELAY_SEC` is hit. Set to 0 to disable.
     pub auto_batch_min_provider_payout_atomic: u64,
@@ -128,6 +131,7 @@ pub struct BatchPrivacyConfig {
 impl Default for BatchPrivacyConfig {
     fn default() -> Self {
         Self {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: DEFAULT_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC,
             min_anonymity_window_sec: DEFAULT_MIN_ANONYMITY_WINDOW_SEC,
             min_batch_providers: DEFAULT_MIN_BATCH_PROVIDERS,
@@ -138,23 +142,43 @@ impl Default for BatchPrivacyConfig {
 impl BatchPrivacyConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
+        if let Some((name, value)) =
+            first_env_value(&["SUBLY402_BATCH_WINDOW_SEC", "BATCH_WINDOW_SEC"])
+        {
+            config.batch_window_sec = parse_nonnegative_i64_env(name, &value);
+        }
         if let Ok(value) = std::env::var("SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC") {
             config.auto_batch_min_provider_payout_atomic = value.parse().unwrap_or_else(|_| {
                 panic!("SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC must be a valid u64")
             });
         }
-        if let Ok(value) = std::env::var("SUBLY402_MIN_ANONYMITY_WINDOW_SEC") {
-            config.min_anonymity_window_sec =
-                parse_nonnegative_i64_env("SUBLY402_MIN_ANONYMITY_WINDOW_SEC", &value);
+        if let Some((name, value)) = first_env_value(&[
+            "SUBLY402_MIN_ANONYMITY_WINDOW_SEC",
+            "MIN_ANONYMITY_WINDOW_SEC",
+        ]) {
+            config.min_anonymity_window_sec = parse_nonnegative_i64_env(name, &value);
         }
-        if let Ok(value) = std::env::var("SUBLY402_MIN_BATCH_PROVIDERS") {
+        if let Some((name, value)) =
+            first_env_value(&["SUBLY402_MIN_BATCH_PROVIDERS", "MIN_BATCH_PROVIDERS"])
+        {
             let parsed: usize = value
                 .parse()
-                .unwrap_or_else(|_| panic!("SUBLY402_MIN_BATCH_PROVIDERS must be a valid usize"));
+                .unwrap_or_else(|_| panic!("{name} must be a valid usize"));
             config.min_batch_providers = parsed.max(1);
         }
         config
     }
+}
+
+fn first_env_value(names: &[&'static str]) -> Option<(&'static str, String)> {
+    for name in names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.is_empty() {
+                return Some((*name, value));
+            }
+        }
+    }
+    None
 }
 
 fn parse_nonnegative_i64_env(name: &str, value: &str) -> i64 {
@@ -211,6 +235,7 @@ async fn batch_settlement_loop(state: Arc<AppState>) {
         let (decision, next_deadline) = decide_batch_action(
             now,
             elapsed,
+            batch_privacy.batch_window_sec,
             provider_count,
             oldest_credit_age,
             jitter_deadline,
@@ -255,6 +280,7 @@ pub async fn fire_ready_batch_now(state: &Arc<AppState>) -> Result<BatchSubmitRe
     let (decision, _) = decide_batch_action(
         now,
         elapsed,
+        batch_privacy.batch_window_sec,
         provider_count,
         oldest_credit_age,
         None,
@@ -605,6 +631,7 @@ enum BatchLoopDecision {
 fn decide_batch_action(
     now: i64,
     elapsed: i64,
+    batch_window_sec: i64,
     provider_count: usize,
     oldest_credit_age: i64,
     jitter_deadline: Option<i64>,
@@ -615,7 +642,7 @@ fn decide_batch_action(
         return (BatchLoopDecision::Skip, None);
     }
 
-    let should_batch = elapsed >= BATCH_WINDOW_SEC as i64
+    let should_batch = elapsed >= batch_window_sec
         || provider_count >= MAX_SETTLEMENTS_PER_TX
         || oldest_credit_age >= MAX_SETTLEMENT_DELAY_SEC;
     if !should_batch {
@@ -1543,21 +1570,45 @@ mod tests {
 
     #[test]
     fn decide_batch_action_waits_for_jitter_until_deadline() {
-        let (decision, jitter_deadline) =
-            decide_batch_action(1_000, BATCH_WINDOW_SEC as i64, 2, 10, None, 17, 2);
+        let (decision, jitter_deadline) = decide_batch_action(
+            1_000,
+            DEFAULT_BATCH_WINDOW_SEC,
+            DEFAULT_BATCH_WINDOW_SEC,
+            2,
+            10,
+            None,
+            17,
+            2,
+        );
         assert_eq!(decision, BatchLoopDecision::Wait);
         assert_eq!(jitter_deadline, Some(1_017));
 
-        let (decision, jitter_deadline) =
-            decide_batch_action(1_018, BATCH_WINDOW_SEC as i64, 2, 10, Some(1_017), 3, 2);
+        let (decision, jitter_deadline) = decide_batch_action(
+            1_018,
+            DEFAULT_BATCH_WINDOW_SEC,
+            DEFAULT_BATCH_WINDOW_SEC,
+            2,
+            10,
+            Some(1_017),
+            3,
+            2,
+        );
         assert_eq!(decision, BatchLoopDecision::Fire);
         assert_eq!(jitter_deadline, None);
     }
 
     #[test]
     fn decide_batch_action_bypasses_jitter_at_max_delay() {
-        let (decision, jitter_deadline) =
-            decide_batch_action(2_000, 1, 1, MAX_SETTLEMENT_DELAY_SEC, Some(9_999), 30, 2);
+        let (decision, jitter_deadline) = decide_batch_action(
+            2_000,
+            1,
+            DEFAULT_BATCH_WINDOW_SEC,
+            1,
+            MAX_SETTLEMENT_DELAY_SEC,
+            Some(9_999),
+            30,
+            2,
+        );
         assert_eq!(decision, BatchLoopDecision::Fire);
         assert_eq!(jitter_deadline, None);
     }
@@ -1568,9 +1619,10 @@ mod tests {
         // batch as long as the time window has elapsed.
         let (decision, _) = decide_batch_action(
             1_000,
-            BATCH_WINDOW_SEC as i64,
+            DEFAULT_BATCH_WINDOW_SEC,
+            DEFAULT_BATCH_WINDOW_SEC,
             1,
-            BATCH_WINDOW_SEC as i64,
+            DEFAULT_BATCH_WINDOW_SEC,
             None,
             0,
             1,
@@ -1584,12 +1636,13 @@ mod tests {
     #[test]
     fn decide_batch_action_single_provider_skipped_with_n_gate() {
         // With min_batch_providers = 2, a single provider is deferred until
-        // MAX_SETTLEMENT_DELAY_SEC regardless of BATCH_WINDOW_SEC elapsing.
+        // MAX_SETTLEMENT_DELAY_SEC regardless of the batch window elapsing.
         let (decision, _) = decide_batch_action(
             1_000,
-            BATCH_WINDOW_SEC as i64,
+            DEFAULT_BATCH_WINDOW_SEC,
+            DEFAULT_BATCH_WINDOW_SEC,
             1,
-            BATCH_WINDOW_SEC as i64,
+            DEFAULT_BATCH_WINDOW_SEC,
             None,
             0,
             2,
@@ -1600,6 +1653,7 @@ mod tests {
     #[test]
     fn settlement_is_age_eligible_respects_window_and_liveness_ceiling() {
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 0,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1627,6 +1681,7 @@ mod tests {
     #[test]
     fn provider_payout_floor_respects_eligible_amount_only() {
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 1_000_000,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1656,6 +1711,7 @@ mod tests {
         // (t=115, age 5s) at batch_timestamp=120. With a 60s anonymity window,
         // only the aged credit should go on-chain; the fresh one keeps aging.
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 0,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1677,6 +1733,7 @@ mod tests {
         // A provider whose every credit is younger than the anonymity window
         // must defer the whole payout rather than leaking the fresh settlement.
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 0,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1696,6 +1753,7 @@ mod tests {
         // Aged credit is only $0.30 — below the $1.00 payout floor. Fresh
         // credit would push the raw total above the floor but must not count.
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 1_000_000,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1716,6 +1774,7 @@ mod tests {
         // payout-floor gate is bypassed so the provider always gets paid.
         // Fresh sibling credits are still excluded by the anonymity window.
         let config = BatchPrivacyConfig {
+            batch_window_sec: DEFAULT_BATCH_WINDOW_SEC,
             auto_batch_min_provider_payout_atomic: 1_000_000,
             min_anonymity_window_sec: 60,
             min_batch_providers: 1,
@@ -1784,6 +1843,7 @@ mod tests {
     #[test]
     fn batch_privacy_config_defaults_match_public_launch_posture() {
         let config = BatchPrivacyConfig::default();
+        assert_eq!(config.batch_window_sec, DEFAULT_BATCH_WINDOW_SEC);
         assert_eq!(config.min_anonymity_window_sec, 300);
         assert_eq!(config.min_batch_providers, 2);
         assert_eq!(

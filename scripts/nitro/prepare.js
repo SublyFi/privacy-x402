@@ -43,6 +43,16 @@ function resolveAdminAuthTokenSha256() {
   return undefined;
 }
 
+function firstEnvValue(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined && value !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 async function main() {
   loadDefaultEnvFiles();
   const args = parseArgs(process.argv.slice(2));
@@ -179,10 +189,16 @@ async function main() {
     SUBLY402_ENABLE_PROVIDER_REGISTRATION_API: enableProviderRegistrationApi,
     SUBLY402_ENABLE_ADMIN_API: enableAdminApi,
     SUBLY402_ADMIN_AUTH_TOKEN_SHA256: adminAuthTokenSha256,
+    SUBLY402_BATCH_WINDOW_SEC:
+      firstEnvValue("SUBLY402_BATCH_WINDOW_SEC", "BATCH_WINDOW_SEC") || "120",
     SUBLY402_MIN_BATCH_PROVIDERS:
-      process.env.SUBLY402_MIN_BATCH_PROVIDERS || "2",
+      firstEnvValue("SUBLY402_MIN_BATCH_PROVIDERS", "MIN_BATCH_PROVIDERS") ||
+      "2",
     SUBLY402_MIN_ANONYMITY_WINDOW_SEC:
-      process.env.SUBLY402_MIN_ANONYMITY_WINDOW_SEC || "300",
+      firstEnvValue(
+        "SUBLY402_MIN_ANONYMITY_WINDOW_SEC",
+        "MIN_ANONYMITY_WINDOW_SEC"
+      ) || "300",
     SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC:
       process.env.SUBLY402_AUTO_BATCH_MIN_PROVIDER_PAYOUT_ATOMIC || "1000000",
     SUBLY402_ALLOW_ADMIN_PRIVACY_BYPASS_BATCH:
