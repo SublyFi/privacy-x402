@@ -1042,6 +1042,7 @@ const exportedKey = auditor.exportProviderKey(providerAddress);
 - ClientDeposit PDAに暗号化残高保存（`[u8; 32]` ciphertext）
 - TEE + Arcium のハイブリッド: TEEで状態管理、Arciumでオンチェーン暗号化検証
 - TEEなしでもArcium単体で残高秘匿が可能（TEEへの依存度低減）
+- 詳細設計: [`docs/phase5-arcium-design.md`](./phase5-arcium-design.md)
 
 ### Phase 6 (Future) — Deposit Privacy
 

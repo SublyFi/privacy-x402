@@ -91,4 +91,37 @@ pub enum VaultError {
 
     #[msg("Invalid ASC claim voucher")]
     InvalidAscClaimVoucher,
+
+    #[msg("Invalid Arcium configuration")]
+    InvalidArciumConfig,
+
+    #[msg("Invalid Arcium status")]
+    InvalidArciumStatus,
+
+    #[msg("Arcium state is pending another computation")]
+    ArciumStatePending,
+
+    #[msg("Invalid Arcium callback")]
+    InvalidArciumCallback,
+
+    #[msg("Arcium pending timeout has not elapsed")]
+    ArciumPendingTimeoutNotElapsed,
+
+    #[msg("The Arcium computation was aborted")]
+    AbortedComputation,
+
+    #[msg("Arcium cluster account is not set")]
+    ClusterNotSet,
+
+    #[msg("Invalid deposit credit")]
+    InvalidDepositCredit,
+
+    #[msg("Invalid budget grant")]
+    InvalidBudgetGrant,
+
+    #[msg("Invalid yield epoch")]
+    InvalidYieldEpoch,
+
+    #[msg("Unauthorized")]
+    Unauthorized,
 }

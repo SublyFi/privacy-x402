@@ -14,18 +14,22 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "arcium-anchor/idl-build"]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
 
 
 [dependencies]
-anchor-lang = "0.32.1"
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.32.1", features = ["token"] }
+arcium-client = { default-features = false, version = "=0.9.7" }
+arcium-macros = "=0.9.7"
+arcium-anchor = "=0.9.7"
 solana-sdk-ids = "2.2.1"
 sha2 = "0.10"
 hex = "0.4"
+unicode-segmentation = { version = "=1.12.0" }
 
 
 [lints.rust]

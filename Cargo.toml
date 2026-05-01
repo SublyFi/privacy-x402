@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "programs/*",
+    "encrypted-ixs",
     "enclave",
     "parent",
     "watchtower",

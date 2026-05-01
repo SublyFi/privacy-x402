@@ -1,28 +1,36 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod announce_migration;
+pub mod arcium_mirror;
 pub mod asc_close_claim;
 pub mod deposit;
+pub mod deposit_with_credit;
 pub mod force_settle_challenge;
 pub mod force_settle_finalize;
 pub mod force_settle_init;
+pub mod initialize_arcium_config;
 pub mod initialize_vault;
 pub mod pause_vault;
 pub mod record_audit;
+pub mod record_yield_epoch;
 pub mod retire_vault;
 pub mod rotate_auditor;
 pub mod settle_vault;
 pub mod withdraw;
 
 pub use announce_migration::*;
+pub use arcium_mirror::*;
 pub use asc_close_claim::*;
 pub use deposit::*;
+pub use deposit_with_credit::*;
 pub use force_settle_challenge::*;
 pub use force_settle_finalize::*;
 pub use force_settle_init::*;
+pub use initialize_arcium_config::*;
 pub use initialize_vault::*;
 pub use pause_vault::*;
 pub use record_audit::*;
+pub use record_yield_epoch::*;
 pub use retire_vault::*;
 pub use rotate_auditor::*;
 pub use settle_vault::*;
