@@ -18,15 +18,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
     "./vault": {
       "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
     "./audit": {
       "types": "./dist/audit.d.ts",
+      "import": "./dist/audit.js",
       "require": "./dist/audit.js"
+    },
+    "./arcium": {
+      "types": "./dist/arcium.d.ts",
+      "import": "./dist/arcium.js",
+      "require": "./dist/arcium.js"
     },
     "./package.json": "./package.json"
   },
@@ -44,10 +52,12 @@
   },
   "dependencies": {
     "@solana/kit": "^6.8.0",
+    "bs58": "^4.0.1",
     "cbor": "^10.0.12",
     "tweetnacl": "^1.0.3"
   },
   "peerDependencies": {
+    "@arcium-hq/client": "0.9.7",
     "@coral-xyz/anchor": "^0.32.1",
     "@noble/curves": "^1.4.0",
     "@solana/spl-token": "^0.4.14",
@@ -55,6 +65,9 @@
     "bn.js": "^5.2.1"
   },
   "peerDependenciesMeta": {
+    "@arcium-hq/client": {
+      "optional": true
+    },
     "@coral-xyz/anchor": {
       "optional": true
     },
@@ -72,15 +85,18 @@
     }
   },
   "devDependencies": {
+    "@arcium-hq/client": "0.9.7",
     "@coral-xyz/anchor": "^0.32.1",
     "@noble/curves": "^1.4.0",
     "@solana/spl-token": "^0.4.14",
     "@types/bn.js": "^5.1.6",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.3",
     "bn.js": "^5.2.1",
     "@solana/web3.js": "^1.95.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18.0"
   },
   "keywords": [
     "x402",

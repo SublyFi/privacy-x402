@@ -35,7 +35,7 @@ use kms_bootstrap::bootstrap_materials;
 use outbound::OutboundTransport;
 use snapshot::SnapshotManager;
 use snapshot_store::SnapshotStoreClient;
-use state::{SolanaRuntimeConfig, VaultState};
+use state::{ArciumAuthorityMode, SolanaRuntimeConfig, VaultState};
 use wal::Wal;
 
 #[tokio::main]
@@ -79,6 +79,14 @@ async fn main() {
         attestation_policy_hash,
         solana.clone(),
     ));
+    let arcium_mode =
+        ArciumAuthorityMode::from_env_value(env::var("SUBLY402_ARCIUM_MODE").ok().as_deref())
+            .expect("SUBLY402_ARCIUM_MODE must be disabled, mirror, or enforced");
+    vault_state.set_arcium_mode(arcium_mode);
+    info!(
+        arcium_mode = arcium_mode.as_str(),
+        "Configured Arcium authority mode"
+    );
 
     let wal = if let Some(snapshot_store) = snapshot_store.clone() {
         let wal_prefix =
@@ -214,6 +222,18 @@ async fn main() {
     if enable_admin_api {
         let admin_routes = Router::new()
             .route("/v1/admin/seed-balance", post(handlers::post_seed_balance))
+            .route(
+                "/v1/admin/arcium/mode",
+                post(handlers::post_set_arcium_mode),
+            )
+            .route(
+                "/v1/admin/arcium/budget-grant",
+                post(handlers::post_load_arcium_budget_grant),
+            )
+            .route(
+                "/v1/admin/arcium/withdrawal-grant",
+                post(handlers::post_load_arcium_withdrawal_grant),
+            )
             .route("/v1/admin/fire-batch", post(handlers::post_fire_batch))
             .route_layer(middleware::from_fn(admin_auth::require_admin_auth));
         app = app.merge(admin_routes);

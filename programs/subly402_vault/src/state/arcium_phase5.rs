@@ -33,6 +33,18 @@ impl ArciumConfig {
     pub fn writes_enabled(&self) -> bool {
         self.status == ARCIUM_STATUS_MIRROR || self.status == ARCIUM_STATUS_ENFORCED
     }
+
+    pub fn status_requires_deployment(status: u8) -> bool {
+        status == ARCIUM_STATUS_MIRROR || status == ARCIUM_STATUS_ENFORCED
+    }
+
+    pub fn deployment_configured(&self) -> bool {
+        self.arcium_program_id != Pubkey::default()
+            && self.mxe_account != Pubkey::default()
+            && self.cluster_account != Pubkey::default()
+            && self.mempool_account != Pubkey::default()
+            && self.tee_x25519_pubkey != [0u8; 32]
+    }
 }
 
 #[account]
@@ -172,4 +184,65 @@ pub struct RecoveryClaim {
 
 impl RecoveryClaim {
     pub const LEN: usize = 8 + 1 + 32 + 32 + 32 + 32 + 8 + 1 + 8 + 8 + 8 + 8 + 8 + 8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured_arcium_config() -> ArciumConfig {
+        ArciumConfig {
+            bump: 255,
+            vault_config: Pubkey::new_unique(),
+            status: 0,
+            arcium_program_id: Pubkey::new_unique(),
+            mxe_account: Pubkey::new_unique(),
+            cluster_account: Pubkey::new_unique(),
+            mempool_account: Pubkey::new_unique(),
+            comp_def_version: 0,
+            tee_x25519_pubkey: [7u8; 32],
+            attestation_policy_hash: [3u8; 32],
+            strategy_controller: Pubkey::new_unique(),
+            last_recorded_yield_epoch: 0,
+            current_yield_index_q64: 0,
+            min_liquid_reserve_bps: 0,
+            max_strategy_allocation_bps: 0,
+            settlement_buffer_amount: 0,
+            strategy_withdrawal_sla_sec: 0,
+        }
+    }
+
+    #[test]
+    fn deployment_configured_requires_arcium_accounts_and_tee_key() {
+        let config = configured_arcium_config();
+        assert!(config.deployment_configured());
+
+        let mut missing_program = configured_arcium_config();
+        missing_program.arcium_program_id = Pubkey::default();
+        assert!(!missing_program.deployment_configured());
+
+        let mut missing_mxe = configured_arcium_config();
+        missing_mxe.mxe_account = Pubkey::default();
+        assert!(!missing_mxe.deployment_configured());
+
+        let mut missing_cluster = configured_arcium_config();
+        missing_cluster.cluster_account = Pubkey::default();
+        assert!(!missing_cluster.deployment_configured());
+
+        let mut missing_mempool = configured_arcium_config();
+        missing_mempool.mempool_account = Pubkey::default();
+        assert!(!missing_mempool.deployment_configured());
+
+        let mut missing_tee_key = configured_arcium_config();
+        missing_tee_key.tee_x25519_pubkey = [0u8; 32];
+        assert!(!missing_tee_key.deployment_configured());
+    }
+
+    #[test]
+    fn status_requires_deployment_only_for_write_modes() {
+        assert!(!ArciumConfig::status_requires_deployment(0));
+        assert!(ArciumConfig::status_requires_deployment(1));
+        assert!(ArciumConfig::status_requires_deployment(2));
+        assert!(!ArciumConfig::status_requires_deployment(3));
+    }
 }

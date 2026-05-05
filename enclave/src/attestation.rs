@@ -25,6 +25,7 @@ pub struct LocalDevAttestationDocument {
     pub vault_config: String,
     pub vault_signer: String,
     pub attestation_policy_hash: String,
+    pub arcium_mode: Option<String>,
     pub recipient_public_key_pem: String,
     pub recipient_public_key_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,6 +46,8 @@ struct Subly402NitroUserDataEnvelope<'a> {
     vault_config: String,
     vault_signer: String,
     attestation_policy_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arcium_mode: Option<&'a str>,
     snapshot_seqno: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tls_public_key_sha256: Option<&'a str>,
@@ -90,6 +93,7 @@ pub fn build_local_dev_attestation(
         vault_config: vault_config.to_string(),
         vault_signer: vault_signer.to_string(),
         attestation_policy_hash: hex::encode(attestation_policy_hash),
+        arcium_mode: None,
         recipient_public_key_pem: recipient_public_key_pem.to_string(),
         recipient_public_key_sha256: hex::encode(public_key_sha256),
         tls_public_key_pem: None,
@@ -208,6 +212,7 @@ impl AttestationProvider {
         vault_config: Pubkey,
         vault_signer: Pubkey,
         attestation_policy_hash: [u8; 32],
+        arcium_mode: Option<&str>,
         snapshot_seqno: u64,
     ) -> Result<RuntimeAttestation, String> {
         match &self.mode {
@@ -218,6 +223,7 @@ impl AttestationProvider {
                     vault_config,
                     vault_signer,
                     attestation_policy_hash,
+                    arcium_mode,
                     snapshot_seqno,
                     recipient_public_key_pem,
                     self.tls_binding.as_ref(),
@@ -236,6 +242,7 @@ impl AttestationProvider {
                     vault_config,
                     vault_signer,
                     attestation_policy_hash,
+                    arcium_mode,
                     snapshot_seqno,
                     self.tls_binding.as_ref(),
                     self.manifest_hash.as_deref(),
@@ -278,6 +285,7 @@ fn build_runtime_local_dev_attestation(
     vault_config: Pubkey,
     vault_signer: Pubkey,
     attestation_policy_hash: [u8; 32],
+    arcium_mode: Option<&str>,
     snapshot_seqno: u64,
     recipient_public_key_pem: &str,
     tls_binding: Option<&TlsBindingInfo>,
@@ -292,6 +300,7 @@ fn build_runtime_local_dev_attestation(
         vault_config: vault_config.to_string(),
         vault_signer: vault_signer.to_string(),
         attestation_policy_hash: hex::encode(attestation_policy_hash),
+        arcium_mode: arcium_mode.map(str::to_string),
         recipient_public_key_pem: recipient_public_key_pem.to_string(),
         recipient_public_key_sha256: hex::encode(public_key_sha256),
         tls_public_key_pem: tls_binding.map(|binding| binding.public_key_spki_pem.clone()),
@@ -311,6 +320,7 @@ fn build_subly402_user_data(
     vault_config: Pubkey,
     vault_signer: Pubkey,
     attestation_policy_hash: [u8; 32],
+    arcium_mode: Option<&str>,
     snapshot_seqno: u64,
     tls_binding: Option<&TlsBindingInfo>,
     manifest_hash: Option<&str>,
@@ -320,6 +330,7 @@ fn build_subly402_user_data(
         vault_config: vault_config.to_string(),
         vault_signer: vault_signer.to_string(),
         attestation_policy_hash: hex::encode(attestation_policy_hash),
+        arcium_mode,
         snapshot_seqno,
         tls_public_key_sha256: tls_binding.map(|binding| binding.public_key_sha256.as_str()),
         manifest_hash,
@@ -332,6 +343,7 @@ fn build_dynamic_nitro_attestation(
     vault_config: Pubkey,
     vault_signer: Pubkey,
     attestation_policy_hash: [u8; 32],
+    arcium_mode: Option<&str>,
     snapshot_seqno: u64,
     tls_binding: Option<&TlsBindingInfo>,
     manifest_hash: Option<&str>,
@@ -340,6 +352,7 @@ fn build_dynamic_nitro_attestation(
         vault_config,
         vault_signer,
         attestation_policy_hash,
+        arcium_mode,
         snapshot_seqno,
         tls_binding,
         manifest_hash,
@@ -355,6 +368,7 @@ fn build_dynamic_nitro_attestation(
     _vault_config: Pubkey,
     _vault_signer: Pubkey,
     _attestation_policy_hash: [u8; 32],
+    _arcium_mode: Option<&str>,
     _snapshot_seqno: u64,
     _tls_binding: Option<&TlsBindingInfo>,
     _manifest_hash: Option<&str>,
@@ -576,7 +590,13 @@ mod tests {
         };
 
         let attestation = provider
-            .runtime_attestation(Pubkey::new_unique(), Pubkey::new_unique(), [0x33; 32], 7)
+            .runtime_attestation(
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                [0x33; 32],
+                Some("mirror"),
+                7,
+            )
             .unwrap();
 
         let decoded = BASE64.decode(attestation.document_b64).unwrap();

@@ -3,7 +3,7 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -146,6 +146,79 @@ pub struct Reservation {
     pub expires_at: i64,
     pub settlement_id: Option<String>,
     pub settled_at: Option<i64>,
+    #[serde(default)]
+    pub arcium_grant_id: Option<String>,
+}
+
+/// Runtime authority mode for client spend accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArciumAuthorityMode {
+    Disabled = 0,
+    Mirror = 1,
+    Enforced = 2,
+}
+
+impl ArciumAuthorityMode {
+    pub fn from_env_value(value: Option<&str>) -> Result<Self, EnclaveError> {
+        match value
+            .unwrap_or("disabled")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "disabled" | "0" => Ok(Self::Disabled),
+            "mirror" | "1" => Ok(Self::Mirror),
+            "enforced" | "2" => Ok(Self::Enforced),
+            other => Err(EnclaveError::Internal(format!(
+                "Invalid SUBLY402_ARCIUM_MODE {other}"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Mirror => "mirror",
+            Self::Enforced => "enforced",
+        }
+    }
+}
+
+impl TryFrom<u8> for ArciumAuthorityMode {
+    type Error = EnclaveError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Disabled),
+            1 => Ok(Self::Mirror),
+            2 => Ok(Self::Enforced),
+            _ => Err(EnclaveError::Internal(format!(
+                "Invalid Arcium authority mode {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArciumBudgetGrant {
+    pub grant_id: String,
+    pub client: Pubkey,
+    pub budget_id: u64,
+    pub request_nonce: u64,
+    pub remaining: u64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArciumWithdrawalGrant {
+    pub grant_id: String,
+    pub client: Pubkey,
+    pub withdrawal_id: u64,
+    pub recipient_ata: Pubkey,
+    pub amount: u64,
+    pub expires_at: i64,
+    #[serde(default)]
+    pub consumed: bool,
 }
 
 /// Provider credit (accumulated off-chain settlements awaiting batch)
@@ -167,6 +240,8 @@ pub struct PendingWithdrawal {
     pub withdraw_nonce: u64,
     pub issued_at: i64,
     pub expires_at: i64,
+    #[serde(default)]
+    pub arcium_grant_id: Option<String>,
 }
 
 /// Solana RPC + account configuration required for on-chain operations.
@@ -209,6 +284,9 @@ pub struct VaultState {
     /// Batch confirmation lookup keyed by settlement_id
     pub settlement_batches: DashMap<String, SettlementBatchInfo>,
     pub pending_withdrawals: DashMap<u64, PendingWithdrawal>,
+    pub arcium_authority_mode: AtomicU8,
+    pub arcium_budget_grants: DashMap<String, ArciumBudgetGrant>,
+    pub arcium_withdrawal_grants: DashMap<String, ArciumWithdrawalGrant>,
     /// Active Service Channels (Phase 3 ASC)
     pub active_channels: DashMap<ChannelId, ChannelState>,
     pub receipt_nonce: AtomicU64,
@@ -264,6 +342,9 @@ impl VaultState {
             settlement_history: DashMap::new(),
             settlement_batches: DashMap::new(),
             pending_withdrawals: DashMap::new(),
+            arcium_authority_mode: AtomicU8::new(ArciumAuthorityMode::Disabled as u8),
+            arcium_budget_grants: DashMap::new(),
+            arcium_withdrawal_grants: DashMap::new(),
             active_channels: DashMap::new(),
             receipt_nonce: AtomicU64::new(1),
             withdraw_nonce: AtomicU64::new(1),
@@ -289,6 +370,198 @@ impl VaultState {
 
     pub fn next_withdraw_nonce(&self) -> u64 {
         self.withdraw_nonce.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn arcium_mode(&self) -> ArciumAuthorityMode {
+        ArciumAuthorityMode::try_from(self.arcium_authority_mode.load(Ordering::SeqCst))
+            .unwrap_or(ArciumAuthorityMode::Disabled)
+    }
+
+    pub fn set_arcium_mode(&self, mode: ArciumAuthorityMode) {
+        self.arcium_authority_mode
+            .store(mode as u8, Ordering::SeqCst);
+    }
+
+    pub fn arcium_enforced(&self) -> bool {
+        self.arcium_mode() == ArciumAuthorityMode::Enforced
+    }
+
+    pub fn validate_arcium_budget_grant_reload(
+        &self,
+        grant: &ArciumBudgetGrant,
+    ) -> Result<(), EnclaveError> {
+        if let Some(existing) = self.arcium_budget_grants.get(&grant.grant_id) {
+            if existing.client != grant.client
+                || existing.budget_id != grant.budget_id
+                || existing.request_nonce != grant.request_nonce
+                || existing.expires_at != grant.expires_at
+            {
+                return Err(EnclaveError::Internal(
+                    "Conflicting Arcium budget grant reload".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_arcium_budget_grant(&self, grant: ArciumBudgetGrant) -> Result<u64, EnclaveError> {
+        self.validate_arcium_budget_grant_reload(&grant)?;
+        if let Some(mut existing) = self.arcium_budget_grants.get_mut(&grant.grant_id) {
+            if grant.remaining < existing.remaining {
+                existing.remaining = grant.remaining;
+            }
+            return Ok(existing.remaining);
+        }
+
+        let remaining = grant.remaining;
+        self.arcium_budget_grants
+            .insert(grant.grant_id.clone(), grant);
+        Ok(remaining)
+    }
+
+    pub fn reserve_arcium_budget(
+        &self,
+        client: &Pubkey,
+        amount: u64,
+        now: i64,
+    ) -> Result<String, EnclaveError> {
+        let mut selected = self
+            .arcium_budget_grants
+            .iter_mut()
+            .filter(|grant| grant.client == *client)
+            .filter(|grant| grant.expires_at > now)
+            .filter(|grant| grant.remaining >= amount)
+            .min_by_key(|grant| grant.expires_at)
+            .ok_or(EnclaveError::InsufficientArciumBudget)?;
+        selected.remaining = selected
+            .remaining
+            .checked_sub(amount)
+            .ok_or_else(|| EnclaveError::Internal("Arcium grant underflow".into()))?;
+        Ok(selected.grant_id.clone())
+    }
+
+    pub fn reserve_arcium_budget_from_grant(
+        &self,
+        grant_id: &str,
+        client: &Pubkey,
+        amount: u64,
+        now: i64,
+    ) -> Result<(), EnclaveError> {
+        let mut grant = self
+            .arcium_budget_grants
+            .get_mut(grant_id)
+            .ok_or(EnclaveError::InsufficientArciumBudget)?;
+        if grant.client != *client || grant.expires_at <= now || grant.remaining < amount {
+            return Err(EnclaveError::InsufficientArciumBudget);
+        }
+        grant.remaining = grant
+            .remaining
+            .checked_sub(amount)
+            .ok_or_else(|| EnclaveError::Internal("Arcium grant underflow".into()))?;
+        Ok(())
+    }
+
+    pub fn release_arcium_budget(&self, grant_id: &str, amount: u64) -> Result<(), EnclaveError> {
+        let mut grant = self
+            .arcium_budget_grants
+            .get_mut(grant_id)
+            .ok_or(EnclaveError::InsufficientArciumBudget)?;
+        grant.remaining = grant
+            .remaining
+            .checked_add(amount)
+            .ok_or_else(|| EnclaveError::Internal("Arcium grant overflow".into()))?;
+        Ok(())
+    }
+
+    pub fn validate_arcium_withdrawal_grant_reload(
+        &self,
+        grant: &ArciumWithdrawalGrant,
+    ) -> Result<(), EnclaveError> {
+        if let Some(existing) = self.arcium_withdrawal_grants.get(&grant.grant_id) {
+            if existing.client != grant.client
+                || existing.withdrawal_id != grant.withdrawal_id
+                || existing.recipient_ata != grant.recipient_ata
+                || existing.amount != grant.amount
+                || existing.expires_at != grant.expires_at
+            {
+                return Err(EnclaveError::Internal(
+                    "Conflicting Arcium withdrawal grant reload".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_arcium_withdrawal_grant(
+        &self,
+        grant: ArciumWithdrawalGrant,
+    ) -> Result<bool, EnclaveError> {
+        self.validate_arcium_withdrawal_grant_reload(&grant)?;
+        if let Some(mut existing) = self.arcium_withdrawal_grants.get_mut(&grant.grant_id) {
+            existing.consumed |= grant.consumed;
+            return Ok(existing.consumed);
+        }
+
+        let consumed = grant.consumed;
+        self.arcium_withdrawal_grants
+            .insert(grant.grant_id.clone(), grant);
+        Ok(consumed)
+    }
+
+    pub fn select_arcium_withdrawal_grant(
+        &self,
+        client: &Pubkey,
+        recipient_ata: &Pubkey,
+        amount: u64,
+        now: i64,
+    ) -> Result<(String, i64), EnclaveError> {
+        self.arcium_withdrawal_grants
+            .iter()
+            .filter(|grant| grant.client == *client)
+            .filter(|grant| grant.recipient_ata == *recipient_ata)
+            .filter(|grant| grant.amount == amount)
+            .filter(|grant| !grant.consumed)
+            .filter(|grant| grant.expires_at > now)
+            .min_by_key(|grant| (grant.expires_at, grant.withdrawal_id))
+            .map(|grant| (grant.grant_id.clone(), grant.expires_at))
+            .ok_or(EnclaveError::InsufficientArciumWithdrawalGrant)
+    }
+
+    pub fn authorize_arcium_withdrawal_from_grant(
+        &self,
+        grant_id: &str,
+        mut withdrawal: PendingWithdrawal,
+        now: i64,
+    ) -> Result<(), EnclaveError> {
+        let mut grant = self
+            .arcium_withdrawal_grants
+            .get_mut(grant_id)
+            .ok_or(EnclaveError::InsufficientArciumWithdrawalGrant)?;
+        if grant.consumed
+            || grant.client != withdrawal.client
+            || grant.recipient_ata != withdrawal.recipient_ata
+            || grant.amount != withdrawal.amount
+            || grant.expires_at <= now
+            || grant.expires_at < withdrawal.expires_at
+        {
+            return Err(EnclaveError::InsufficientArciumWithdrawalGrant);
+        }
+        grant.consumed = true;
+        drop(grant);
+
+        withdrawal.arcium_grant_id = Some(grant_id.to_string());
+        self.pending_withdrawals
+            .insert(withdrawal.withdraw_nonce, withdrawal);
+        Ok(())
+    }
+
+    pub fn release_arcium_withdrawal_grant(&self, grant_id: &str) -> Result<(), EnclaveError> {
+        let mut grant = self
+            .arcium_withdrawal_grants
+            .get_mut(grant_id)
+            .ok_or(EnclaveError::InsufficientArciumWithdrawalGrant)?;
+        grant.consumed = false;
+        Ok(())
     }
 
     /// Apply a deposit (called when on-chain deposit is observed)
@@ -407,6 +680,10 @@ impl VaultState {
             .pending_withdrawals
             .remove(&withdraw_nonce)
             .ok_or(EnclaveError::ReservationNotFound)?;
+        if let Some(grant_id) = withdrawal.arcium_grant_id.as_deref() {
+            self.release_arcium_withdrawal_grant(grant_id)?;
+            return Ok(withdrawal);
+        }
         let mut balance = self
             .client_balances
             .get_mut(&withdrawal.client)
@@ -421,6 +698,9 @@ impl VaultState {
             .pending_withdrawals
             .remove(&withdraw_nonce)
             .ok_or(EnclaveError::ReservationNotFound)?;
+        if withdrawal.arcium_grant_id.is_some() {
+            return Ok(withdrawal);
+        }
         let mut balance = self
             .client_balances
             .get_mut(&withdrawal.client)
@@ -437,6 +717,11 @@ impl VaultState {
         &self,
         withdrawal: PendingWithdrawal,
     ) -> Result<(), EnclaveError> {
+        if withdrawal.arcium_grant_id.is_some() {
+            self.pending_withdrawals
+                .insert(withdrawal.withdraw_nonce, withdrawal);
+            return Ok(());
+        }
         let mut balance = self
             .client_balances
             .get_mut(&withdrawal.client)
@@ -487,6 +772,57 @@ impl VaultState {
 
         credit.credited_amount += amount;
         credit.settlement_ids.push(settlement_id.to_string());
+
+        Ok(())
+    }
+
+    pub fn credit_provider(
+        &self,
+        amount: u64,
+        provider_id: &str,
+        settlement_id: &str,
+        now: i64,
+    ) -> Result<(), EnclaveError> {
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or(EnclaveError::ProviderNotFound)?;
+
+        let mut credit = self
+            .provider_credits
+            .entry(provider_id.to_string())
+            .or_insert_with(|| ProviderCredit {
+                provider_id: provider_id.to_string(),
+                settlement_token_account: provider.settlement_token_account,
+                credited_amount: 0,
+                oldest_credit_at: now,
+                settlement_ids: Vec::new(),
+            });
+
+        credit.credited_amount += amount;
+        credit.settlement_ids.push(settlement_id.to_string());
+
+        Ok(())
+    }
+
+    pub fn rollback_credit_provider(
+        &self,
+        amount: u64,
+        provider_id: &str,
+        settlement_id: &str,
+    ) -> Result<(), EnclaveError> {
+        let remove_credit = {
+            let mut credit = self
+                .provider_credits
+                .get_mut(provider_id)
+                .ok_or(EnclaveError::ProviderNotFound)?;
+            credit.credited_amount = credit.credited_amount.saturating_sub(amount);
+            credit.settlement_ids.retain(|value| value != settlement_id);
+            credit.credited_amount == 0 || credit.settlement_ids.is_empty()
+        };
+        if remove_credit {
+            self.provider_credits.remove(provider_id);
+        }
 
         Ok(())
     }

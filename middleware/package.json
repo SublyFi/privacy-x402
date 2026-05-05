@@ -18,10 +18,12 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
     "./asc": {
       "types": "./dist/asc.d.ts",
+      "import": "./dist/asc.js",
       "require": "./dist/asc.js"
     },
     "./package.json": "./package.json"

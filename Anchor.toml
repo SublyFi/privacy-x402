@@ -18,5 +18,11 @@ url = "https://api.apr.dev"
 cluster = "devnet"
 wallet = "~/.config/solana/unruggable/unruggable.json"
 
+[test]
+startup_wait = 300000
+
+[test.validator]
+bind_address = "127.0.0.1"
+
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/subly402_vault.ts\""

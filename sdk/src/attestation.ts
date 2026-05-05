@@ -360,6 +360,13 @@ function verifySubly402UserDataBinding(
       "Subly402 user_data attestationPolicyHash does not match attestation response"
     );
   }
+  if (
+    attestation.arciumMode !== undefined &&
+    parsed.arciumMode !== undefined &&
+    parsed.arciumMode !== attestation.arciumMode
+  ) {
+    throw new Error("Subly402 user_data arciumMode does not match attestation response");
+  }
   if (expectedVaultSigner && parsed.vaultSigner !== expectedVaultSigner) {
     throw new Error(
       "Subly402 user_data vaultSigner does not match the expected vault signer"
@@ -414,6 +421,8 @@ export function parseSubly402UserDataEnvelope(
       typeof parsed.vaultConfig !== "string" ||
       typeof parsed.vaultSigner !== "string" ||
       typeof parsed.attestationPolicyHash !== "string" ||
+      (parsed.arciumMode !== undefined &&
+        typeof parsed.arciumMode !== "string") ||
       typeof parsed.snapshotSeqno !== "number" ||
       (parsed.tlsPublicKeySha256 !== undefined &&
         typeof parsed.tlsPublicKeySha256 !== "string") ||

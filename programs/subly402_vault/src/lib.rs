@@ -9,7 +9,10 @@ pub mod error;
 pub mod instructions;
 pub mod state;
 
-use constants::{BUDGET_REQUEST_SCALARS, RECONCILE_REPORT_SCALARS};
+use constants::{
+    BUDGET_REQUEST_SCALARS, RECONCILE_REPORT_SCALARS, WITHDRAWAL_REPORT_SCALARS,
+    WITHDRAWAL_REQUEST_SCALARS,
+};
 use instructions::*;
 
 declare_id!("3iusaL6ys79DsbpweDwGhHvtjdnhAhtpyczPtMbu5Mbe");
@@ -104,6 +107,10 @@ pub mod subly402_vault {
             settlement_buffer_amount,
             strategy_withdrawal_sla_sec,
         )
+    }
+
+    pub fn set_arcium_status(ctx: Context<SetArciumStatus>, status: u8) -> Result<()> {
+        instructions::set_arcium_status::handler(ctx, status)
     }
 
     pub fn record_yield_epoch(
@@ -261,6 +268,103 @@ pub mod subly402_vault {
 
     pub fn cancel_pending_budget(ctx: Context<CancelPendingBudget>) -> Result<()> {
         instructions::arcium_mirror::cancel_pending_budget_handler(ctx)
+    }
+
+    pub fn init_authorize_withdrawal_comp_def(
+        ctx: Context<AuthorizeWithdrawalCompDef>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::init_authorize_withdrawal_comp_def_handler(ctx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_withdrawal(
+        ctx: Context<AuthorizeWithdrawal>,
+        computation_offset: u64,
+        withdrawal_id: u64,
+        expires_at: i64,
+        recipient_ata: Pubkey,
+        request_x25519_pubkey: [u8; 32],
+        request_ciphertexts: [[u8; 32]; WITHDRAWAL_REQUEST_SCALARS],
+        request_ciphertext_nonce: [u8; 16],
+    ) -> Result<()> {
+        instructions::arcium_mirror::authorize_withdrawal_handler(
+            ctx,
+            computation_offset,
+            withdrawal_id,
+            expires_at,
+            recipient_ata,
+            request_x25519_pubkey,
+            request_ciphertexts,
+            request_ciphertext_nonce,
+        )
+    }
+
+    #[arcium_callback(encrypted_ix = "authorize_withdrawal")]
+    pub fn authorize_withdrawal_callback(
+        ctx: Context<AuthorizeWithdrawalCallback>,
+        output: SignedComputationOutputs<AuthorizeWithdrawalOutput>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::authorize_withdrawal_callback_handler(ctx, output)
+    }
+
+    pub fn init_reconcile_withdrawal_comp_def(
+        ctx: Context<ReconcileWithdrawalCompDef>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::init_reconcile_withdrawal_comp_def_handler(ctx)
+    }
+
+    pub fn reconcile_withdrawal(
+        ctx: Context<ReconcileWithdrawal>,
+        computation_offset: u64,
+        report_ciphertexts: [[u8; 32]; WITHDRAWAL_REPORT_SCALARS],
+        report_ciphertext_nonce: [u8; 16],
+    ) -> Result<()> {
+        instructions::arcium_mirror::reconcile_withdrawal_handler(
+            ctx,
+            computation_offset,
+            report_ciphertexts,
+            report_ciphertext_nonce,
+        )
+    }
+
+    #[arcium_callback(encrypted_ix = "reconcile_withdrawal")]
+    pub fn reconcile_withdrawal_callback(
+        ctx: Context<ReconcileWithdrawalCallback>,
+        output: SignedComputationOutputs<ReconcileWithdrawalOutput>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::reconcile_withdrawal_callback_handler(ctx, output)
+    }
+
+    pub fn init_prepare_recovery_claim_comp_def(
+        ctx: Context<PrepareRecoveryClaimCompDef>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::init_prepare_recovery_claim_comp_def_handler(ctx)
+    }
+
+    pub fn prepare_recovery_claim(
+        ctx: Context<PrepareRecoveryClaim>,
+        computation_offset: u64,
+        recovery_nonce: u64,
+        recipient_ata: Pubkey,
+    ) -> Result<()> {
+        instructions::arcium_mirror::prepare_recovery_claim_handler(
+            ctx,
+            computation_offset,
+            recovery_nonce,
+            recipient_ata,
+        )
+    }
+
+    #[arcium_callback(encrypted_ix = "prepare_recovery_claim")]
+    pub fn prepare_recovery_claim_callback(
+        ctx: Context<PrepareRecoveryClaimCallback>,
+        output: SignedComputationOutputs<PrepareRecoveryClaimOutput>,
+    ) -> Result<()> {
+        instructions::arcium_mirror::prepare_recovery_claim_callback_handler(ctx, output)
+    }
+
+    pub fn arcium_force_settle_finalize(ctx: Context<ArciumForceSettleFinalize>) -> Result<()> {
+        instructions::arcium_mirror::arcium_force_settle_finalize_handler(ctx)
     }
 
     pub fn asc_close_claim(

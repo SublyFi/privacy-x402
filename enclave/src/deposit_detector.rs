@@ -736,13 +736,15 @@ pub async fn apply_withdrawal(
             .vault
             .last_finalized_slot
             .store(withdrawal.slot, std::sync::atomic::Ordering::SeqCst);
-        state
-            .vault
-            .refresh_client_max_lock_expires_at(&withdrawal.client)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        crate::handlers::issue_client_receipt_locked(state, withdrawal.client)
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if applied.arcium_grant_id.is_none() {
+            state
+                .vault
+                .refresh_client_max_lock_expires_at(&withdrawal.client)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            crate::handlers::issue_client_receipt_locked(state, withdrawal.client)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
     }
 
     info!(

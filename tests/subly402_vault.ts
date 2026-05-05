@@ -46,6 +46,8 @@ describe("subly402_vault", () => {
   const FUND_LAMPORTS = 5_000_000; // 0.005 SOL — enough for a few signed transactions
   const HEAVY_FUND_LAMPORTS = 15_000_000; // 0.015 SOL — enough for token account creation + repeated tx fees
   const VAULT_SIGNER_FUND_LAMPORTS = 30_000_000; // 0.03 SOL — covers audit PDA rent across the suite
+  const AUDIT_RECORD_ACCOUNT_LEN = 8 + 1 + 32 + 8 + 1 + 64 + 64 + 32 + 8 + 4;
+  const AUDIT_RENT_BUFFER_LAMPORTS = 1_000_000;
 
   // Devnet-safe createAccount wrapper that skips preflight to avoid stale simulation state
   const devnetConfirmOpts = {
@@ -339,6 +341,15 @@ describe("subly402_vault", () => {
     auditRecords: AuditRecordInput[],
     auditStartIndex = 0
   ) {
+    const auditRentLamports =
+      await provider.connection.getMinimumBalanceForRentExemption(
+        AUDIT_RECORD_ACCOUNT_LEN
+      );
+    await fundAccount(
+      vaultSignerKeypair.publicKey,
+      auditRentLamports * auditRecords.length + AUDIT_RENT_BUFFER_LAMPORTS
+    );
+
     const batchChunkHash = computeBatchChunkHash(
       batchId,
       settlements,

@@ -102,6 +102,7 @@ export interface AttestationResponse {
   vaultConfig: string;
   vaultSigner: string;
   attestationPolicyHash: string;
+  arciumMode?: string;
   attestationDocument: string;
   snapshotSeqno?: number;
   tlsPublicKeySha256?: string;
@@ -123,6 +124,7 @@ export interface Subly402NitroUserDataEnvelope {
   vaultConfig: string;
   vaultSigner: string;
   attestationPolicyHash: string;
+  arciumMode?: string;
   snapshotSeqno: number;
   tlsPublicKeySha256?: string;
   manifestHash?: string;
@@ -140,6 +142,8 @@ export interface NitroAttestationDocument {
   nonceB64?: string;
   parsedSubly402UserData?: Subly402NitroUserDataEnvelope | null;
 }
+
+export type ArciumAuthorityMode = "disabled" | "mirror" | "enforced";
 
 export interface NitroAttestationConfig {
   policy?: NitroAttestationPolicy;
@@ -170,6 +174,47 @@ export interface WithdrawAuthResponse {
   expiresAt: number;
   signature: string;
   message: string;
+}
+
+export interface SetArciumModeRequest {
+  mode: ArciumAuthorityMode;
+}
+
+export interface SetArciumModeResponse {
+  ok: boolean;
+  mode: ArciumAuthorityMode;
+}
+
+export interface LoadArciumBudgetGrantRequest {
+  grantId: string;
+  client: string;
+  budgetId: number;
+  requestNonce: number;
+  remaining: number;
+  expiresAt: number;
+}
+
+export interface LoadArciumBudgetGrantResponse {
+  ok: boolean;
+  grantId: string;
+  remaining: number;
+}
+
+export interface LoadArciumWithdrawalGrantRequest {
+  grantId: string;
+  client: string;
+  withdrawalId: number;
+  recipientAta: string;
+  amount: number;
+  expiresAt: number;
+  consumed?: boolean;
+}
+
+export interface LoadArciumWithdrawalGrantResponse {
+  ok: boolean;
+  grantId: string;
+  amount: number;
+  consumed: boolean;
 }
 
 /** PAYMENT-RESPONSE header content */

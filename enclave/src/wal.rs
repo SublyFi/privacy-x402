@@ -19,8 +19,8 @@ use crate::error::EnclaveError;
 use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{
-    ClientBalance, PendingWithdrawal, ProviderRegistration, Reservation, ReservationStatus,
-    SettlementRecord,
+    ArciumAuthorityMode, ArciumBudgetGrant, ArciumWithdrawalGrant, ClientBalance,
+    PendingWithdrawal, ProviderRegistration, Reservation, ReservationStatus, SettlementRecord,
 };
 
 /// WAL entry types for Phase 1
@@ -40,6 +40,8 @@ pub enum WalEntry {
         withdraw_nonce: u64,
         issued_at: i64,
         expires_at: i64,
+        #[serde(default)]
+        arcium_grant_id: Option<String>,
     },
     WithdrawApplied {
         client: String,
@@ -70,6 +72,8 @@ pub enum WalEntry {
         created_at: Option<i64>,
         #[serde(default)]
         expires_at: Option<i64>,
+        #[serde(default)]
+        arcium_grant_id: Option<String>,
     },
     ReservationCancelled {
         verification_id: String,
@@ -124,6 +128,27 @@ pub enum WalEntry {
         max_lock_expires_at: i64,
         total_deposited: u64,
         total_withdrawn: u64,
+    },
+    ArciumModeSet {
+        mode: String,
+    },
+    ArciumBudgetGrantLoaded {
+        grant_id: String,
+        client: String,
+        budget_id: u64,
+        request_nonce: u64,
+        remaining: u64,
+        expires_at: i64,
+    },
+    ArciumWithdrawalGrantLoaded {
+        grant_id: String,
+        client: String,
+        withdrawal_id: u64,
+        recipient_ata: String,
+        amount: u64,
+        expires_at: i64,
+        #[serde(default)]
+        consumed: bool,
     },
     BatchSubmitted {
         batch_id: u64,
@@ -515,28 +540,40 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             withdraw_nonce,
             issued_at,
             expires_at,
+            arcium_grant_id,
         } => {
             let client = parse_pubkey("client", &client)?;
             let recipient_ata = parse_pubkey("recipient_ata", &recipient_ata)?;
-            state
-                .vault
-                .authorize_withdrawal(PendingWithdrawal {
-                    client,
-                    recipient_ata,
-                    amount,
-                    withdraw_nonce,
-                    issued_at,
-                    expires_at,
-                })
-                .map_err(wal_replay_error)?;
+            let withdrawal = PendingWithdrawal {
+                client,
+                recipient_ata,
+                amount,
+                withdraw_nonce,
+                issued_at,
+                expires_at,
+                arcium_grant_id: arcium_grant_id.clone(),
+            };
+            if let Some(grant_id) = arcium_grant_id.as_deref() {
+                state
+                    .vault
+                    .authorize_arcium_withdrawal_from_grant(grant_id, withdrawal, issued_at)
+                    .map_err(wal_replay_error)?;
+            } else {
+                state
+                    .vault
+                    .authorize_withdrawal(withdrawal)
+                    .map_err(wal_replay_error)?;
+            }
             state
                 .vault
                 .withdraw_nonce
                 .fetch_max(withdraw_nonce.saturating_add(1), Ordering::SeqCst);
-            state
-                .vault
-                .refresh_client_max_lock_expires_at(&client)
-                .map_err(wal_replay_error)?;
+            if arcium_grant_id.is_none() {
+                state
+                    .vault
+                    .refresh_client_max_lock_expires_at(&client)
+                    .map_err(wal_replay_error)?;
+            }
         }
         WalEntry::WithdrawApplied {
             client,
@@ -581,10 +618,12 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 .vault
                 .withdraw_nonce
                 .fetch_max(withdraw_nonce.saturating_add(1), Ordering::SeqCst);
-            state
-                .vault
-                .refresh_client_max_lock_expires_at(&client)
-                .map_err(wal_replay_error)?;
+            if applied.arcium_grant_id.is_none() {
+                state
+                    .vault
+                    .refresh_client_max_lock_expires_at(&client)
+                    .map_err(wal_replay_error)?;
+            }
         }
         WalEntry::WithdrawExpired {
             client,
@@ -601,10 +640,12 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     expired.client
                 ));
             }
-            state
-                .vault
-                .refresh_client_max_lock_expires_at(&client)
-                .map_err(wal_replay_error)?;
+            if expired.arcium_grant_id.is_none() {
+                state
+                    .vault
+                    .refresh_client_max_lock_expires_at(&client)
+                    .map_err(wal_replay_error)?;
+            }
         }
         WalEntry::ReservationCreated {
             verification_id,
@@ -617,6 +658,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             payment_details_hash,
             created_at,
             expires_at,
+            arcium_grant_id,
         } => {
             let client = parse_pubkey("client", &client)?;
             let reservation_id = reservation_id.ok_or_else(|| {
@@ -639,10 +681,17 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 "legacy ReservationCreated WAL entry missing expires_at".to_string()
             })?;
 
-            state
-                .vault
-                .reserve_balance(&client, amount)
-                .map_err(wal_replay_error)?;
+            if let Some(grant_id) = arcium_grant_id.as_deref() {
+                state
+                    .vault
+                    .reserve_arcium_budget_from_grant(grant_id, &client, amount, created_at)
+                    .map_err(wal_replay_error)?;
+            } else {
+                state
+                    .vault
+                    .reserve_balance(&client, amount)
+                    .map_err(wal_replay_error)?;
+            }
             state
                 .vault
                 .payment_id_index
@@ -663,6 +712,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     expires_at,
                     settlement_id: None,
                     settled_at: None,
+                    arcium_grant_id,
                 },
             );
         }
@@ -681,12 +731,20 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             if reservation.status == ReservationStatus::Reserved {
                 let client = reservation.client;
                 let amount = reservation.amount;
+                let arcium_grant_id = reservation.arcium_grant_id.clone();
                 reservation.status = ReservationStatus::Cancelled;
                 drop(reservation);
-                state
-                    .vault
-                    .release_balance(&client, amount)
-                    .map_err(wal_replay_error)?;
+                if let Some(grant_id) = arcium_grant_id {
+                    state
+                        .vault
+                        .release_arcium_budget(&grant_id, amount)
+                        .map_err(wal_replay_error)?;
+                } else {
+                    state
+                        .vault
+                        .release_balance(&client, amount)
+                        .map_err(wal_replay_error)?;
+                }
             } else {
                 reservation.status = ReservationStatus::Cancelled;
             }
@@ -704,12 +762,20 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             if reservation.status == ReservationStatus::Reserved {
                 let client = reservation.client;
                 let amount = reservation.amount;
+                let arcium_grant_id = reservation.arcium_grant_id.clone();
                 reservation.status = ReservationStatus::Expired;
                 drop(reservation);
-                state
-                    .vault
-                    .release_balance(&client, amount)
-                    .map_err(wal_replay_error)?;
+                if let Some(grant_id) = arcium_grant_id {
+                    state
+                        .vault
+                        .release_arcium_budget(&grant_id, amount)
+                        .map_err(wal_replay_error)?;
+                } else {
+                    state
+                        .vault
+                        .release_balance(&client, amount)
+                        .map_err(wal_replay_error)?;
+                }
             } else {
                 reservation.status = ReservationStatus::Expired;
             }
@@ -721,7 +787,7 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
             amount,
             settled_at,
         } => {
-            let (client, provider_id, amount, timestamp) = {
+            let (client, provider_id, amount, timestamp, arcium_grant_id) = {
                 let mut reservation = state
                     .vault
                     .reservations
@@ -747,18 +813,26 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                 let provider_id = reservation.provider_id.clone();
                 let amount = reservation.amount;
                 let timestamp = settled_at.unwrap_or(reservation.created_at);
+                let arcium_grant_id = reservation.arcium_grant_id.clone();
                 if reservation.status == ReservationStatus::Reserved {
                     reservation.status = ReservationStatus::SettledOffchain;
                     reservation.settlement_id = Some(settlement_id.clone());
                     reservation.settled_at = Some(timestamp);
                 }
-                (client, provider_id, amount, timestamp)
+                (client, provider_id, amount, timestamp, arcium_grant_id)
             };
 
-            state
-                .vault
-                .settle_payment(&client, amount, &provider_id, &settlement_id, timestamp)
-                .map_err(wal_replay_error)?;
+            if arcium_grant_id.is_some() {
+                state
+                    .vault
+                    .credit_provider(amount, &provider_id, &settlement_id, timestamp)
+                    .map_err(wal_replay_error)?;
+            } else {
+                state
+                    .vault
+                    .settle_payment(&client, amount, &provider_id, &settlement_id, timestamp)
+                    .map_err(wal_replay_error)?;
+            }
             let provider_pubkey = state
                 .vault
                 .providers
@@ -872,6 +946,56 @@ async fn replay_entry(state: &AppState, entry: WalEntry) -> Result<(), String> {
                     total_withdrawn,
                 },
             );
+        }
+        WalEntry::ArciumModeSet { mode } => {
+            let mode =
+                ArciumAuthorityMode::from_env_value(Some(&mode)).map_err(wal_replay_error)?;
+            state.vault.set_arcium_mode(mode);
+        }
+        WalEntry::ArciumBudgetGrantLoaded {
+            grant_id,
+            client,
+            budget_id,
+            request_nonce,
+            remaining,
+            expires_at,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            state
+                .vault
+                .load_arcium_budget_grant(ArciumBudgetGrant {
+                    grant_id,
+                    client,
+                    budget_id,
+                    request_nonce,
+                    remaining,
+                    expires_at,
+                })
+                .map_err(wal_replay_error)?;
+        }
+        WalEntry::ArciumWithdrawalGrantLoaded {
+            grant_id,
+            client,
+            withdrawal_id,
+            recipient_ata,
+            amount,
+            expires_at,
+            consumed,
+        } => {
+            let client = parse_pubkey("client", &client)?;
+            let recipient_ata = parse_pubkey("recipient_ata", &recipient_ata)?;
+            state
+                .vault
+                .load_arcium_withdrawal_grant(ArciumWithdrawalGrant {
+                    grant_id,
+                    client,
+                    withdrawal_id,
+                    recipient_ata,
+                    amount,
+                    expires_at,
+                    consumed,
+                })
+                .map_err(wal_replay_error)?;
         }
         WalEntry::BatchConfirmed {
             batch_id,

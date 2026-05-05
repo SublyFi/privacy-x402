@@ -17,8 +17,9 @@ use tracing::{info, warn};
 use crate::handlers::AppState;
 use crate::snapshot_store::SnapshotStoreClient;
 use crate::state::{
-    ChannelState, ClientBalance, PendingWithdrawal, ProviderCredit, ProviderRegistration,
-    Reservation, SettlementBatchInfo, SettlementRecord,
+    ArciumAuthorityMode, ArciumBudgetGrant, ArciumWithdrawalGrant, ChannelState, ClientBalance,
+    PendingWithdrawal, ProviderCredit, ProviderRegistration, Reservation, SettlementBatchInfo,
+    SettlementRecord,
 };
 
 const DEFAULT_SNAPSHOT_EVERY_SEC: u64 = 30;
@@ -65,6 +66,12 @@ struct StateSnapshot {
     settlement_batches: Vec<SnapshotSettlementBatch>,
     #[serde(default)]
     pending_withdrawals: Vec<PendingWithdrawal>,
+    #[serde(default)]
+    arcium_mode: Option<String>,
+    #[serde(default)]
+    arcium_budget_grants: Vec<ArciumBudgetGrant>,
+    #[serde(default)]
+    arcium_withdrawal_grants: Vec<ArciumWithdrawalGrant>,
     active_channels: Vec<ChannelState>,
     auditor_master_secret: String,
     auditor_epoch: u32,
@@ -357,6 +364,22 @@ async fn capture_snapshot(
         .collect::<Vec<_>>();
     pending_withdrawals.sort_by(|a, b| a.withdraw_nonce.cmp(&b.withdraw_nonce));
 
+    let mut arcium_budget_grants = state
+        .vault
+        .arcium_budget_grants
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect::<Vec<_>>();
+    arcium_budget_grants.sort_by(|a, b| a.grant_id.cmp(&b.grant_id));
+
+    let mut arcium_withdrawal_grants = state
+        .vault
+        .arcium_withdrawal_grants
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect::<Vec<_>>();
+    arcium_withdrawal_grants.sort_by(|a, b| a.grant_id.cmp(&b.grant_id));
+
     let mut active_channels = state
         .vault
         .active_channels
@@ -396,6 +419,9 @@ async fn capture_snapshot(
         settlement_history,
         settlement_batches,
         pending_withdrawals,
+        arcium_mode: Some(state.vault.arcium_mode().as_str().to_string()),
+        arcium_budget_grants,
+        arcium_withdrawal_grants,
         active_channels,
         auditor_master_secret: BASE64.encode(auditor_master_secret),
         auditor_epoch: state.vault.auditor_epoch.load(Ordering::SeqCst),
@@ -417,6 +443,8 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
     state.vault.settlement_history.clear();
     state.vault.settlement_batches.clear();
     state.vault.pending_withdrawals.clear();
+    state.vault.arcium_budget_grants.clear();
+    state.vault.arcium_withdrawal_grants.clear();
     state.vault.active_channels.clear();
 
     for item in &snapshot.client_balances {
@@ -472,6 +500,26 @@ async fn apply_snapshot(state: &Arc<AppState>, snapshot: &StateSnapshot) -> Resu
             .vault
             .pending_withdrawals
             .insert(withdrawal.withdraw_nonce, withdrawal.clone());
+    }
+
+    if let Some(mode) = snapshot.arcium_mode.as_deref() {
+        let arcium_mode = ArciumAuthorityMode::from_env_value(Some(mode))
+            .map_err(|error| format!("invalid arcium mode in snapshot: {error}"))?;
+        state.vault.set_arcium_mode(arcium_mode);
+    }
+
+    for grant in &snapshot.arcium_budget_grants {
+        state
+            .vault
+            .load_arcium_budget_grant(grant.clone())
+            .map_err(|error| format!("failed to restore Arcium budget grant: {error}"))?;
+    }
+
+    for grant in &snapshot.arcium_withdrawal_grants {
+        state
+            .vault
+            .load_arcium_withdrawal_grant(grant.clone())
+            .map_err(|error| format!("failed to restore Arcium withdrawal grant: {error}"))?;
     }
 
     for channel in &snapshot.active_channels {
@@ -748,6 +796,30 @@ mod tests {
                 }),
             },
         );
+        state.vault.set_arcium_mode(ArciumAuthorityMode::Enforced);
+        state
+            .vault
+            .load_arcium_budget_grant(ArciumBudgetGrant {
+                grant_id: "budget-grant".to_string(),
+                client,
+                budget_id: 1,
+                request_nonce: 2,
+                remaining: 33,
+                expires_at: 44,
+            })
+            .unwrap();
+        state
+            .vault
+            .load_arcium_withdrawal_grant(ArciumWithdrawalGrant {
+                grant_id: "withdrawal-grant".to_string(),
+                client,
+                withdrawal_id: 3,
+                recipient_ata: Pubkey::new_unique(),
+                amount: 22,
+                expires_at: 55,
+                consumed: true,
+            })
+            .unwrap();
         state.deposit_detector.mark_processed("sig-1").await;
         *state
             .deposit_detector
@@ -787,6 +859,24 @@ mod tests {
                 .unwrap()
                 .nonce,
             9
+        );
+        assert_eq!(restored.vault.arcium_mode(), ArciumAuthorityMode::Enforced);
+        assert_eq!(
+            restored
+                .vault
+                .arcium_budget_grants
+                .get("budget-grant")
+                .unwrap()
+                .remaining,
+            33
+        );
+        assert!(
+            restored
+                .vault
+                .arcium_withdrawal_grants
+                .get("withdrawal-grant")
+                .unwrap()
+                .consumed
         );
         assert!(restored.deposit_detector.is_processed("sig-1").await);
         assert_eq!(restored.vault.snapshot_seqno.load(Ordering::SeqCst), 2);

@@ -15,6 +15,7 @@ pub mod record_audit;
 pub mod record_yield_epoch;
 pub mod retire_vault;
 pub mod rotate_auditor;
+pub mod set_arcium_status;
 pub mod settle_vault;
 pub mod withdraw;
 
@@ -33,5 +34,6 @@ pub use record_audit::*;
 pub use record_yield_epoch::*;
 pub use retire_vault::*;
 pub use rotate_auditor::*;
+pub use set_arcium_status::*;
 pub use settle_vault::*;
 pub use withdraw::*;

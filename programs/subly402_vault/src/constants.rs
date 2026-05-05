@@ -50,7 +50,9 @@ pub const BUDGET_GRANT_STATE_SCALARS: usize = 9;
 pub const BUDGET_GRANT_SCALARS: usize = 15;
 pub const BUDGET_REQUEST_SCALARS: usize = 6;
 pub const RECONCILE_REPORT_SCALARS: usize = 7;
-pub const WITHDRAWAL_GRANT_STATE_SCALARS: usize = 6;
+pub const WITHDRAWAL_REQUEST_SCALARS: usize = 5;
+pub const WITHDRAWAL_REPORT_SCALARS: usize = 5;
+pub const WITHDRAWAL_GRANT_STATE_SCALARS: usize = 7;
 pub const WITHDRAWAL_GRANT_SCALARS: usize = 6;
 
 pub const COMP_DEF_OFFSET_INIT_AGENT_VAULT: u32 = comp_def_offset("init_agent_vault");
@@ -59,3 +61,6 @@ pub const COMP_DEF_OFFSET_SETTLE_YIELD: u32 = comp_def_offset("settle_yield");
 pub const COMP_DEF_OFFSET_OWNER_VIEW: u32 = comp_def_offset("owner_view");
 pub const COMP_DEF_OFFSET_AUTHORIZE_BUDGET: u32 = comp_def_offset("authorize_budget");
 pub const COMP_DEF_OFFSET_RECONCILE_BUDGET: u32 = comp_def_offset("reconcile_budget");
+pub const COMP_DEF_OFFSET_AUTHORIZE_WITHDRAWAL: u32 = comp_def_offset("authorize_withdrawal");
+pub const COMP_DEF_OFFSET_RECONCILE_WITHDRAWAL: u32 = comp_def_offset("reconcile_withdrawal");
+pub const COMP_DEF_OFFSET_PREPARE_RECOVERY_CLAIM: u32 = comp_def_offset("prepare_recovery_claim");

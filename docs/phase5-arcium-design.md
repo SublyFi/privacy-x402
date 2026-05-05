@@ -348,8 +348,8 @@ pub struct WithdrawalReport {
     pub domain_hash_lo: u128,
     pub domain_hash_hi: u128,
     pub withdrawal_id: u64,
-    pub withdrawn: u64,
-    pub refunded: u64,
+    pub withdrawn_amount: u64,
+    pub refund_remaining: u8,
 }
 
 pub struct RecoveryClaimPlaintext {
@@ -758,6 +758,10 @@ TEE behavior:
   `BudgetGrant`
 - `/verify` consumes from remaining authorized budget
 - `/settle` records provider credit as today
+- stores `withdrawal_id -> amount, recipient_ata, expires_at` after decrypting
+  `WithdrawalGrant`
+- `/withdraw-auth` signs only against an unconsumed withdrawal grant in enforced
+  mode
 - periodically submits `reconcile_budget`
 - signs provider participant receipts for unbatched provider credit as today
 - does not sign authoritative full-balance client recovery receipts; client
@@ -769,6 +773,7 @@ The attestation document must bind:
 
 - `vault_signer_pubkey`
 - `tee_x25519_pubkey`
+- `arcium_mode`
 - `arcium_program_id`
 - `mxe_account`
 - `comp_def_version`
@@ -910,11 +915,11 @@ Timing correlation:
 
 ## 12. Implementation Order
 
-1. Add Arcium project structure:
+1. [x] Add Arcium project structure:
    - `encrypted-ixs/src/lib.rs`
    - Arcium dependencies in the Anchor program
    - generated account structs and comp definition init instructions
-2. Add account types:
+2. [x] Add account types:
    - `ArciumConfig`
    - `ClientVaultState`
    - `DepositCredit`
@@ -922,31 +927,32 @@ Timing correlation:
    - `WithdrawalGrant`
    - `YieldEpoch`
    - `RecoveryClaim`
-3. Implement mirror-mode circuits:
+3. [x] Implement mirror-mode circuits:
    - `init_agent_vault`
    - `apply_deposit`
    - `settle_yield`
    - `owner_view`
-4. Add SDK encryption helpers:
+4. [x] Add SDK encryption helpers:
    - derive recoverable x25519 key from wallet signature
    - fetch MXE public key with retry
-   - encrypt budget requests with fresh nonces
-5. Implement budget authorization:
+   - encrypt budget, withdrawal, and reconcile requests with fresh nonces
+5. [x] Implement budget authorization:
    - `authorize_budget` on-chain path
    - `reconcile_budget` on-chain path
    - encrypted `BudgetGrantState`
-   - enclave grant decryption and grant cache
-6. Switch devnet to enforced mode behind config:
+   - enclave grant cache and enforced-mode spend path
+6. [x] Switch devnet to enforced mode behind config:
    - require valid `BudgetGrant` for `/verify`
    - stop returning plaintext `/balance` by default
-7. Add yield epochs:
+7. [x] Add yield epochs:
    - `YieldEpoch`
    - public cumulative yield index
    - strategy controller integration
-8. Add withdrawal authorization:
+8. [x] Add withdrawal authorization:
    - `authorize_withdrawal`
    - `reconcile_withdrawal`
-9. Add Arcium-native client recovery:
+   - enforced-mode withdrawal grant cache and `/withdraw-auth` gating
+9. [x] Add Arcium-native client recovery:
    - `prepare_recovery_claim`
    - `arcium_force_settle_finalize`
 

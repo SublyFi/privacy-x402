@@ -119,6 +119,12 @@ pub enum VaultError {
     #[msg("Invalid budget grant")]
     InvalidBudgetGrant,
 
+    #[msg("Invalid withdrawal grant")]
+    InvalidWithdrawalGrant,
+
+    #[msg("Invalid recovery claim")]
+    InvalidRecoveryClaim,
+
     #[msg("Invalid yield epoch")]
     InvalidYieldEpoch,
 

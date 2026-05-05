@@ -82,5 +82,10 @@ pub fn handler(
     arcium_config.settlement_buffer_amount = settlement_buffer_amount;
     arcium_config.strategy_withdrawal_sla_sec = strategy_withdrawal_sla_sec;
 
+    require!(
+        arcium_config.deployment_configured(),
+        VaultError::InvalidArciumConfig
+    );
+
     Ok(())
 }

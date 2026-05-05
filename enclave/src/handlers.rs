@@ -34,7 +34,10 @@ use crate::batch;
 use crate::deposit_detector::DepositDetector;
 use crate::error::EnclaveError;
 use crate::outbound::OutboundTransport;
-use crate::state::{PendingWithdrawal, Reservation, ReservationStatus, VaultLifecycle, VaultState};
+use crate::state::{
+    ArciumAuthorityMode, ArciumBudgetGrant, ArciumWithdrawalGrant, PendingWithdrawal, Reservation,
+    ReservationStatus, VaultLifecycle, VaultState,
+};
 use crate::tls::INTERNAL_MTLS_FINGERPRINT_HEADER;
 use crate::wal::{Wal, WalEntry};
 
@@ -68,6 +71,7 @@ pub struct AttestationResponse {
     pub vault_config: String,
     pub vault_signer: String,
     pub attestation_policy_hash: String,
+    pub arcium_mode: String,
     pub attestation_document: String,
     pub snapshot_seqno: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +94,7 @@ pub async fn get_attestation(State(state): State<Arc<AppState>>) -> Json<Attesta
             state.vault.vault_config,
             state.vault.vault_signer_pubkey,
             state.vault.attestation_policy_hash,
+            Some(state.vault.arcium_mode().as_str()),
             snapshot_seqno,
         )
         .expect("runtime attestation generation must succeed");
@@ -98,6 +103,7 @@ pub async fn get_attestation(State(state): State<Arc<AppState>>) -> Json<Attesta
         vault_config: state.vault.vault_config.to_string(),
         vault_signer: state.vault.vault_signer_pubkey.to_string(),
         attestation_policy_hash: hex::encode(state.vault.attestation_policy_hash),
+        arcium_mode: state.vault.arcium_mode().as_str().to_string(),
         attestation_document: runtime_attestation.document_b64,
         snapshot_seqno: runtime_attestation.snapshot_seqno,
         tls_public_key_sha256: runtime_attestation.tls_public_key_sha256,
@@ -727,13 +733,22 @@ pub async fn post_verify(
         expires_at: reservation_expires_at,
         settlement_id: None,
         settled_at: None,
+        arcium_grant_id: None,
     };
 
     {
         let _persist_guard = state.persistence_lock.lock().await;
 
-        // 8. Reserve balance
-        state.vault.reserve_balance(&client_pubkey, amount)?;
+        let arcium_grant_id = if state.vault.arcium_enforced() {
+            Some(
+                state
+                    .vault
+                    .reserve_arcium_budget(&client_pubkey, amount, now)?,
+            )
+        } else {
+            state.vault.reserve_balance(&client_pubkey, amount)?;
+            None
+        };
 
         // 10. WAL append (durable before response)
         if let Err(error) = state
@@ -749,15 +764,22 @@ pub async fn post_verify(
                 payment_details_hash: Some(hex::encode(payment_details_hash)),
                 created_at: Some(now),
                 expires_at: Some(reservation_expires_at),
+                arcium_grant_id: arcium_grant_id.clone(),
             })
             .await
         {
-            let _ = state.vault.release_balance(&client_pubkey, amount);
+            if let Some(grant_id) = arcium_grant_id.as_deref() {
+                let _ = state.vault.release_arcium_budget(grant_id, amount);
+            } else {
+                let _ = state.vault.release_balance(&client_pubkey, amount);
+            }
             return Err(EnclaveError::Internal(format!(
                 "WAL append failed: {error}"
             )));
         }
 
+        let mut reservation = reservation;
+        reservation.arcium_grant_id = arcium_grant_id;
         state
             .vault
             .reservations
@@ -766,10 +788,12 @@ pub async fn post_verify(
             .vault
             .payment_id_index
             .insert(payload.payment_id.clone(), verification_id.clone());
-        state
-            .vault
-            .refresh_client_max_lock_expires_at(&client_pubkey)?;
-        issue_client_receipt_locked(&state, client_pubkey).await?;
+        if !state.vault.arcium_enforced() {
+            state
+                .vault
+                .refresh_client_max_lock_expires_at(&client_pubkey)?;
+            issue_client_receipt_locked(&state, client_pubkey).await?;
+        }
     }
 
     let res_expires =
@@ -915,12 +939,22 @@ pub async fn post_settle(
                 }
                 let client = reservation.client;
                 let amount = reservation.amount;
+                let arcium_grant_id = reservation.arcium_grant_id.clone();
                 drop(reservation);
 
-                // Settle payment
-                state
-                    .vault
-                    .settle_payment(&client, amount, &provider_id, &settlement_id, now)?;
+                if arcium_grant_id.is_some() {
+                    state
+                        .vault
+                        .credit_provider(amount, &provider_id, &settlement_id, now)?;
+                } else {
+                    state.vault.settle_payment(
+                        &client,
+                        amount,
+                        &provider_id,
+                        &settlement_id,
+                        now,
+                    )?;
+                }
 
                 // Record settlement for audit record generation (Phase 2)
                 let provider_reg = state.vault.providers.get(&provider_id);
@@ -952,12 +986,20 @@ pub async fn post_settle(
                     .await
                     .map_err(|error| {
                         state.vault.settlement_history.remove(&settlement_id);
-                        let _ = state.vault.rollback_settle_payment(
-                            &client,
-                            amount,
-                            &provider_id,
-                            &settlement_id,
-                        );
+                        if arcium_grant_id.is_none() {
+                            let _ = state.vault.rollback_settle_payment(
+                                &client,
+                                amount,
+                                &provider_id,
+                                &settlement_id,
+                            );
+                        } else {
+                            let _ = state.vault.rollback_credit_provider(
+                                amount,
+                                &provider_id,
+                                &settlement_id,
+                            );
+                        }
                         EnclaveError::Internal(format!("WAL append failed: {error}"))
                     })?;
 
@@ -971,8 +1013,10 @@ pub async fn post_settle(
                     reservation.settlement_id = Some(settlement_id.clone());
                     reservation.settled_at = Some(now);
                 }
-                state.vault.refresh_client_max_lock_expires_at(&client)?;
-                issue_client_receipt_locked(&state, client).await?;
+                if arcium_grant_id.is_none() {
+                    state.vault.refresh_client_max_lock_expires_at(&client)?;
+                    issue_client_receipt_locked(&state, client).await?;
+                }
                 let participant_receipt = encode_receipt_envelope(
                     &issue_provider_receipt_locked(&state, &provider_id).await?,
                 )?;
@@ -1134,7 +1178,7 @@ pub async fn post_cancel(
 
     {
         let _persist_guard = state.persistence_lock.lock().await;
-        let (client, amount) = {
+        let (client, amount, arcium_grant_id) = {
             let reservation = state
                 .vault
                 .reservations
@@ -1153,11 +1197,18 @@ pub async fn post_cancel(
                     reservation.status
                 )));
             }
-            (reservation.client, reservation.amount)
+            (
+                reservation.client,
+                reservation.amount,
+                reservation.arcium_grant_id.clone(),
+            )
         };
 
-        // Release balance
-        state.vault.release_balance(&client, amount)?;
+        if let Some(grant_id) = arcium_grant_id.as_deref() {
+            state.vault.release_arcium_budget(grant_id, amount)?;
+        } else {
+            state.vault.release_balance(&client, amount)?;
+        }
 
         // WAL
         if let Err(error) = state
@@ -1168,7 +1219,16 @@ pub async fn post_cancel(
             })
             .await
         {
-            let _ = state.vault.reserve_balance(&client, amount);
+            if let Some(grant_id) = arcium_grant_id.as_deref() {
+                let _ = state.vault.reserve_arcium_budget_from_grant(
+                    grant_id,
+                    &client,
+                    amount,
+                    Utc::now().timestamp(),
+                );
+            } else {
+                let _ = state.vault.reserve_balance(&client, amount);
+            }
             return Err(EnclaveError::Internal(format!(
                 "WAL append failed: {error}"
             )));
@@ -1182,8 +1242,10 @@ pub async fn post_cancel(
                 .ok_or(EnclaveError::ReservationNotFound)?;
             reservation.status = ReservationStatus::Cancelled;
         }
-        state.vault.refresh_client_max_lock_expires_at(&client)?;
-        issue_client_receipt_locked(&state, client).await?;
+        if arcium_grant_id.is_none() {
+            state.vault.refresh_client_max_lock_expires_at(&client)?;
+            issue_client_receipt_locked(&state, client).await?;
+        }
     }
 
     let now_str = Utc::now().to_rfc3339();
@@ -1246,7 +1308,21 @@ pub async fn post_withdraw_auth(
         let _persist_guard = state.persistence_lock.lock().await;
         let withdraw_nonce = state.vault.next_withdraw_nonce();
         let now = Utc::now().timestamp();
-        let expires_at = now + 300; // 5 minutes
+        let mut expires_at = now + 300; // 5 minutes
+        let mut arcium_grant_id = None;
+        if state.vault.arcium_enforced() {
+            let (grant_id, grant_expires_at) = state.vault.select_arcium_withdrawal_grant(
+                &client,
+                &recipient_ata,
+                req.amount,
+                now,
+            )?;
+            expires_at = expires_at.min(grant_expires_at);
+            arcium_grant_id = Some(grant_id);
+        }
+        if expires_at <= now {
+            return Err(EnclaveError::InsufficientArciumWithdrawalGrant);
+        }
         let message = state.vault.build_withdraw_authorization_message(
             &client,
             &recipient_ata,
@@ -1256,14 +1332,23 @@ pub async fn post_withdraw_auth(
         );
         let signature = state.vault.sign_message(&message);
 
-        state.vault.authorize_withdrawal(PendingWithdrawal {
+        let withdrawal = PendingWithdrawal {
             client,
             recipient_ata,
             amount: req.amount,
             withdraw_nonce,
             issued_at: now,
             expires_at,
-        })?;
+            arcium_grant_id: arcium_grant_id.clone(),
+        };
+
+        if let Some(grant_id) = arcium_grant_id.as_deref() {
+            state
+                .vault
+                .authorize_arcium_withdrawal_from_grant(grant_id, withdrawal, now)?;
+        } else {
+            state.vault.authorize_withdrawal(withdrawal)?;
+        }
 
         if let Err(error) = state
             .wal
@@ -1274,6 +1359,7 @@ pub async fn post_withdraw_auth(
                 withdraw_nonce,
                 issued_at: now,
                 expires_at,
+                arcium_grant_id: arcium_grant_id.clone(),
             })
             .await
         {
@@ -1282,8 +1368,10 @@ pub async fn post_withdraw_auth(
                 "WAL append failed: {error}"
             )));
         }
-        state.vault.refresh_client_max_lock_expires_at(&client)?;
-        issue_client_receipt_locked(&state, client).await?;
+        if arcium_grant_id.is_none() {
+            state.vault.refresh_client_max_lock_expires_at(&client)?;
+            issue_client_receipt_locked(&state, client).await?;
+        }
 
         (withdraw_nonce, expires_at, signature, message)
     };
@@ -1322,6 +1410,10 @@ pub async fn post_balance(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BalanceRequest>,
 ) -> Result<Json<BalanceResponse>, EnclaveError> {
+    if state.vault.arcium_enforced() {
+        return Err(EnclaveError::ArciumBalanceUnavailable);
+    }
+
     let message = build_balance_auth_message(&req.client, req.auth.issued_at, req.auth.expires_at);
     let client = verify_client_request_auth(&req.client, &message, &req.auth)?;
 
@@ -1382,6 +1474,10 @@ pub async fn post_receipt(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReceiptRequest>,
 ) -> Result<Json<ReceiptResponse>, EnclaveError> {
+    if state.vault.arcium_enforced() {
+        return Err(EnclaveError::ArciumBalanceUnavailable);
+    }
+
     let message = build_receipt_auth_message(
         &req.client,
         &req.recipient_ata,
@@ -1826,6 +1922,173 @@ pub struct SeedBalanceResponse {
     pub locked: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetArciumModeRequest {
+    pub mode: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetArciumModeResponse {
+    pub ok: bool,
+    pub mode: String,
+}
+
+pub async fn post_set_arcium_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetArciumModeRequest>,
+) -> Result<Json<SetArciumModeResponse>, EnclaveError> {
+    let mode = ArciumAuthorityMode::from_env_value(Some(&req.mode))?;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state
+            .wal
+            .append(WalEntry::ArciumModeSet {
+                mode: mode.as_str().to_string(),
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+        state.vault.set_arcium_mode(mode);
+    }
+
+    Ok(Json(SetArciumModeResponse {
+        ok: true,
+        mode: mode.as_str().to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadArciumBudgetGrantRequest {
+    pub grant_id: String,
+    pub client: String,
+    pub budget_id: u64,
+    pub request_nonce: u64,
+    pub remaining: u64,
+    pub expires_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadArciumBudgetGrantResponse {
+    pub ok: bool,
+    pub grant_id: String,
+    pub remaining: u64,
+}
+
+pub async fn post_load_arcium_budget_grant(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadArciumBudgetGrantRequest>,
+) -> Result<Json<LoadArciumBudgetGrantResponse>, EnclaveError> {
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
+    let grant = ArciumBudgetGrant {
+        grant_id: req.grant_id.clone(),
+        client,
+        budget_id: req.budget_id,
+        request_nonce: req.request_nonce,
+        remaining: req.remaining,
+        expires_at: req.expires_at,
+    };
+
+    let applied_remaining;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state.vault.validate_arcium_budget_grant_reload(&grant)?;
+        state
+            .wal
+            .append(WalEntry::ArciumBudgetGrantLoaded {
+                grant_id: grant.grant_id.clone(),
+                client: grant.client.to_string(),
+                budget_id: grant.budget_id,
+                request_nonce: grant.request_nonce,
+                remaining: grant.remaining,
+                expires_at: grant.expires_at,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+        applied_remaining = state.vault.load_arcium_budget_grant(grant)?;
+    }
+
+    Ok(Json(LoadArciumBudgetGrantResponse {
+        ok: true,
+        grant_id: req.grant_id,
+        remaining: applied_remaining,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadArciumWithdrawalGrantRequest {
+    pub grant_id: String,
+    pub client: String,
+    pub withdrawal_id: u64,
+    pub recipient_ata: String,
+    pub amount: u64,
+    pub expires_at: i64,
+    #[serde(default)]
+    pub consumed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadArciumWithdrawalGrantResponse {
+    pub ok: bool,
+    pub grant_id: String,
+    pub amount: u64,
+    pub consumed: bool,
+}
+
+pub async fn post_load_arcium_withdrawal_grant(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoadArciumWithdrawalGrantRequest>,
+) -> Result<Json<LoadArciumWithdrawalGrantResponse>, EnclaveError> {
+    if req.amount == 0 {
+        return Err(EnclaveError::InsufficientArciumWithdrawalGrant);
+    }
+    let client = Pubkey::from_str(&req.client).map_err(|_| EnclaveError::ClientNotFound)?;
+    let recipient_ata = Pubkey::from_str(&req.recipient_ata)
+        .map_err(|_| EnclaveError::Internal("Invalid recipient ATA".into()))?;
+    let grant = ArciumWithdrawalGrant {
+        grant_id: req.grant_id.clone(),
+        client,
+        withdrawal_id: req.withdrawal_id,
+        recipient_ata,
+        amount: req.amount,
+        expires_at: req.expires_at,
+        consumed: req.consumed,
+    };
+
+    let applied_consumed;
+    {
+        let _persist_guard = state.persistence_lock.lock().await;
+        state
+            .vault
+            .validate_arcium_withdrawal_grant_reload(&grant)?;
+        state
+            .wal
+            .append(WalEntry::ArciumWithdrawalGrantLoaded {
+                grant_id: grant.grant_id.clone(),
+                client: grant.client.to_string(),
+                withdrawal_id: grant.withdrawal_id,
+                recipient_ata: grant.recipient_ata.to_string(),
+                amount: grant.amount,
+                expires_at: grant.expires_at,
+                consumed: grant.consumed,
+            })
+            .await
+            .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
+        applied_consumed = state.vault.load_arcium_withdrawal_grant(grant)?;
+    }
+
+    Ok(Json(LoadArciumWithdrawalGrantResponse {
+        ok: true,
+        grant_id: req.grant_id,
+        amount: req.amount,
+        consumed: applied_consumed,
+    }))
+}
+
 pub async fn post_seed_balance(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SeedBalanceRequest>,
@@ -2075,7 +2338,7 @@ pub(crate) async fn expire_reserved_reservation_with_lock(
     verification_id: &str,
     now: i64,
 ) -> Result<bool, EnclaveError> {
-    let (client, amount) = {
+    let (client, amount, arcium_grant_id) = {
         let reservation = state
             .vault
             .reservations
@@ -2084,7 +2347,11 @@ pub(crate) async fn expire_reserved_reservation_with_lock(
         if reservation.status != ReservationStatus::Reserved || now <= reservation.expires_at {
             return Ok(false);
         }
-        (reservation.client, reservation.amount)
+        (
+            reservation.client,
+            reservation.amount,
+            reservation.arcium_grant_id.clone(),
+        )
     };
 
     state
@@ -2107,9 +2374,13 @@ pub(crate) async fn expire_reserved_reservation_with_lock(
         reservation.status = ReservationStatus::Expired;
     }
 
-    state.vault.release_balance(&client, amount)?;
-    state.vault.refresh_client_max_lock_expires_at(&client)?;
-    issue_client_receipt_locked(state, client).await?;
+    if let Some(grant_id) = arcium_grant_id {
+        state.vault.release_arcium_budget(&grant_id, amount)?;
+    } else {
+        state.vault.release_balance(&client, amount)?;
+        state.vault.refresh_client_max_lock_expires_at(&client)?;
+        issue_client_receipt_locked(state, client).await?;
+    }
     info!(verification_id = %verification_id, "Reservation expired, balance released");
 
     Ok(true)
@@ -2143,10 +2414,12 @@ pub(crate) async fn expire_pending_withdrawal(
         .map_err(|e| EnclaveError::Internal(format!("WAL append failed: {e}")))?;
 
     let expired = state.vault.expire_pending_withdrawal(withdraw_nonce)?;
-    state
-        .vault
-        .refresh_client_max_lock_expires_at(&expired.client)?;
-    issue_client_receipt_locked(state, expired.client).await?;
+    if expired.arcium_grant_id.is_none() {
+        state
+            .vault
+            .refresh_client_max_lock_expires_at(&expired.client)?;
+        issue_client_receipt_locked(state, expired.client).await?;
+    }
 
     info!(
         client = %expired.client,
@@ -3432,6 +3705,392 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enforced_arcium_verify_and_settle_spend_loaded_budget_grant() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let settlement_token_account = Pubkey::new_unique();
+        let asset_mint = Pubkey::new_unique();
+        let provider_id = derive_open_provider_id(
+            "solana:localnet",
+            &asset_mint.to_string(),
+            &settlement_token_account.to_string(),
+        );
+
+        let _ = post_set_arcium_mode(
+            State(state.clone()),
+            Json(SetArciumModeRequest {
+                mode: "enforced".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = post_load_arcium_budget_grant(
+            State(state.clone()),
+            Json(LoadArciumBudgetGrantRequest {
+                grant_id: "budget-grant-1".to_string(),
+                client: client.to_string(),
+                budget_id: 1,
+                request_nonce: 9,
+                remaining: 1_000_000,
+                expires_at: Utc::now().timestamp() + 600,
+            }),
+        )
+        .await
+        .unwrap();
+
+        state
+            .deposit_detector
+            .is_synced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let request_context = RequestContext {
+            method: "GET".to_string(),
+            origin: "http://localhost".to_string(),
+            path_and_query: "/arcium".to_string(),
+            body_sha256: "00".repeat(32),
+        };
+        let payment_details = serde_json::json!({
+            "scheme": "subly402-svm-v1",
+            "network": "solana:localnet",
+            "amount": "600000",
+            "asset": {
+                "kind": "spl-token",
+                "mint": asset_mint.to_string(),
+                "decimals": 6,
+                "symbol": "USDC",
+            },
+            "payTo": settlement_token_account.to_string(),
+            "providerId": provider_id,
+            "facilitatorUrl": "https://localhost:3100/v1",
+            "vault": {
+                "config": state.vault.vault_config.to_string(),
+                "signer": state.vault.vault_signer_pubkey.to_string(),
+                "attestationPolicyHash": hex::encode(state.vault.attestation_policy_hash),
+            },
+            "paymentDetailsId": "paydet_arcium_enforced",
+            "verifyWindowSec": 60,
+            "maxSettlementDelaySec": 900,
+            "privacyMode": "arcium-enforced-v1",
+        });
+        let payment_details_hash = hex::encode(compute_payment_details_hash(&payment_details));
+        let request_hash = hex::encode(compute_request_hash(
+            &request_context,
+            &payment_details_hash,
+        ));
+        let mut payment_payload = PaymentPayload {
+            version: 1,
+            scheme: "subly402-svm-v1".to_string(),
+            payment_id: "pay_arcium_enforced".to_string(),
+            client: client.to_string(),
+            vault: state.vault.vault_config.to_string(),
+            provider_id: provider_id.clone(),
+            pay_to: settlement_token_account.to_string(),
+            network: "solana:localnet".to_string(),
+            asset_mint: asset_mint.to_string(),
+            amount: "600000".to_string(),
+            request_hash,
+            payment_details_hash,
+            expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            nonce: "1".to_string(),
+            client_sig: String::new(),
+        };
+        payment_payload.client_sig = sign_payment_payload(&client_signing_key, &payment_payload);
+
+        let verify_response = post_verify(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(VerifyRequest {
+                payment_payload,
+                payment_details: Some(payment_details),
+                request_context,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.vault.client_balances.get(&client).is_none());
+        let reservation = state
+            .vault
+            .reservations
+            .get(&verify_response.0.verification_id)
+            .unwrap();
+        assert_eq!(
+            reservation.arcium_grant_id.as_deref(),
+            Some("budget-grant-1")
+        );
+        drop(reservation);
+        assert_eq!(
+            state
+                .vault
+                .arcium_budget_grants
+                .get("budget-grant-1")
+                .unwrap()
+                .remaining,
+            400_000
+        );
+
+        let settle_response = post_settle(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SettleRequest {
+                verification_id: verify_response.0.verification_id,
+                result_hash: "55".repeat(32),
+                status_code: 200,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(settle_response.0.ok);
+        assert_eq!(
+            state
+                .vault
+                .provider_credits
+                .get(&provider_id)
+                .unwrap()
+                .credited_amount,
+            600_000
+        );
+
+        let issued_at = Utc::now().timestamp();
+        let expires_at = issued_at + 60;
+        let balance_message =
+            build_balance_auth_message(&client.to_string(), issued_at, expires_at);
+        let balance_error = post_balance(
+            State(state.clone()),
+            Json(BalanceRequest {
+                client: client.to_string(),
+                auth: ClientRequestAuth {
+                    issued_at,
+                    expires_at,
+                    client_sig: sign_text_message(&client_signing_key, &balance_message),
+                },
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            balance_error,
+            EnclaveError::ArciumBalanceUnavailable
+        ));
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn arcium_settle_rolls_back_provider_credit_when_wal_append_fails() {
+        let (state, wal_path) = make_app_state().await;
+        tokio::fs::create_dir_all(&wal_path).await.unwrap();
+
+        let client = Pubkey::new_unique();
+        let provider_id = "provider-arcium-wal-fail".to_string();
+        let verification_id = "ver_arcium_wal_fail".to_string();
+        let now = Utc::now().timestamp();
+
+        state.vault.set_arcium_mode(ArciumAuthorityMode::Enforced);
+        state.vault.providers.insert(
+            provider_id.clone(),
+            crate::state::ProviderRegistration {
+                provider_id: provider_id.clone(),
+                display_name: "Arcium WAL Failure Provider".to_string(),
+                participant_pubkey: None,
+                participant_attestation_policy_hash: None,
+                participant_attestation_verified_at_ms: None,
+                participant_attestation_mode: None,
+                settlement_token_account: Pubkey::new_unique(),
+                network: "solana:localnet".to_string(),
+                asset_mint: Pubkey::new_unique(),
+                allowed_origins: vec!["http://localhost".to_string()],
+                auth_mode: "none".to_string(),
+                api_key_hash: None,
+                mtls_cert_fingerprint: None,
+            },
+        );
+        state.vault.reservations.insert(
+            verification_id.clone(),
+            crate::state::Reservation {
+                verification_id: verification_id.clone(),
+                reservation_id: "res_arcium_wal_fail".to_string(),
+                payment_id: "pay_arcium_wal_fail".to_string(),
+                client,
+                provider_id: provider_id.clone(),
+                amount: 700_000,
+                request_hash: [1u8; 32],
+                payment_details_hash: [2u8; 32],
+                status: ReservationStatus::Reserved,
+                created_at: now,
+                expires_at: now + 60,
+                settlement_id: None,
+                settled_at: None,
+                arcium_grant_id: Some("budget-grant-wal-fail".to_string()),
+            },
+        );
+
+        let error = post_settle(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SettleRequest {
+                verification_id: verification_id.clone(),
+                result_hash: "55".repeat(32),
+                status_code: 200,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, EnclaveError::Internal(_)));
+        assert!(state.vault.provider_credits.get(&provider_id).is_none());
+        assert!(state.vault.settlement_history.is_empty());
+        let reservation = state.vault.reservations.get(&verification_id).unwrap();
+        assert_eq!(reservation.status, ReservationStatus::Reserved);
+        assert!(reservation.settlement_id.is_none());
+        assert!(reservation.settled_at.is_none());
+
+        let _ = tokio::fs::remove_dir_all(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn arcium_grant_reloads_are_monotonic() {
+        let (state, wal_path) = make_app_state().await;
+        let client = Pubkey::new_unique();
+        let recipient_ata = Pubkey::new_unique();
+        let grant_expires_at = Utc::now().timestamp() + 600;
+
+        let first_budget = post_load_arcium_budget_grant(
+            State(state.clone()),
+            Json(LoadArciumBudgetGrantRequest {
+                grant_id: "budget-grant-monotonic".to_string(),
+                client: client.to_string(),
+                budget_id: 1,
+                request_nonce: 2,
+                remaining: 1_000,
+                expires_at: grant_expires_at,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_budget.0.remaining, 1_000);
+
+        state
+            .vault
+            .reserve_arcium_budget_from_grant(
+                "budget-grant-monotonic",
+                &client,
+                400,
+                Utc::now().timestamp(),
+            )
+            .unwrap();
+
+        let duplicate_budget = post_load_arcium_budget_grant(
+            State(state.clone()),
+            Json(LoadArciumBudgetGrantRequest {
+                grant_id: "budget-grant-monotonic".to_string(),
+                client: client.to_string(),
+                budget_id: 1,
+                request_nonce: 2,
+                remaining: 1_000,
+                expires_at: grant_expires_at,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(duplicate_budget.0.remaining, 600);
+        assert_eq!(
+            state
+                .vault
+                .arcium_budget_grants
+                .get("budget-grant-monotonic")
+                .unwrap()
+                .remaining,
+            600
+        );
+
+        let lower_budget = post_load_arcium_budget_grant(
+            State(state.clone()),
+            Json(LoadArciumBudgetGrantRequest {
+                grant_id: "budget-grant-monotonic".to_string(),
+                client: client.to_string(),
+                budget_id: 1,
+                request_nonce: 2,
+                remaining: 500,
+                expires_at: grant_expires_at,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(lower_budget.0.remaining, 500);
+
+        let conflicting_budget = post_load_arcium_budget_grant(
+            State(state.clone()),
+            Json(LoadArciumBudgetGrantRequest {
+                grant_id: "budget-grant-monotonic".to_string(),
+                client: client.to_string(),
+                budget_id: 1,
+                request_nonce: 99,
+                remaining: 500,
+                expires_at: grant_expires_at,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(conflicting_budget, EnclaveError::Internal(_)));
+
+        let first_withdrawal = post_load_arcium_withdrawal_grant(
+            State(state.clone()),
+            Json(LoadArciumWithdrawalGrantRequest {
+                grant_id: "withdrawal-grant-monotonic".to_string(),
+                client: client.to_string(),
+                withdrawal_id: 7,
+                recipient_ata: recipient_ata.to_string(),
+                amount: 250,
+                expires_at: grant_expires_at,
+                consumed: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!first_withdrawal.0.consumed);
+
+        state
+            .vault
+            .authorize_arcium_withdrawal_from_grant(
+                "withdrawal-grant-monotonic",
+                PendingWithdrawal {
+                    client,
+                    recipient_ata,
+                    amount: 250,
+                    withdraw_nonce: 1,
+                    issued_at: Utc::now().timestamp(),
+                    expires_at: Utc::now().timestamp() + 60,
+                    arcium_grant_id: None,
+                },
+                Utc::now().timestamp(),
+            )
+            .unwrap();
+
+        let duplicate_withdrawal = post_load_arcium_withdrawal_grant(
+            State(state.clone()),
+            Json(LoadArciumWithdrawalGrantRequest {
+                grant_id: "withdrawal-grant-monotonic".to_string(),
+                client: client.to_string(),
+                withdrawal_id: 7,
+                recipient_ata: recipient_ata.to_string(),
+                amount: 250,
+                expires_at: grant_expires_at,
+                consumed: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(duplicate_withdrawal.0.consumed);
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
     async fn withdraw_auth_locks_balance_until_expiry() {
         let (state, wal_path) = make_app_state().await;
         let client_signing_key = SigningKey::generate(&mut OsRng);
@@ -3528,6 +4187,131 @@ mod tests {
         assert_eq!(balance.total_withdrawn, 0);
         assert_eq!(balance.max_lock_expires_at, 0);
         drop(balance);
+        assert!(state
+            .vault
+            .pending_withdrawals
+            .get(&response.0.withdraw_nonce)
+            .is_none());
+
+        let _ = tokio::fs::remove_file(wal_path).await;
+    }
+
+    #[tokio::test]
+    async fn enforced_arcium_withdraw_auth_requires_and_consumes_withdrawal_grant() {
+        let (state, wal_path) = make_app_state().await;
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client = Pubkey::new_from_array(client_signing_key.verifying_key().to_bytes());
+        let recipient_ata = Pubkey::new_unique();
+
+        let _ = post_set_arcium_mode(
+            State(state.clone()),
+            Json(SetArciumModeRequest {
+                mode: "enforced".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let issued_at = Utc::now().timestamp();
+        let expires_at = issued_at + 60;
+        let auth_message = build_withdraw_auth_message(
+            &client.to_string(),
+            &recipient_ata.to_string(),
+            500_000,
+            issued_at,
+            expires_at,
+        );
+        let missing_grant_error = post_withdraw_auth(
+            State(state.clone()),
+            Json(WithdrawAuthRequest {
+                client: client.to_string(),
+                recipient_ata: recipient_ata.to_string(),
+                amount: 500_000,
+                auth: ClientRequestAuth {
+                    issued_at,
+                    expires_at,
+                    client_sig: sign_text_message(&client_signing_key, &auth_message),
+                },
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            missing_grant_error,
+            EnclaveError::InsufficientArciumWithdrawalGrant
+        ));
+
+        let grant_expires_at = Utc::now().timestamp() + 600;
+        let _ = post_load_arcium_withdrawal_grant(
+            State(state.clone()),
+            Json(LoadArciumWithdrawalGrantRequest {
+                grant_id: "withdraw-grant-1".to_string(),
+                client: client.to_string(),
+                withdrawal_id: 7,
+                recipient_ata: recipient_ata.to_string(),
+                amount: 500_000,
+                expires_at: grant_expires_at,
+                consumed: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let issued_at = Utc::now().timestamp();
+        let expires_at = issued_at + 60;
+        let auth_message = build_withdraw_auth_message(
+            &client.to_string(),
+            &recipient_ata.to_string(),
+            500_000,
+            issued_at,
+            expires_at,
+        );
+        let response = post_withdraw_auth(
+            State(state.clone()),
+            Json(WithdrawAuthRequest {
+                client: client.to_string(),
+                recipient_ata: recipient_ata.to_string(),
+                amount: 500_000,
+                auth: ClientRequestAuth {
+                    issued_at,
+                    expires_at,
+                    client_sig: sign_text_message(&client_signing_key, &auth_message),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(state.vault.client_balances.get(&client).is_none());
+        let pending = state
+            .vault
+            .pending_withdrawals
+            .get(&response.0.withdraw_nonce)
+            .unwrap();
+        assert_eq!(pending.arcium_grant_id.as_deref(), Some("withdraw-grant-1"));
+        drop(pending);
+        let grant = state
+            .vault
+            .arcium_withdrawal_grants
+            .get("withdraw-grant-1")
+            .unwrap();
+        assert!(grant.consumed);
+        drop(grant);
+
+        assert!(expire_pending_withdrawal(
+            &state,
+            response.0.withdraw_nonce,
+            response.0.expires_at + 1
+        )
+        .await
+        .unwrap());
+        let grant = state
+            .vault
+            .arcium_withdrawal_grants
+            .get("withdraw-grant-1")
+            .unwrap();
+        assert!(!grant.consumed);
         assert!(state
             .vault
             .pending_withdrawals
@@ -4801,6 +5585,7 @@ mod tests {
                 payment_details_hash: Some("22".repeat(32)),
                 created_at: Some(1_700_000_000),
                 expires_at: Some(1_700_000_060),
+                arcium_grant_id: None,
             })
             .await
             .unwrap();

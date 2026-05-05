@@ -13,7 +13,7 @@ Privacy-first x402 client SDK for Solana. Pays paid APIs through a TEE-based vau
 yarn add subly402-sdk
 ```
 
-The default import path is the x402-like Buyer SDK and uses `@solana/kit` signers. Advanced direct-vault and audit helpers live behind `subly402-sdk/vault` and `subly402-sdk/audit`; those optional paths require the legacy Solana/Anchor dependencies.
+The default import path is the x402-like Buyer SDK and uses `@solana/kit` signers. Advanced direct-vault, audit, and Arcium helpers live behind `subly402-sdk/vault`, `subly402-sdk/audit`, and `subly402-sdk/arcium`; those optional paths require their matching Solana/Anchor/Arcium dependencies.
 
 ## Quickstart for Buyers
 
@@ -78,6 +78,31 @@ If `autoDeposit` is disabled, the buyer must already have spendable balance in t
 - Receipt / withdrawal signatures are Ed25519-signed by the in-enclave vault signer.
 
 See [`docs/quickstart.md`](../docs/quickstart.md) for a full walkthrough and the current privacy threat model.
+
+## Arcium helpers
+
+Arcium support is exposed as an optional subpath so normal x402 buyers do not load Arcium dependencies:
+
+```ts
+import {
+  createArciumSharedCipher,
+  deriveArciumX25519Keypair,
+  encryptArciumBudgetRequest,
+  encryptArciumWithdrawalRequest,
+  fetchArciumMxePublicKeyWithRetry,
+  splitU256Le,
+} from "subly402-sdk/arcium";
+```
+
+```ts
+const arciumKeys = await deriveArciumX25519Keypair(signer, {
+  programId: "3iusaL6ys79DsbpweDwGhHvtjdnhAhtpyczPtMbu5Mbe",
+  vaultConfig: paymentDetails.vault.config,
+  derivationScope: "subly402:owner-view:v1",
+});
+```
+
+Install `@arcium-hq/client@0.9.7` and run this subpath on Node.js >=20.18.0. The helpers derive a recoverable x25519 key from `signMessages`, `signMessage`, or `secretKey`; bind the derivation message to a program, vault, wallet, and caller-supplied scope; encrypt budget, withdrawal, and reconcile payloads in circuit argument order; and expose decryptors for owner, budget grant, and withdrawal grant views. Enforced-mode control-plane payloads are exported as TypeScript types: `SetArciumModeRequest`, `LoadArciumBudgetGrantRequest`, and `LoadArciumWithdrawalGrantRequest`.
 
 ## License
 

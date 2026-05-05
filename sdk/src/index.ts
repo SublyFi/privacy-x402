@@ -22,6 +22,7 @@ export {
 } from "./crypto";
 export type {
   Subly402NitroUserDataEnvelope,
+  ArciumAuthorityMode,
   AttestationResponse,
   BalanceResponse,
   ChannelDeliverResponse,
@@ -40,7 +41,13 @@ export type {
   NitroAttestationConfig,
   NitroAttestationDocument,
   NitroAttestationPolicy,
+  LoadArciumBudgetGrantRequest,
+  LoadArciumBudgetGrantResponse,
+  LoadArciumWithdrawalGrantRequest,
+  LoadArciumWithdrawalGrantResponse,
   SettleResponse,
+  SetArciumModeRequest,
+  SetArciumModeResponse,
   Subly402AutoDepositConfig,
   Subly402AutoDepositContext,
   Subly402ClientConfig,

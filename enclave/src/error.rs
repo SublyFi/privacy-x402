@@ -7,6 +7,15 @@ pub enum EnclaveError {
     #[error("Insufficient client balance")]
     InsufficientBalance,
 
+    #[error("Insufficient Arcium budget grant")]
+    InsufficientArciumBudget,
+
+    #[error("Insufficient Arcium withdrawal grant")]
+    InsufficientArciumWithdrawalGrant,
+
+    #[error("Plaintext client balance is unavailable in Arcium enforced mode")]
+    ArciumBalanceUnavailable,
+
     #[error("Client not found")]
     ClientNotFound,
 
@@ -154,6 +163,16 @@ impl IntoResponse for EnclaveError {
         let (status, error_code) = match &self {
             EnclaveError::InsufficientBalance => {
                 (StatusCode::PAYMENT_REQUIRED, "insufficient_balance")
+            }
+            EnclaveError::InsufficientArciumBudget => {
+                (StatusCode::PAYMENT_REQUIRED, "insufficient_arcium_budget")
+            }
+            EnclaveError::InsufficientArciumWithdrawalGrant => (
+                StatusCode::PAYMENT_REQUIRED,
+                "insufficient_arcium_withdrawal_grant",
+            ),
+            EnclaveError::ArciumBalanceUnavailable => {
+                (StatusCode::CONFLICT, "arcium_balance_unavailable")
             }
             EnclaveError::ClientNotFound => (StatusCode::BAD_REQUEST, "client_not_found"),
             EnclaveError::ProviderNotFound => (StatusCode::BAD_REQUEST, "provider_not_found"),
