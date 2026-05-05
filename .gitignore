@@ -28,3 +28,4 @@ infra/nitro/generated
 sdk/dist
 middleware/dist
 provider.env
+artifacts

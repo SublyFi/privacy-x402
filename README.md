@@ -1,3 +1,9 @@
+```
+旧 VaultConfig: 6i5SyF8Hx2u5MZW2JgWGhdg5CJsAKeF7UaRAd9bERDDL
+旧 Vault ATA:   76YBLxs4EBrvbiP9RT6vH66i6qZb9b67hUdoajjqz5u
+
+```
+
 # A402 / Privacy First x402 on Solana
 
 このリポジトリは、Solana Devnet 上で `Privacy First x402` を AWS Nitro Enclaves 前提で公開するための実装です。
@@ -53,7 +59,7 @@ const facilitator = new Subly402FacilitatorClient({
 
 const resourceServer = new Subly402ResourceServer(facilitator).register(
   "solana:*",
-  new Subly402ExactScheme()
+  new Subly402ExactScheme(),
 );
 
 app.use(
@@ -70,8 +76,8 @@ app.use(
         ],
       },
     },
-    resourceServer
-  )
+    resourceServer,
+  ),
 );
 ```
 
